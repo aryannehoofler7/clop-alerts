@@ -93,14 +93,23 @@ alerting the monitor already does — the same hazard the existing fresh-login w
 populated from `$_POST` only, so a bare GET falls through to `(int)$_GET['alliance_id']` and
 looks up alliance 0. The id has to be supplied.
 
-Two read-only hops obtain it:
+Read-only hops obtain it:
 
-- **Own `nation_id`** — free. `header.php:186-192` renders a `switchnation_id` selector whose
-  selected option is `$_SESSION['nation_id']`, and the header is already on the `index.php` the
-  monitor fetches every poll.
+- **Own `nation_id`** — usually free. `header.php:186-192` renders a `switchnation_id` selector
+  whose selected option is `$_SESSION['nation_id']`, and the header is already on the `index.php`
+  the monitor fetches every poll. But `header.php:182` renders that selector **only when the
+  account has more than one nation**; a single-nation account gets `<li><a>Name</a></li>` with no
+  id at all. In that case fall back to `empireoverview.php`, which renders a
+  `switchnation_id` button carrying the `nation_id` of every nation on the account whatever the
+  count (`empireoverview.php:36`), and whose backend contains no `INSERT`, `UPDATE`, or `DELETE`
+  at all. Exactly one button means exactly one nation, so no name matching is needed.
 - **Own `alliance_id`** — `viewnation.php?nation_id=<mine>` renders
   `viewalliance.php?alliance_id=N` (`viewnation.php:23`). `backend_viewnation.php` contains no
   `INSERT`, `UPDATE`, or `DELETE` and reads no `$_POST` at all.
+
+Only three pages link an alliance by id — `alliances.php`, `viewnation.php`, and
+`viewuser.php` — and of those only `viewnation.php` can be reached from what the monitor already
+knows, which is why the route goes through the nation rather than the user.
 
 ## Design
 
@@ -141,9 +150,13 @@ facts rather than one colour:
   by the buyer also being a friend or an enemy.
 
 The roster comes from one GET of `viewalliance.php?alliance_id=<mine>` per poll, with
-`alliance_id` resolved once at startup through the two read-only hops described above and cached
+`alliance_id` resolved once at startup through the read-only hops described above and cached
 for the process lifetime. The roster itself is re-read every poll, because members join and
 leave while the monitor runs.
+
+When no roster is fetched — because no watched good sets `alliance: true` — `is_ally` falls back
+to the green colour, which is a correct positive and an incomplete negative. Nothing consults it
+in that case except the alert label, which is then reporting only what was actually looked up.
 
 The roster fetch is skipped entirely when no watched good sets `alliance: true` — a settings-level
 test, so there is no per-row conditional-fetch logic to reason about. Leaving or joining an
