@@ -1820,5 +1820,81 @@ class MarketDecisionTests(unittest.TestCase):
         self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
 
 
+class MarketAlertTests(unittest.TestCase):
+    def snapshot(self, *orders):
+        return Snapshot(0, 0, None, None, None, False, (), tuple(orders))
+
+    def settings(self, *goods):
+        return AlertCategorySettings(market_goods=tuple(goods))
+
+    def test_matching_orders_become_one_block_per_good(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Machinery Parts", 42, "Luna Sueno", 12, 5000,
+                                     is_friend=True),
+            clop_monitor.MarketOrder("Machinery Parts", 7, "Ally Nation", 3, 4800,
+                                     is_ally=True),
+        )
+        alerts = build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Machinery Parts")))
+        self.assertEqual(
+            alerts,
+            [
+                "Buy orders for Machinery Parts:\n"
+                "  Luna Sueno (friend) wants 12 at 5,000 bits each\n"
+                "  Ally Nation (alliance) wants 3 at 4,800 bits each\n"
+                "https://4clop.org/buyermarketplace.php"
+            ],
+        )
+
+    def test_a_buyer_who_is_both_is_labelled_as_both(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 42, "Both Nation", 40, 4500,
+                                     is_friend=True, is_ally=True),
+        )
+        alerts = build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil")))
+        self.assertIn("Both Nation (friend, alliance) wants 40 at 4,500 bits each", alerts[0])
+
+    def test_a_good_with_no_matching_orders_produces_no_block(self):
+        current = self.snapshot(clop_monitor.MarketOrder("Oil", 5, "Stranger", 1, 100))
+        self.assertEqual(
+            build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil"))), []
+        )
+
+    def test_each_good_gets_its_own_block(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True),
+            clop_monitor.MarketOrder("Apples", 2, "B", 2, 200, is_friend=True),
+        )
+        alerts = build_alerts(
+            None,
+            current,
+            self.settings(clop_monitor.WatchedGood("Oil"), clop_monitor.WatchedGood("Apples")),
+        )
+        self.assertEqual(len(alerts), 2)
+        self.assertTrue(alerts[0].startswith("Buy orders for Oil:"))
+        self.assertTrue(alerts[1].startswith("Buy orders for Apples:"))
+
+    def test_the_market_category_can_be_disabled(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True)
+        )
+        settings = AlertCategorySettings(
+            market_orders=False, market_goods=(clop_monitor.WatchedGood("Oil"),)
+        )
+        self.assertEqual(build_alerts(None, current, settings), [])
+
+    def test_market_orders_alert_on_every_poll_while_pending(self):
+        order = clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True)
+        settings = self.settings(clop_monitor.WatchedGood("Oil"))
+        previous = self.snapshot(order)
+        current = self.snapshot(order)
+        self.assertEqual(len(build_alerts(previous, current, settings)), 1)
+
+    def test_market_orders_are_not_persisted(self):
+        snapshot = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True)
+        )
+        self.assertNotIn("market_orders", snapshot.to_json())
+
+
 if __name__ == "__main__":
     unittest.main()

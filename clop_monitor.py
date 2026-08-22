@@ -937,6 +937,9 @@ class Snapshot:
     reports_checked: bool = False
     #: Every report row read this poll, newest first. Not persisted: only the marker above is.
     report_rows: Tuple[Tuple[str, str], ...] = ()
+    #: Every watched good's pending buy orders this poll. Not persisted: alerting is
+    #: every-poll, so there is no baseline to keep.
+    market_orders: Tuple[MarketOrder, ...] = ()
 
     def to_json(self) -> Dict[str, object]:
         return {
@@ -1222,6 +1225,20 @@ def build_alerts(
                 f"New CLOP report ({posted}): {preview}\n"
                 "https://4clop.org/reports.php"
             )
+    if settings.market_orders:
+        for good in settings.market_goods:
+            lines = [
+                f"  {order.nation_name} ({order.relation_label()}) "
+                f"wants {order.amount:,} at {order.price:,} bits each"
+                for order in current.market_orders
+                if order.good == good.name and market_order_alerts(order, good)
+            ]
+            if lines:
+                alerts.append(
+                    f"Buy orders for {good.name}:\n"
+                    + "\n".join(lines)
+                    + "\nhttps://4clop.org/buyermarketplace.php"
+                )
     if (
         current.fourchan_post is not None
         and previous is not None
