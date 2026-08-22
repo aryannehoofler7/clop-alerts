@@ -1758,5 +1758,67 @@ class MarketFormParsingTests(unittest.TestCase):
         )
 
 
+class MarketDecisionTests(unittest.TestCase):
+    """never beats always; always beats both relation checks; the two checks are independent."""
+
+    def order(self, name="Luna Sueno", **flags):
+        return clop_monitor.MarketOrder("Oil", 1, name, 5, 1000, **flags)
+
+    def decide(self, order, **knobs):
+        return clop_monitor.market_order_alerts(order, clop_monitor.WatchedGood("Oil", **knobs))
+
+    def test_a_friend_alerts_when_friends_is_on(self):
+        self.assertTrue(self.decide(self.order(is_friend=True), friends=True, alliance=False))
+
+    def test_a_friend_is_silent_when_friends_is_off(self):
+        self.assertFalse(self.decide(self.order(is_friend=True), friends=False, alliance=False))
+
+    def test_an_ally_alerts_when_alliance_is_on(self):
+        self.assertTrue(self.decide(self.order(is_ally=True), friends=False, alliance=True))
+
+    def test_an_ally_is_silent_when_alliance_is_off(self):
+        self.assertFalse(self.decide(self.order(is_ally=True), friends=True, alliance=False))
+
+    def test_a_friend_who_is_also_an_ally_alerts_on_the_alliance_check_alone(self):
+        # The case that motivated splitting the checks: the game paints this buyer blue, so
+        # a colour-only reading would have hidden them from "only my alliance".
+        order = self.order(is_friend=True, is_ally=True)
+        self.assertTrue(self.decide(order, friends=False, alliance=True))
+
+    def test_a_friend_who_is_also_an_ally_alerts_on_the_friend_check_alone(self):
+        order = self.order(is_friend=True, is_ally=True)
+        self.assertTrue(self.decide(order, friends=True, alliance=False))
+
+    def test_a_stranger_is_silent(self):
+        self.assertFalse(self.decide(self.order(), friends=True, alliance=True))
+
+    def test_an_enemy_is_silent(self):
+        self.assertFalse(self.decide(self.order(is_enemy=True), friends=True, alliance=True))
+
+    def test_an_always_name_alerts_with_both_checks_off(self):
+        self.assertTrue(
+            self.decide(self.order(), friends=False, alliance=False, always=("Luna %",))
+        )
+
+    def test_an_always_name_alerts_even_for_an_enemy(self):
+        self.assertTrue(
+            self.decide(self.order(is_enemy=True), friends=False, alliance=False,
+                        always=("Luna Sueno",))
+        )
+
+    def test_a_never_name_silences_a_friend(self):
+        self.assertFalse(
+            self.decide(self.order(is_friend=True), friends=True, never=("Luna %",))
+        )
+
+    def test_never_beats_always(self):
+        self.assertFalse(
+            self.decide(self.order(), always=("Luna Sueno",), never=("Luna Sueno",))
+        )
+
+    def test_name_patterns_ignore_case(self):
+        self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
+
+
 if __name__ == "__main__":
     unittest.main()

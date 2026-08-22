@@ -1174,6 +1174,23 @@ def save_snapshot(path: Path, snapshot: Snapshot) -> None:
         raise MonitorError(f"Could not write state file {path}: {error}") from error
 
 
+def market_order_alerts(order: MarketOrder, good: WatchedGood) -> bool:
+    """Whether one buy order raises an alert under this good's settings.
+
+    never is absolute, which is what "never alert on" says; always then beats both relation
+    checks, so both of them off with a populated always reads as "only these nations,
+    whoever they are". The two relation checks are independent, so a buyer who is both a
+    friend and an ally satisfies either one on its own.
+    """
+    if matches_any_pattern(order.nation_name, good.never):
+        return False
+    if matches_any_pattern(order.nation_name, good.always):
+        return True
+    if good.friends and order.is_friend:
+        return True
+    return good.alliance and order.is_ally
+
+
 def build_alerts(
     previous: Optional[Snapshot],
     current: Snapshot,
