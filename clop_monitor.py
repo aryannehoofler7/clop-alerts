@@ -631,7 +631,12 @@ def parse_market_orders(
 
 
 class HiddenFieldParser(HTMLParser):
-    """The value of the first input with a given name."""
+    """The value of the first hidden input with a given name.
+
+    Only ``type="hidden"`` counts: a submit button carries the same name as the field it
+    submits, and its value is the button's label, so accepting one would quietly send the
+    label back as the CSRF token or the mode.
+    """
 
     def __init__(self, name: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -642,6 +647,8 @@ class HiddenFieldParser(HTMLParser):
         if tag.lower() != "input" or self.value is not None:
             return
         attributes = dict(attrs)
+        if (attributes.get("type") or "").lower() != "hidden":
+            return
         if (attributes.get("name") or "").lower() == self.name:
             self.value = attributes.get("value") or ""
 

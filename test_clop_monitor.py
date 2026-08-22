@@ -1692,6 +1692,19 @@ class MarketFormParsingTests(unittest.TestCase):
     def test_an_absent_hidden_field_is_none(self):
         self.assertIsNone(clop_monitor.parse_hidden_field(MARKET_FORM, "token_absent"))
 
+    def test_a_visible_input_of_the_same_name_is_not_a_hidden_field(self):
+        # Submit buttons share the form's names, and their value is the button label rather
+        # than the state we came for, so reading one would silently POST the wrong thing.
+        self.assertIsNone(
+            clop_monitor.parse_hidden_field(
+                '<input type="submit" name="mode" value="Go"/>', "mode"
+            )
+        )
+
+    def test_a_visible_input_does_not_shadow_the_hidden_one_behind_it(self):
+        html = '<input type="submit" name="mode" value="Go"/>' + MARKET_FORM
+        self.assertEqual(clop_monitor.parse_hidden_field(html, "mode"), "")
+
     def test_good_names_map_to_resource_ids_without_the_have_suffix(self):
         self.assertEqual(
             clop_monitor.parse_good_ids(MARKET_FORM),
