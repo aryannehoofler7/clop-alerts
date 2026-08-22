@@ -1443,6 +1443,17 @@ class MarketFetchTests(unittest.TestCase):
         self.assertEqual(client._alliance_roster(), frozenset())
         self.assertEqual(calls, [])
 
+    def test_an_empty_fetched_roster_is_a_failure_not_a_membership_of_none(self):
+        # Your own nation is always on your own alliance page, so nothing there means the
+        # fetch failed. Returning it would demote every ally to a stranger and silently
+        # stop the alerts this feature exists for.
+        client, _ = self.client(
+            {"viewalliance.php?alliance_id=7": "<h3>Alliance</h3><table></table>"},
+            alliance_id=7,
+        )
+        with self.assertRaisesRegex(MonitorError, "listed no member nations"):
+            client._alliance_roster()
+
     def test_a_snapshot_without_market_goods_makes_no_market_requests(self):
         navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
         client, calls = self.client(
@@ -1516,9 +1527,19 @@ Add these methods to `ClopClient`, after `_latest_fourchan_post` (i.e. after lin
         """
         if not self.alliance_id:
             return frozenset()
-        return parse_alliance_nation_ids(
+        roster = parse_alliance_nation_ids(
             self._open(f"viewalliance.php?alliance_id={self.alliance_id}")
         )
+        # You are a member of the alliance you looked up, so your own nation is always in
+        # that table: an empty parse means the fetch failed, not that the alliance is empty.
+        # A fetched roster is treated as authoritative, so returning an empty one would
+        # demote every ally to a stranger and silently stop the alerts this feature exists
+        # for.
+        if not roster:
+            raise MonitorError(
+                f"The alliance page for alliance {self.alliance_id} listed no member nations"
+            )
+        return roster
 
     def _market_orders(self, roster: Optional[FrozenSet[int]]) -> Tuple[MarketOrder, ...]:
         """Every pending buy order for the watched goods.

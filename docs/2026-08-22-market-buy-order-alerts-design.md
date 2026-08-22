@@ -158,6 +158,17 @@ When no roster is fetched — because no watched good sets `alliance: true` — 
 to the green colour, which is a correct positive and an incomplete negative. Nothing consults it
 in that case except the alert label, which is then reporting only what was actually looked up.
 
+**A fetched roster is never empty, and an empty one is a failure.** You are a member of the
+alliance you are looking up, so your own nation is always in that member table
+(`viewalliance.php:70`). An empty parse therefore means the fetch failed — an error page, an
+expired session, drifted markup — not that the alliance is empty. This matters because a fetched
+roster is treated as authoritative: an empty-but-successful-looking roster would demote every
+genuine ally to a stranger, and the monitor would quietly stop alerting on exactly the case the
+feature exists for. Silent degradation is the worst failure mode for a monitor, so the fetch
+raises `MonitorError` on an empty result rather than returning it, the way `parse_pending_counts`
+already raises when the structure it needs has gone. A nation with **no** alliance is a different
+thing entirely: it never fetches at all, and its empty roster is legitimate.
+
 The roster fetch is skipped entirely when no watched good sets `alliance: true` — a settings-level
 test, so there is no per-row conditional-fetch logic to reason about. Leaving or joining an
 alliance mid-run is not detected; restart the monitor.
