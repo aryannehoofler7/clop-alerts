@@ -20,9 +20,11 @@ Three structural facts matter more than the individual sites:
 
 1. **A report is usually several sentences, not one.** `backend_actions.php:246` builds the row as
    `implode("<br/>", $infos)` — every on-page message from that action, joined. So one finished
-   build arrives as `You spent 20 Machinery Parts. You paid 50,000 bits. Build Advanced Factory
-   completed successfully.` after the monitor flattens it. **One matching ignore-pattern silences
-   the whole row**, so a pattern per sentence is unnecessary.
+   build arrives as the three lines `You spent 20 Machinery Parts.` / `You paid 50,000 bits.` /
+   `Build Advanced Factory completed successfully.`. The monitor judges a report **one line at a
+   time** (`docs/2026-08-23-per-line-report-judging-design.md`), so silencing that report takes a
+   pattern for each of the three — and a report that also contained a warning would still alert,
+   showing the warning alone.
 2. **`reports.php` merges reports sharing a timestamp** (`backend_reports.php:5-12`), joining them
    with `<br/>`. A tick can surface as one large block.
 3. **`cron/frequent.php:808` deletes reports older than 24 hours**, so the page is never a complete
@@ -85,10 +87,16 @@ for the common ones, all commented out.
 - `You spent % %.` / `You gained % %.` / `You paid % bits.` / `You gained % bits.`
 - `You gained % % from your % %.` / `Your % % used up % %.` — per-tick production and consumption
 - `Your relationship with the % has improved due to your %. (%)` — also `dwindled`, `recovered`,
-  `worsened`, plus "can't get any better/worse" variants at the caps
-- `Your population's satisfaction has improved due to your %. (%)` — same four words
-- `Show Details` / `Hide Details` / `Change in Satisfaction: %` / `Change in SE Relation: %` — the
-  per-tick wrapper
+  `worsened`, plus the two cap variants `Your relationship with the % can't get any better, despite
+  the effects of your %.` and `… can't get any worse- your % sure tried, though!`
+  (`allfunctions.php:157`, `:162`)
+- `Your population's satisfaction has improved due to your %. (%)` — same four words, and the same
+  cap variant `Your population can't be any more satisfied, despite the effects of your %.`
+  (`allfunctions.php:190`)
+- `Show Details` / `Hide Details` / `Change in Satisfaction: %` / `Change in SE Relation: %` /
+  `Change in NLR Relation: %` — the per-tick wrapper, plus `You're ascending; your relationships
+  with the Solar Empire and New Lunar Republic can only go down.` in place of the two relation
+  totals for an ascending empire (`frequent.php:776-784`)
 - Government and economy upkeep: `Your Democracy used 20 gasoline.`, `Your State Controllers drank 6
   cider.`, `Your Free Marketeers drank 6 coffee.`, `Your machinery of Oppression used 10 gasoline and
   5 machinery parts.`, and their siblings
@@ -129,14 +137,16 @@ Something happened *to* the player, or they are losing something.
   on you**, which is why these sit here rather than with the trades above
 - `You have completed the forbidden research, and the facility has been automatically dismantled.`
 
-## The trap in `Change in Satisfaction:`
+## `Change in Satisfaction:` — the trap that per-line judging removed
 
-That phrase appears in every tick report, which makes it an attractive pattern. But because the tick
-is **one row** containing all its detail lines, switching it on silences every "Notable" line above
-that arrives inside the tick — the lost force, the environmental damage, the starving government.
+That phrase appears in every tick report, which makes it an attractive pattern. While the monitor
+matched a pattern against the whole row, switching it on silenced every "Notable" line above that
+arrived inside the tick — the lost force, the environmental damage, the starving government — and no
+other pattern did any better, because the routine and the notable text share a row.
 
-The monitor's `settings.example.json` warns about this at the pattern, and the README explains it.
-Silence the individual routine lines instead if the tick's warnings matter to you.
+Judging each line separately is what fixed it: the phrase now silences the one line it appears on.
+The tick still takes a pattern per routine line to go quiet, which is what the block from
+`Show Details` down in `settings.example.json` is for.
 
 ## Known gaps in this catalogue
 
@@ -147,5 +157,6 @@ Silence the individual routine lines instead if the tick's warnings matter to yo
 - Nation-death paths (`frequent.php:903`, `:1516`, `:1536`) write to `messages` and `news`, not
   `reports`.
 - Three tick reports contain a literal newline mid-sentence, from a heredoc spanning two source
-  lines. The monitor flattens report text before matching, so a pattern must read across as one
-  line.
+  lines (`frequent.php:952`, `:985`, `:1310`). The monitor splits a report at the page's own line
+  breaks and not at newlines in the text, so these stay one line and a pattern must read across as
+  one line.

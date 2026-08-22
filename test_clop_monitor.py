@@ -790,6 +790,11 @@ IGNORABLE_REPORTS = [
     ("Hide Details", "Hide Details"),
     ("Change in Satisfaction:", "Change in Satisfaction: -2"),
     ("Change in % Relation:", "Change in SE Relation: +1"),
+    (
+        "You're ascending;",
+        "You're ascending; your relationships with the Solar Empire and New Lunar Republic "
+        "can only go down.",
+    ),
     ("Your % used %.", "Your 3 Basic Factory used up 5 Oil."),
     ("Your % drank %.", "Your State Controllers drank 6 cider."),
     (

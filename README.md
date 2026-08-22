@@ -231,8 +231,18 @@ poll.
 ### Ignoring routine reports
 
 Most reports are the game's own bookkeeping — trades you made, the two-hourly tick, a building you
-queued — and alerting on them buries the ones that matter. `reports.ignore` is a list of patterns; a
-report matching any of them raises no alert.
+queued — and alerting on them buries the ones that matter. `reports.ignore` is a list of patterns,
+and **each line of a report is judged against them separately**:
+
+- a line that matches is left out of the alert;
+- a report whose **every** line matches raises no alert at all;
+- a report with any line left alerts, showing **only the lines that survived**.
+
+That matters because the two-hourly tick is a single report containing everything that happened —
+forty lines of production with, once in a while, `You couldn't pay the upkeep for your First Cavalry
+and it's gone!` in the middle of them. Judging the report as a whole meant silencing the tick and
+that line together, or neither. Judging it a line at a time lets you silence the routine forty and
+still be told about the one.
 
 **A pattern starting with `#` is switched off.** JSON has no comment syntax, so this is how a pattern
 is commented out: it stays in the list where you can see it, and you delete the two characters to
@@ -243,34 +253,37 @@ so:
 "reports": {
   "ignore": [
     "% completed successfully.",
-    "# Build % completed successfully.",
-    "# Upgrade % completed successfully.",
-    "# You sold % and made % bits.",
+    "You paid % bits.",
     "# You bought % from % for % bits.",
+    "# Show Details",
     "# Change in Satisfaction:"
   ]
 }
 ```
 
-That file silences every finished action and leaves the rest switched off. Leading spaces before the
-`#` are fine. The `#` only means "off" at the very start of a pattern, so `Report #% filed` is a
-normal pattern; the cost of the convention is that you cannot match a report whose text genuinely
-begins with `#`.
+That file silences every finished action and the price you paid for it, and leaves the rest switched
+off. Leading spaces before the `#` are fine. The `#` only means "off" at the very start of a pattern,
+so `Report #% filed` is a normal pattern; the cost of the convention is that you cannot match a
+report whose text genuinely begins with `#`.
 
-- A pattern matches **anywhere** in the report.
-- `%` stands for **any run of characters**, including none, so `You sold % and made % bits.` covers
-  any quantity, buyer, and price.
+- A pattern matches **anywhere** in a line.
+- `%` stands for **any run of characters**, including none, so `You paid % bits.` covers any price.
 - Matching **ignores case**.
 - Everything else is literal: `.` and `(` mean themselves, not what they mean in a regular
   expression.
-- **One match silences the whole report.** The game packs several sentences into a single report —
-  a finished build arrives as `You spent 20 Machinery Parts. You paid 50,000 bits. Build Advanced
-  Factory completed successfully.` — so one pattern usually covers the lot, and you do not need a
-  pattern per sentence.
+- **One pattern silences one line.** A finished build arrives as three lines — `You spent 20
+  Machinery Parts.`, `You paid 50,000 bits.`, `Build Advanced Factory completed successfully.` — and
+  going quiet takes a pattern for each. That is the price of being able to keep the fourth line when
+  a fourth line turns up.
 
-Patterns are substrings, not whole-message rules, so keep them specific enough to mean what you
-want. Report text is flattened to a single line before matching, so a pattern cannot span what
-looked like two lines on the page — write the words as they read across.
+Patterns are substrings, not whole-line rules, so keep them specific enough to mean what you want.
+
+**A pattern cannot span two lines.** The lines are the game's own: wherever the page breaks a report
+— a `<br/>`, or the end of the block the tick wraps its details in — the monitor breaks it too, and
+`%` does not reach across the break. So write each pattern to match one line as the page shows it.
+The exception proves the rule: three of the game's reports are written with a newline in the middle
+of a sentence rather than between two of them, and those still count as one line, because it is the
+page's own line breaks that are honoured and not every newline in the text.
 
 #### Silencing finished actions
 
@@ -291,19 +304,32 @@ when a shipment to one of the Empires lands, which is a relations change you may
 
 Failed and refused builds produce no report at all, so nothing here can hide one.
 
-#### One pattern to be careful with
+#### Silencing the two-hourly tick
 
-`Change in Satisfaction:` is tempting, because it appears in every two-hourly tick. But the tick
-writes **one** report containing all of its detail lines, so switching that pattern on also silences
-things you probably want:
+The tick is the noisiest thing the game writes and the one most worth silencing. It takes a pattern
+per routine line, and the settings example ships the whole set, commented out, in one block from
+`Show Details` downwards: the Show/Hide wrapper and the `Change in ...` totals, production and
+consumption, the relation and satisfaction effects, the satisfaction and relationship caps, the
+government and military upkeep bills, and the siphons that take the top off a stockpile. Switch that
+block on and a quiet tick says nothing at all.
+
+`Change in Satisfaction:` used to be the pattern to avoid, because it appears in every tick and
+whole-report matching meant it silenced the tick's warnings along with its bookkeeping. Per-line
+matching is what makes it safe: it now silences one line, the `Change in Satisfaction: -2` total, and
+nothing else. A tick containing any of
 
 - `You couldn't pay the upkeep for your First Cavalry and it's gone!`
 - `Too many Basic Oil Wells cause environmental damage! (-5 sat)`
 - `You don't have enough Oil to run your 3 Basic Factory!`
 - `Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)`
 
-If you want the tick quiet but still want to hear about a nation that is starving or a force you
-just lost, leave this one off and silence the individual routine lines instead.
+still alerts with that line, and with only that line.
+
+**Nothing that happens *to* you ships as a pattern.** Every shipped pattern is the game's own
+bookkeeping or something you just did, so an unedited settings file cannot hide a warning. That is
+also why there is no shipped pattern for `You sold 10 Copper to ... and made 9,000 bits.`, which
+fires when somebody else buys from your standing sell order, nor for the deal lines that report what
+another nation did. Keep that split if you add your own.
 
 `cache.persist_to_file` defaults to `true`. The monitor then loads
 `.state/clop-monitor.json` at startup, compares the first poll with the cached newest news entry,
@@ -362,10 +388,10 @@ the top entry differs from the cached one.
 Reports are handled row by row. Each poll takes every report above the last one seen — matched by
 its exact text and timestamp, so two reports written in the same second are both delivered, with the
 timestamp used only as a fallback when the remembered report has scrolled off the page — and alerts
-on each one that no [ignore pattern](#ignoring-routine-reports) matches. There is no cap: coming back
-to forty reports produces forty entries in one dialog. The marker always advances to the newest
-report on the page whether or not anything was alerted, so an ignored report is examined once and
-never again. Report notifications include a link to `reports.php`. Delete the `.state` folder to
+on each one that has a line left after the [ignore patterns](#ignoring-routine-reports) have taken
+theirs, showing those lines. There is no cap: coming back to forty reports produces forty entries in
+one dialog. The marker always advances to the newest report on the page whether or not anything was
+alerted, so a silenced report is examined once and never again. Report notifications include a link to `reports.php`. Delete the `.state` folder to
 establish fresh news and report baselines.
 
 The hosted game keeps the alliance "last checked" timestamp inside each login session. When the

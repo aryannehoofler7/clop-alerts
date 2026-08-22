@@ -1,7 +1,7 @@
 # Judging reports line by line — design
 
 **Date:** 2026-08-23
-**Status:** approved, not yet implemented
+**Status:** implemented
 
 Apply `reports.ignore` to each line of a report rather than to the whole report, so that a routine
 two-hourly tick can be silenced without also silencing the one line in it that matters.
@@ -56,6 +56,19 @@ internal whitespace, and drop blank lines.
 
 Nothing new has to be guessed: the structure being used is the structure the game wrote.
 
+**`<br/>` alone turned out not to be enough**, found while implementing. The tick wraps its details
+in `<div>`s and puts **no** `<br/>` between the last detail line and `Change in Satisfaction:` —
+only the `</div>` that closes the block (`cron/frequent.php:786-799`). Splitting on `<br/>` alone
+would therefore judge the last detail line and the satisfaction total as one line, and the shipped
+`Change in Satisfaction:` pattern would silence whatever that last line was: exactly the loss this
+design exists to prevent. `Show Details` and `Hide Details` are likewise two `<div>`s with no
+`<br/>` between them. So the split is at the page's block boundaries as well — `br`, `div`, `p` —
+which is the same claim as above, just stated in the markup the page actually uses.
+
+A newline in the report's *text* is deliberately not a break: three tick reports are heredocs whose
+sentence spans two source lines (`frequent.php:952`, `:985`, `:1310`), and they have to stay one
+line for a pattern to match them.
+
 ### What this changes for existing patterns
 
 A pattern can no longer match across a `<br/>`. Today everything is one string, so a pattern could
@@ -75,6 +88,10 @@ consumption, relation and satisfaction effects, the caps, the upkeep lines, and 
 
 Every one of them is a "Routine" entry from that catalogue. Nothing from the "Notable" list ships as
 a pattern, so an unedited monitor cannot hide a warning.
+
+That rule also cost one pattern that shipped before this change: `You sold % and made % bits.` is a
+"Notable" entry, because it fires when somebody else buys from your standing sell order. It was
+dropped rather than carried over.
 
 ### The report marker survives the change
 
