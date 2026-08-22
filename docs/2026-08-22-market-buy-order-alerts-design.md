@@ -105,7 +105,8 @@ Read-only hops obtain it:
   at all. Exactly one button means exactly one nation, so no name matching is needed.
 - **Own `alliance_id`** — `viewnation.php?nation_id=<mine>` renders
   `viewalliance.php?alliance_id=N` (`viewnation.php:23`). `backend_viewnation.php` contains no
-  `INSERT`, `UPDATE`, or `DELETE` and reads no `$_POST` at all.
+  `INSERT`, `UPDATE`, or `DELETE`. (It does merge `$_POST` into `$_GET` at line 3, but no
+  mutating query exists in the file for that merge to reach.)
 
 Only three pages link an alliance by id — `alliances.php`, `viewnation.php`, and
 `viewuser.php` — and of those only `viewnation.php` can be reached from what the monitor already
