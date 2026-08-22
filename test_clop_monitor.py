@@ -1568,6 +1568,60 @@ class MarketRowParsingTests(unittest.TestCase):
         self.assertEqual([order.is_ally for order in self.parse(html)], [False, True])
 
 
+class UnreadableMarketRowTests(unittest.TestCase):
+    """A row the parser cannot read is dropped rather than raised on.
+
+    Killing the whole poll over one odd row would lose the alerts from every other row and
+    every other category; a page that is not the marketplace at all is caught earlier, by the
+    missing CSRF token.
+    """
+
+    def parse(self, html):
+        return clop_monitor.parse_market_orders(html, "Machinery Parts", None)
+
+    def test_a_row_missing_its_amount_cell_is_dropped(self):
+        row = market_row(42, "Luna Sueno", "text-info", 12, "5,000")
+        without_amount = row.replace(
+            '<div class="col-md-1"><p class="text-success">12</p></div>', ""
+        )
+        self.assertNotEqual(without_amount, row)
+        self.assertEqual(self.parse(market_page(without_amount)), [])
+
+    def test_a_row_whose_price_is_not_a_number_is_dropped(self):
+        self.assertEqual(
+            self.parse(market_page(market_row(42, "Luna Sueno", "text-info", 12, "Sold Out"))),
+            [],
+        )
+
+    def test_a_truncated_page_yields_only_its_complete_rows(self):
+        cut_off = market_row(2, "Second", "text-info", 2, "8,000")
+        cut_off = cut_off[: cut_off.index("</tr>")]
+        html = MARKET_TABLE_HEAD + market_row(1, "First", "text-info", 1, "9,000") + cut_off
+        self.assertEqual([order.nation_name for order in self.parse(html)], ["First"])
+
+    def test_an_error_page_with_no_table_yields_no_orders(self):
+        self.assertEqual(self.parse("<h1>Something went wrong</h1>"), [])
+
+
+class MarketNumberTests(unittest.TestCase):
+    def test_thousands_separators_are_stripped_from_a_price(self):
+        self.assertEqual(clop_monitor.parse_market_number("5,000"), 5000)
+
+    def test_plain_digits_are_read_as_they_are(self):
+        self.assertEqual(clop_monitor.parse_market_number("12"), 12)
+
+    def test_an_empty_cell_is_unreadable(self):
+        self.assertIsNone(clop_monitor.parse_market_number(""))
+
+    def test_a_non_numeric_cell_is_unreadable(self):
+        self.assertIsNone(clop_monitor.parse_market_number("Sold Out"))
+
+    def test_a_negative_is_unreadable(self):
+        # The game renders neither a negative price nor a negative amount, so a minus sign
+        # means the cell is not the one we think it is; reading it as a number would be worse.
+        self.assertIsNone(clop_monitor.parse_market_number("-5"))
+
+
 class RelationLabelTests(unittest.TestCase):
     def label(self, **flags):
         return clop_monitor.MarketOrder("Oil", 1, "N", 1, 1, **flags).relation_label()
@@ -1604,8 +1658,12 @@ MULTI_NATION_HEADER = """
 
 EMPIRE_OVERVIEW = """
 <table><tr>
-<td><form action="overview.php" method="post">
-<button name="switchnation_id" type="submit" value="12">Only Nation</button></form></td>
+<td><div title="First Nation"><form action="overview.php" method="post">
+<button name="switchnation_id" type="submit" value="12">First Nation</button></form></div></td>
+<td><div title="Second Nation"><form action="overview.php" method="post">
+<button name="switchnation_id" type="submit" value="13">Second Nation</button></form></div></td>
+<td><div title="Third Nation"><form action="overview.php" method="post">
+<button name="switchnation_id" type="submit" value="14">Third Nation</button></form></div></td>
 </tr></table>
 """
 
@@ -1647,7 +1705,32 @@ class MarketFormParsingTests(unittest.TestCase):
         self.assertIsNone(clop_monitor.parse_current_nation_id(AUTHENTICATED_HEADER))
 
     def test_the_empire_overview_lists_every_nation_button(self):
-        self.assertEqual(clop_monitor.parse_empire_nation_ids(EMPIRE_OVERVIEW), [12])
+        # The whole point of this parser is the multi-nation account, so the fixture has to
+        # have more than one button or returning just the first would pass.
+        self.assertEqual(clop_monitor.parse_empire_nation_ids(EMPIRE_OVERVIEW), [12, 13, 14])
+
+    def test_both_selects_on_one_page_are_read_apart(self):
+        # Every real page includes header.php, so the market page carries the nation switcher
+        # and the goods selector at once and each parser must ignore the other's select.
+        page = MULTI_NATION_HEADER + MARKET_FORM
+        self.assertEqual(clop_monitor.parse_current_nation_id(page), 12)
+        self.assertEqual(
+            clop_monitor.parse_good_ids(page),
+            {"Apples": 3, "Machinery Parts": 10, "Oil": 1},
+        )
+
+    def test_both_selects_are_read_apart_whichever_comes_first(self):
+        page = MARKET_FORM + MULTI_NATION_HEADER
+        self.assertEqual(clop_monitor.parse_current_nation_id(page), 12)
+        self.assertEqual(
+            clop_monitor.parse_good_ids(page),
+            {"Apples": 3, "Machinery Parts": 10, "Oil": 1},
+        )
+
+    def test_a_switcher_with_nothing_selected_has_no_nation_id(self):
+        self.assertIsNone(
+            clop_monitor.parse_current_nation_id(MULTI_NATION_HEADER.replace(" selected ", " "))
+        )
 
     def test_a_nation_page_yields_its_alliance_id(self):
         self.assertEqual(clop_monitor.parse_alliance_id(NATION_PAGE), 7)
