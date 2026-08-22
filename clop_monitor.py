@@ -48,6 +48,22 @@ class ArchivedThreadError(MonitorError):
 
 
 @dataclass(frozen=True)
+class WatchedGood:
+    """One good's buyer's-market watch.
+
+    ``friends`` and ``alliance`` are independent because the game renders only the
+    higher-precedence colour, so a buyer who is both must satisfy either check on its own.
+    ``always`` and ``never`` are nation-name patterns that override both.
+    """
+
+    name: str
+    friends: bool = True
+    alliance: bool = True
+    always: Tuple[str, ...] = ()
+    never: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AlertCategorySettings:
     user_messages: bool = True
     alliance_messages: bool = True
@@ -55,6 +71,9 @@ class AlertCategorySettings:
     reports: bool = True
     #: Patterns from reports.ignore; a report matching one of them raises no alert.
     report_ignore: Tuple[str, ...] = ()
+    market_orders: bool = True
+    #: Goods from market.goods that are switched on, in the order the file lists them.
+    market_goods: Tuple[WatchedGood, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -1222,5 +1222,20 @@ class FailureNotificationTests(unittest.TestCase):
         self.assertIn("The monitor has stopped", failures[0])
 
 
+class WatchedGoodTests(unittest.TestCase):
+    def test_a_watched_good_defaults_to_friends_and_alliance_with_no_overrides(self):
+        good = clop_monitor.WatchedGood("Machinery Parts")
+        self.assertEqual(good.name, "Machinery Parts")
+        self.assertTrue(good.friends)
+        self.assertTrue(good.alliance)
+        self.assertEqual(good.always, ())
+        self.assertEqual(good.never, ())
+
+    def test_alert_categories_default_to_market_on_with_nothing_watched(self):
+        settings = clop_monitor.AlertCategorySettings()
+        self.assertTrue(settings.market_orders)
+        self.assertEqual(settings.market_goods, ())
+
+
 if __name__ == "__main__":
     unittest.main()
