@@ -18,15 +18,28 @@
     "repeat_interval_seconds": 10
   },
   "reports": {
-    "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
+    "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on. One match silences the whole report, and the game packs several sentences into one report, so a single pattern usually covers the lot.",
     "ignore": [
+      "# % completed successfully.",
+      "# Build % completed successfully.",
+      "# Upgrade % completed successfully.",
+      "# Dig % completed successfully.",
+      "# Plow % completed successfully.",
+      "# Manufacture % completed successfully.",
+      "# Ship % completed successfully.",
+      "# Smuggle % completed successfully.",
+      "# Distribute % completed successfully.",
+      "# Burn Oil completed successfully.",
+      "# Drug Farm completed successfully.",
+      "# Receive Factory Aid completed successfully.",
       "# You sold % and made % bits.",
       "# You bought % from % for % bits.",
-      "# Change in Satisfaction:",
-      "# Burn Oil",
-      "# Distribute Pies",
-      "# Build % completed successfully."
-    ]
+      "# You transferred % % to % for % bits.",
+      "# You have created the military force %.",
+      "# Change in Satisfaction:"
+    ],
+    "_completions_help": "Every finished action reports '<action name> completed successfully.', using the action's own name - and only 38 of the game's 62 actions are named 'Build ...'. The others start with Upgrade, Dig, Plow, Ship, Smuggle, Manufacture, Distribute, Burn, Drug or Receive. So '% completed successfully.' silences every completion in one line; uncomment the verb-specific ones below instead if you want to silence your building work but still hear about, say, shipments to the Empires.",
+    "_satisfaction_help": "CAREFUL with 'Change in Satisfaction:'. The two-hourly tick writes ONE report containing every detail line, and that phrase is in all of them - so switching it on also silences 'You couldn't pay the upkeep for your X and it's gone!', 'Too many X cause environmental damage!' and 'You don't have enough X to run your Y!', which are things you probably want to know about."
   },
   "market": {
     "_goods_help": "A good whose key starts with # is switched off: delete the # to watch that good's buyer's market, and the monitor will alert every poll while a matching order is pending.",

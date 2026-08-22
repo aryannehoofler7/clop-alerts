@@ -236,41 +236,74 @@ report matching any of them raises no alert.
 
 **A pattern starting with `#` is switched off.** JSON has no comment syntax, so this is how a pattern
 is commented out: it stays in the list where you can see it, and you delete the two characters to
-switch it on. The six patterns ship commented out, so the monitor silences nothing until you say so:
+switch it on. Every shipped pattern is commented out, so the monitor silences nothing until you say
+so:
 
 ```json
 "reports": {
   "ignore": [
+    "% completed successfully.",
+    "# Build % completed successfully.",
+    "# Upgrade % completed successfully.",
     "# You sold % and made % bits.",
     "# You bought % from % for % bits.",
-    "Change in Satisfaction:",
-    "Burn Oil",
-    "# Distribute Pies",
-    "# Build % completed successfully."
+    "# Change in Satisfaction:"
   ]
 }
 ```
 
-That file silences the tick and the oil burn, and leaves the other four switched off. Leading spaces
-before the `#` are fine. The `#` only means "off" at the very start of a pattern, so
-`Report #% filed` is a normal pattern; the cost of the convention is that you cannot match a report
-whose text genuinely begins with `#`.
+That file silences every finished action and leaves the rest switched off. Leading spaces before the
+`#` are fine. The `#` only means "off" at the very start of a pattern, so `Report #% filed` is a
+normal pattern; the cost of the convention is that you cannot match a report whose text genuinely
+begins with `#`.
 
-- A pattern matches **anywhere** in the report, so `Burn Oil` covers
-  `You spent 5 Oil. You gained 5 Energy. ... due to your 1 Burn Oil. (-5)`.
-- `%` stands for **any run of characters**, including none, so `Build % completed successfully.`
-  covers whatever was built and `You sold % and made % bits.` covers any quantity, buyer, and price.
+- A pattern matches **anywhere** in the report.
+- `%` stands for **any run of characters**, including none, so `You sold % and made % bits.` covers
+  any quantity, buyer, and price.
 - Matching **ignores case**.
 - Everything else is literal: `.` and `(` mean themselves, not what they mean in a regular
   expression.
-
-Switched on together, the six shipped patterns silence the sell, buy, tick, burn, pies, and build
-reports; on a typical page that is every row.
+- **One match silences the whole report.** The game packs several sentences into a single report —
+  a finished build arrives as `You spent 20 Machinery Parts. You paid 50,000 bits. Build Advanced
+  Factory completed successfully.` — so one pattern usually covers the lot, and you do not need a
+  pattern per sentence.
 
 Patterns are substrings, not whole-message rules, so keep them specific enough to mean what you
-want: a bare `Burn Oil` would also silence a report about someone destroying your oil, if the game
-ever words it that way. Report text is flattened to a single line before matching, so a pattern
-cannot span what looked like two lines on the page — write the words as they read across.
+want. Report text is flattened to a single line before matching, so a pattern cannot span what
+looked like two lines on the page — write the words as they read across.
+
+#### Silencing finished actions
+
+Every action you complete reports **`<action name> completed successfully.`**, and the name is the
+action's own, taken straight from the game's recipe list. That matters more than it sounds: of the
+game's 62 actions only **38** are named `Build ...`. The other 24 begin with `Upgrade`, `Dig`,
+`Plow`, `Ship`, `Smuggle`, `Manufacture`, `Distribute`, `Burn`, `Drug` or `Receive` — so
+`Build Basic Oil Well completed successfully.` and `Dig Basic Copper Mine completed successfully.`
+are the same kind of event with different first words.
+
+A pattern of `Build % completed successfully.` therefore silences your oil wells and not your copper
+mines. Use **`% completed successfully.`** instead and it covers every completion — builds,
+upgrades, digs, shipments, weapons and armour alike — in one line.
+
+The verb-specific patterns ship alongside it for when you want to be selective. Uncommenting
+`Build %`, `Upgrade %`, `Dig %` and `Plow %` silences your construction work while still telling you
+when a shipment to one of the Empires lands, which is a relations change you may want to see.
+
+Failed and refused builds produce no report at all, so nothing here can hide one.
+
+#### One pattern to be careful with
+
+`Change in Satisfaction:` is tempting, because it appears in every two-hourly tick. But the tick
+writes **one** report containing all of its detail lines, so switching that pattern on also silences
+things you probably want:
+
+- `You couldn't pay the upkeep for your First Cavalry and it's gone!`
+- `Too many Basic Oil Wells cause environmental damage! (-5 sat)`
+- `You don't have enough Oil to run your 3 Basic Factory!`
+- `Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)`
+
+If you want the tick quiet but still want to hear about a nation that is starving or a force you
+just lost, leave this one off and silence the individual routine lines instead.
 
 `cache.persist_to_file` defaults to `true`. The monitor then loads
 `.state/clop-monitor.json` at startup, compares the first poll with the cached newest news entry,

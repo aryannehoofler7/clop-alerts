@@ -719,7 +719,47 @@ class SettingsDefaultsTests(unittest.TestCase):
 
 
 #: Each shipped example pattern with a report message it is meant to silence.
+#: Each shipped example pattern with a real report the game writes for it. The report text is
+#: taken from the game source, not invented: every finished action reports
+#: "<action name> completed successfully." (backend_actions.php:240), and the action name comes
+#: straight from the recipes table, which is why only 38 of the game's 62 actions begin "Build ".
 IGNORABLE_REPORTS = [
+    (
+        "% completed successfully.",
+        "Dig Basic Copper Mine completed successfully.",
+    ),
+    (
+        "Build % completed successfully.",
+        "Build Advanced Factory completed successfully.",
+    ),
+    (
+        "Upgrade % completed successfully.",
+        "Upgrade to Gasoline Combustion Facility completed successfully.",
+    ),
+    ("Dig % completed successfully.", "Dig Gem Mine completed successfully."),
+    ("Plow % completed successfully.", "Plow Coffee Farm completed successfully."),
+    (
+        "Manufacture % completed successfully.",
+        "Manufacture Precision Parts completed successfully.",
+    ),
+    (
+        "Ship % completed successfully.",
+        "Ship Tungsten to the New Lunar Republic completed successfully.",
+    ),
+    (
+        "Smuggle % completed successfully.",
+        "Smuggle Drugs into the SE completed successfully.",
+    ),
+    (
+        "Distribute % completed successfully.",
+        "Distribute Pies completed successfully.",
+    ),
+    ("Burn Oil completed successfully.", "Burn Oil completed successfully."),
+    ("Drug Farm completed successfully.", "Drug Farm completed successfully."),
+    (
+        "Receive Factory Aid completed successfully.",
+        "Receive Factory Aid completed successfully.",
+    ),
     (
         "You sold % and made % bits.",
         "You sold 10 Copper to quaity kirenese merch and ice and made 9,000 bits.",
@@ -729,15 +769,47 @@ IGNORABLE_REPORTS = [
         "You bought 50 Apples from Luna Sueno for 55,000 bits.",
     ),
     (
-        "Change in Satisfaction:",
-        "Change in Satisfaction: +2 Change in GDP: +1,200,000 bits",
+        "You transferred % % to % for % bits.",
+        "You transferred 20 Oil to Buenos Mares for 40,000 bits.",
     ),
-    ("Burn Oil", "Burn Oil consumed 5 barrels"),
-    ("Distribute Pies", "Distribute Pies to 3 cities"),
     (
-        "Build % completed successfully.",
-        "Build Advanced Factory completed successfully.",
+        "You have created the military force %.",
+        "You have created the military force First Cavalry.",
     ),
+    (
+        "Change in Satisfaction:",
+        "Show Details Hide Details You gained 5 Oil from your 1 Basic Oil Well. "
+        "Change in Satisfaction: -2 Change in SE Relation: +1",
+    ),
+]
+
+#: Every action name in the shipped recipes table that does NOT begin "Build ", so the old
+#: Build-only pattern silently missed it. Taken from clop/tables with data.sql.
+NON_BUILD_COMPLETIONS = [
+    "Dig Basic Copper Mine",
+    "Plow Basic Apple Orchard",
+    "Burn Oil",
+    "Distribute Apples",
+    "Distribute Pies",
+    "Distribute Money",
+    "Upgrade Oil Well",
+    "Upgrade Copper Mine",
+    "Upgrade Apple Orchard",
+    "Upgrade Plastics Factory",
+    "Upgrade to Gasoline Combustion Facility",
+    "Plow Coffee Farm",
+    "Dig Gem Mine",
+    "Dig Tungsten Mine",
+    "Manufacture Precision Parts",
+    "Manufacture Composites",
+    "Ship Oil to the Solar Empire",
+    "Ship Oil to the New Lunar Republic",
+    "Ship Tungsten to the Solar Empire",
+    "Ship Tungsten to the New Lunar Republic",
+    "Smuggle Drugs into the SE",
+    "Smuggle Drugs into the NLR",
+    "Drug Farm",
+    "Receive Factory Aid",
 ]
 WORTH_ALERTING = "Your nation was attacked by Sombra and lost 3 Tanks."
 
@@ -790,8 +862,9 @@ class ReportIgnorePatternTests(unittest.TestCase):
 
     def test_uncommenting_a_shipped_pattern_switches_it_on(self):
         value = shipped_example()
+        wanted = "# Burn Oil completed successfully."
         value["reports"]["ignore"] = [
-            entry[2:] if "Burn Oil" in entry else entry for entry in value["reports"]["ignore"]
+            entry[2:] if entry == wanted else entry for entry in value["reports"]["ignore"]
         ]
         # The bundled WAV is reached by a path relative to the settings file, which a temp
         # directory has no copy of; the sound is irrelevant here.
@@ -800,8 +873,62 @@ class ReportIgnorePatternTests(unittest.TestCase):
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             settings = load_settings(path)
-        self.assertEqual(settings.alerts.report_ignore, ("Burn Oil",))
-        self.assertTrue(report_is_ignored("Burn Oil consumed 5 barrels", settings.alerts.report_ignore))
+        self.assertEqual(settings.alerts.report_ignore, ("Burn Oil completed successfully.",))
+        self.assertTrue(
+            report_is_ignored("Burn Oil completed successfully.", settings.alerts.report_ignore)
+        )
+
+
+class CompletionPatternTests(unittest.TestCase):
+    """Every finished action reports "<action name> completed successfully.".
+
+    The name comes straight from the recipes table, so a Build-only pattern silences the 38
+    actions that happen to be named "Build ..." and misses the other 24.
+    """
+
+    def report(self, action):
+        return f"{action} completed successfully."
+
+    def test_the_catch_all_covers_every_non_build_action(self):
+        for action in NON_BUILD_COMPLETIONS:
+            with self.subTest(action=action):
+                self.assertTrue(
+                    report_is_ignored(self.report(action), ["% completed successfully."])
+                )
+
+    def test_a_build_only_pattern_misses_every_one_of_them(self):
+        for action in NON_BUILD_COMPLETIONS:
+            with self.subTest(action=action):
+                self.assertFalse(
+                    report_is_ignored(self.report(action), ["Build % completed successfully."])
+                )
+
+    def test_the_catch_all_still_covers_the_build_actions(self):
+        self.assertTrue(
+            report_is_ignored(
+                self.report("Build Advanced Factory"), ["% completed successfully."]
+            )
+        )
+
+    def test_a_completion_is_silenced_alongside_the_lines_it_ships_with(self):
+        # backend_actions.php:246 joins every line of one action into a single report, so one
+        # matching pattern silences the paid/gained/satisfaction lines with it.
+        whole = (
+            "You spent 20 Machinery Parts. You paid 50,000 bits. "
+            "Build Advanced Factory completed successfully."
+        )
+        self.assertTrue(report_is_ignored(whole, ["% completed successfully."]))
+
+    def test_the_catch_all_leaves_reports_worth_seeing_alone(self):
+        for message in (
+            WORTH_ALERTING,
+            "Your Barracks scattered to the four winds!",
+            "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+            "You have completed the forbidden research, and the facility has been "
+            "automatically dismantled. A new Major Action is available to you.",
+        ):
+            with self.subTest(message=message[:40]):
+                self.assertFalse(report_is_ignored(message, ["% completed successfully."]))
 
 
 class ReportScanTests(unittest.TestCase):
