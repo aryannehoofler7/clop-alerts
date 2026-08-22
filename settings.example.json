@@ -1,0 +1,34 @@
+{
+  "_help": "Copy this file to settings.json and edit that copy; settings.json is git-ignored, so updates never overwrite it. Every key is optional: delete one to use the built-in default, which the monitor names at startup.",
+  "cache": {
+    "persist_to_file": true,
+    "_persist_to_file_help": "Set false to keep news, report, and 4chan baselines only until this process exits."
+  },
+  "alerts": {
+    "user_messages": true,
+    "alliance_messages": true,
+    "news": true,
+    "reports": true
+  },
+  "sound": {
+    "wav_path": "sounds/twilight-clock-is-ticking.wav",
+    "_wav_path_help": "Set wav_path to null to use the normal Windows alert sound.",
+    "loop_while_popup_open": false,
+    "repeat_interval_seconds": 10
+  },
+  "reports": {
+    "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
+    "ignore": [
+      "# You sold % and made % bits.",
+      "# You bought % from % for % bits.",
+      "# Change in Satisfaction:",
+      "# Burn Oil",
+      "# Distribute Pies",
+      "# Build % completed successfully."
+    ]
+  },
+  "fourchan": {
+    "thread_url": "https://boards.4chan.org/mlp/thread/43454282/clop-financial-crisis-edition",
+    "_thread_url_help": "Set thread_url to a thread you want watched, for example https://boards.4chan.org/mlp/thread/43454282/clop-financial-crisis-edition. Leave it null to disable thread monitoring; threads archive, so a URL left here goes stale."
+  }
+}
