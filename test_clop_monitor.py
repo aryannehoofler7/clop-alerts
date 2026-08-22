@@ -48,6 +48,11 @@ def report_is_ignored(message, patterns):
     return not surviving_report_lines(message, patterns)
 
 
+def shipped_report_patterns():
+    """Every shipped reports.ignore pattern, as if the reader had switched them all on."""
+    return [entry[1:].strip() for entry in shipped_example()["reports"]["ignore"]]
+
+
 AUTHENTICATED_HEADER = """
 <nav>
   <a href="messages.php">Messages <span class="badge"> (2)</span></a>
@@ -766,10 +771,9 @@ IGNORABLE_REPORTS = [
         "Receive Factory Aid completed successfully.",
         "Receive Factory Aid completed successfully.",
     ),
-    (
-        "You sold % and made % bits.",
-        "You sold 10 Copper to quaity kirenese merch and ice and made 9,000 bits.",
-    ),
+    ("You spent % %.", "You spent 20 Machinery Parts."),
+    ("You paid % bits.", "You paid 50,000 bits."),
+    ("You gained % %.", "You gained 5 Oil from your 1 Basic Oil Well."),
     (
         "You bought % from % for % bits.",
         "You bought 50 Apples from Luna Sueno for 55,000 bits.",
@@ -782,11 +786,89 @@ IGNORABLE_REPORTS = [
         "You have created the military force %.",
         "You have created the military force First Cavalry.",
     ),
+    ("Show Details", "Show Details"),
+    ("Hide Details", "Hide Details"),
+    ("Change in Satisfaction:", "Change in Satisfaction: -2"),
+    ("Change in % Relation:", "Change in SE Relation: +1"),
+    ("Your % used %.", "Your 3 Basic Factory used up 5 Oil."),
+    ("Your % drank %.", "Your State Controllers drank 6 cider."),
     (
-        "Change in Satisfaction:",
-        "Show Details Hide Details You gained 5 Oil from your 1 Basic Oil Well. "
-        "Change in Satisfaction: -2 Change in SE Relation: +1",
+        "Your relationship with the % due to your %",
+        "Your relationship with the Solar Empire has improved due to your "
+        "1 Basic Oil Well. (+3)",
     ),
+    (
+        "Your relationship with the % can't get any %",
+        "Your relationship with the Solar Empire can't get any better, despite the "
+        "effects of your 1 Basic Oil Well.",
+    ),
+    (
+        "Your population's satisfaction has % due to your %",
+        "Your population's satisfaction has dwindled due to your 3 Basic Factory. (-4)",
+    ),
+    (
+        "Your population can't be any more satisfied,",
+        "Your population can't be any more satisfied, despite the effects of your "
+        "3 Basic Factory.",
+    ),
+    ("You hit the % cap of %.", "You hit the Democracy satisfaction cap of 1500. (-40)"),
+    ("% is hard to keep", "A satisfied population is hard to keep. (-5 sat)"),
+    (
+        "% forgets eventually;",
+        "A bad enemy forgets eventually; you gain 2 relationship with the Solar Empire.",
+    ),
+    (
+        "As you have more than % siphoned off.",
+        "As you have more than 50,000 Oil, 300 was siphoned off.",
+    ),
+]
+
+#: Every line from the catalogue's "Notable" list, with the wording the game writes. No
+#: shipped pattern may silence any of these: an unedited monitor must not be able to hide a
+#: warning, and this list is the whole safety property of judging reports line by line.
+NOTABLE_REPORTS = [
+    "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+    "Your Barracks scattered to the four winds!",
+    "Your First Cavalry lost 3 size!",
+    "Your Second Cavalry (size 10) were hit by Sombra's Shadow Guard (size 12) "
+    "for 40 damage (3 hits)",
+    "Your satisfaction is below the minimum - your ponies are revolting! (You gain 30 sat "
+    "among the rest of your nation as the subversives stop participating in it.)",
+    "The Solar Empire hates you enough to send an airstrike and you don't have enough "
+    "support from its opponent! (Wishing to avoid a protracted war, it has reduced its "
+    "hate for you by 50.)",
+    "The Solar Empire has attacked you for daring to ascend! (-50)",
+    "You don't have enough Oil to run your 3 Basic Factory!",
+    "Too many Basic Oil Wells cause environmental damage! (-5 sat)",
+    "You lose 4 satisfaction for having 4 disabled buildings.",
+    "You lost 5 satisfaction for not having any buildings!",
+    "You lost 30 satisfaction for having a military of total size 300.",
+    "You lose 10 sat for having an empire of 3 nations.",
+    "Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)",
+    "Your deal with Luna Sueno was rejected.",
+    "Your deal with Luna Sueno was accepted.",
+    "You received 5 Oil as part of your deal.",
+    "You sold 10 Copper to quaity kirenese merch and ice and made 9,000 bits.",
+    "This nation received 20 Apples from Buenos Mares.",
+    "You have completed the forbidden research, and the facility has been automatically "
+    "dismantled. A new Major Action is available to you.",
+]
+
+#: A quiet two-hourly tick's detail lines: production, consumption, the relation and
+#: satisfaction effects, an upkeep bill, a cap, and a siphon. Between them the shipped
+#: patterns have to leave nothing.
+ROUTINE_TICK_DETAILS = [
+    "You gained 5 Oil from your 1 Basic Oil Well.",
+    "Your 3 Basic Factory used up 5 Oil.",
+    "You gained 12 Machinery Parts from your 3 Basic Factory.",
+    "Your relationship with the Solar Empire has improved due to your 1 Basic Oil Well. (+3)",
+    "Your population's satisfaction has dwindled due to your 3 Basic Factory. (-4)",
+    "Your Democracy used 20 gasoline.",
+    "Your Democracy used 2 vehicle parts.",
+    "You hit the Democracy satisfaction cap of 1500. (-40)",
+    "A satisfied population is hard to keep. (-5 sat)",
+    "As you have more than 50,000 Oil, 300 was siphoned off.",
+    "Your First Cavalry used up 12 apples.",
 ]
 
 #: Every action name in the shipped recipes table that does NOT begin "Build ", so the old
@@ -1026,7 +1108,10 @@ class ReportScanTests(unittest.TestCase):
         ignore = [pattern for pattern, _ in IGNORABLE_REPORTS]
         previous = self._snapshot([("Older", "2026-08-17 08:00:00")])
         current = self._snapshot(
-            [(message, "2026-08-17 08:0%d:00" % (index + 1)) for index, (_, message) in enumerate(IGNORABLE_REPORTS)]
+            [
+                (message, f"2026-08-17 08:{index + 1:02d}:00")
+                for index, (_, message) in enumerate(IGNORABLE_REPORTS)
+            ]
             + [("Older", "2026-08-17 08:00:00")]
         )
         alerts = build_alerts(previous, current, AlertCategorySettings(report_ignore=tuple(ignore)))
@@ -1160,6 +1245,108 @@ class PerLineReportJudgingTests(unittest.TestCase):
         alerts = self.alerts(message, ["Routine."])
         self.assertIn(": Warning!\n", alerts[0])
         self.assertNotIn("...", alerts[0])
+
+
+class ShippedPatternSafetyTests(unittest.TestCase):
+    """What the shipped patterns must and must not reach, read off the report catalogue."""
+
+    def test_every_shipped_pattern_silences_the_line_it_is_for(self):
+        for pattern, message in IGNORABLE_REPORTS:
+            with self.subTest(pattern=pattern):
+                self.assertEqual(surviving_report_lines(message, [pattern]), [])
+
+    def test_no_shipped_pattern_silences_a_notable_line(self):
+        patterns = shipped_report_patterns()
+        for message in NOTABLE_REPORTS:
+            with self.subTest(message=message[:50]):
+                self.assertEqual(surviving_report_lines(message, patterns), [message])
+
+    def test_the_shipped_set_is_exactly_the_patterns_the_fixture_documents(self):
+        self.assertEqual(shipped_report_patterns(), [pattern for pattern, _ in IGNORABLE_REPORTS])
+
+
+class ShippedPatternsOnRealReportsTests(unittest.TestCase):
+    """The whole point: a quiet tick goes silent, a tick with a warning shows the warning."""
+
+    def alerts_for(self, cells):
+        page = reports_page(cells)
+        rows = parse_report_rows(page)
+        previous = Snapshot(
+            0, 0, None, latest_report=None, reports_checked=True, report_rows=()
+        )
+        current = Snapshot(
+            0,
+            0,
+            None,
+            latest_report=rows[0],
+            reports_checked=True,
+            report_rows=tuple(rows),
+        )
+        return build_alerts(
+            previous,
+            current,
+            AlertCategorySettings(report_ignore=tuple(shipped_report_patterns())),
+        )
+
+    def test_a_routine_tick_is_completely_silent(self):
+        self.assertEqual(self.alerts_for([tick_report(ROUTINE_TICK_DETAILS)]), [])
+
+    def test_a_tick_that_lost_a_force_alerts_with_that_line_alone(self):
+        lost = "You couldn't pay the upkeep for your First Cavalry and it's gone!"
+        alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [lost])])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(f": {lost}\n", alerts[0])
+        for routine in ROUTINE_TICK_DETAILS:
+            self.assertNotIn(routine, alerts[0])
+
+    def test_every_notable_line_survives_the_tick_it_arrives_in(self):
+        for notable in NOTABLE_REPORTS:
+            with self.subTest(message=notable[:50]):
+                # Last, because that is the position the game's own report format makes
+                # riskiest: only a </div> separates it from "Change in Satisfaction:".
+                alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [notable])])
+                self.assertEqual(len(alerts), 1)
+                self.assertIn(f": {notable}\n", alerts[0])
+
+    def test_a_finished_action_is_completely_silent(self):
+        report = action_report(
+            "You spent 20 Machinery Parts.",
+            "You paid 50,000 bits.",
+            "Build Advanced Factory completed successfully.",
+        )
+        self.assertEqual(self.alerts_for([report]), [])
+
+    def test_a_merged_block_alerts_with_only_the_notable_report_s_lines(self):
+        # backend_reports.php:5-12 joins reports sharing a timestamp into one cell, so a
+        # routine action and a lost force can be judged together.
+        merged = "<br/>".join(
+            [
+                action_report(
+                    "You paid 50,000 bits.", "Build Advanced Factory completed successfully."
+                ),
+                tick_report(
+                    ROUTINE_TICK_DETAILS
+                    + ["You couldn't pay the upkeep for your First Cavalry and it's gone!"]
+                ),
+            ]
+        )
+        alerts = self.alerts_for([merged])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(
+            ": You couldn't pay the upkeep for your First Cavalry and it's gone!\n", alerts[0]
+        )
+
+    def test_switched_off_as_shipped_the_whole_tick_alerts(self):
+        page = reports_page([tick_report(ROUTINE_TICK_DETAILS)])
+        rows = parse_report_rows(page)
+        previous = Snapshot(0, 0, None, reports_checked=True, report_rows=())
+        current = Snapshot(
+            0, 0, None, latest_report=rows[0], reports_checked=True, report_rows=tuple(rows)
+        )
+        alerts = build_alerts(previous, current)
+        self.assertEqual(len(alerts), 1)
+        for routine in ROUTINE_TICK_DETAILS:
+            self.assertIn(routine, alerts[0])
 
 
 class UpgradedMarkerTests(unittest.TestCase):

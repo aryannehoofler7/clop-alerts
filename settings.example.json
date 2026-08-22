@@ -18,7 +18,7 @@
     "repeat_interval_seconds": 10
   },
   "reports": {
-    "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on. One match silences the whole report, and the game packs several sentences into one report, so a single pattern usually covers the lot.",
+    "_ignore_help": "Each LINE of a report is matched against the patterns below. A line that matches is left out of the alert; a report whose every line matches raises no alert at all. Matching ignores case and looks anywhere in the line; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
     "ignore": [
       "# % completed successfully.",
       "# Build % completed successfully.",
@@ -32,14 +32,30 @@
       "# Burn Oil completed successfully.",
       "# Drug Farm completed successfully.",
       "# Receive Factory Aid completed successfully.",
-      "# You sold % and made % bits.",
+      "# You spent % %.",
+      "# You paid % bits.",
+      "# You gained % %.",
       "# You bought % from % for % bits.",
       "# You transferred % % to % for % bits.",
       "# You have created the military force %.",
-      "# Change in Satisfaction:"
+      "# Show Details",
+      "# Hide Details",
+      "# Change in Satisfaction:",
+      "# Change in % Relation:",
+      "# Your % used %.",
+      "# Your % drank %.",
+      "# Your relationship with the % due to your %",
+      "# Your relationship with the % can't get any %",
+      "# Your population's satisfaction has % due to your %",
+      "# Your population can't be any more satisfied,",
+      "# You hit the % cap of %.",
+      "# % is hard to keep",
+      "# % forgets eventually;",
+      "# As you have more than % siphoned off."
     ],
-    "_completions_help": "Every finished action reports '<action name> completed successfully.', using the action's own name - and only 38 of the game's 62 actions are named 'Build ...'. The others start with Upgrade, Dig, Plow, Ship, Smuggle, Manufacture, Distribute, Burn, Drug or Receive. So '% completed successfully.' silences every completion in one line; uncomment the verb-specific ones below instead if you want to silence your building work but still hear about, say, shipments to the Empires.",
-    "_satisfaction_help": "CAREFUL with 'Change in Satisfaction:'. The two-hourly tick writes ONE report containing every detail line, and that phrase is in all of them - so switching it on also silences 'You couldn't pay the upkeep for your X and it's gone!', 'Too many X cause environmental damage!' and 'You don't have enough X to run your Y!', which are things you probably want to know about."
+    "_completions_help": "Every finished action reports '<action name> completed successfully.', using the action's own name - and only 38 of the game's 62 actions are named 'Build ...'. The others start with Upgrade, Dig, Plow, Ship, Smuggle, Manufacture, Distribute, Burn, Drug or Receive. So '% completed successfully.' silences every completion in one line; uncomment the verb-specific ones instead if you want to silence your building work but still hear about, say, shipments to the Empires.",
+    "_tick_help": "The block from 'Show Details' down is the two-hourly tick: its wrapper, production and consumption, the relation and satisfaction effects, the caps, the upkeep bills and the siphons. Switch that block on and a quiet tick goes silent, while a tick that lost you a force, starved a factory or damaged the environment still alerts - with just that line, because the lines are judged one at a time. Every one of these is routine bookkeeping; nothing that reports something happening TO you is listed here, so an unedited file cannot hide a warning.",
+    "_sold_help": "There is deliberately no pattern for 'You sold % % to % and made % bits.'. That one fires when somebody else buys from your standing sell order, which is news rather than bookkeeping - the same reason 'You received % % as part of your deal.' and 'Your deal with % was accepted.' are absent."
   },
   "market": {
     "_goods_help": "A good whose key starts with # is switched off: delete the # to watch that good's buyer's market, and the monitor will alert every poll while a matching order is pending.",
