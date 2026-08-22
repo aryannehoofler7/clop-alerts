@@ -197,6 +197,64 @@ def market_good_flag(
     return result
 
 
+def load_market_goods(
+    market_value: object, defaults_used: List[str]
+) -> Tuple[WatchedGood, ...]:
+    """The goods switched on in the market section, in the order the file lists them."""
+    if not isinstance(market_value, dict):
+        raise MonitorError("The market setting must be a JSON object")
+    if "goods" not in market_value:
+        defaults_used.append("market.goods")
+        return ()
+    raw_goods = market_value["goods"]
+    if not isinstance(raw_goods, dict):
+        raise MonitorError("Setting market.goods must be a JSON object keyed by good name")
+
+    market_goods: List[WatchedGood] = []
+    watched_names: Dict[str, str] = {}
+    for raw_name, raw_good in raw_goods.items():
+        name = raw_name.strip()
+        # JSON has no comments, so a leading # switches a good off where you can still
+        # see it; watching one means deleting two characters.
+        if name.startswith("#"):
+            continue
+        if not name:
+            raise MonitorError("Every market.goods key must be a non-empty good name")
+        if not isinstance(raw_good, dict):
+            raise MonitorError(f"Settings for market good {name!r} must be a JSON object")
+        # Two spellings of one good would mean two marketplace lookups and two alerts a
+        # poll, from a file that looks fine; say which keys clash rather than pick one.
+        clash = watched_names.get(name.casefold())
+        if clash is not None:
+            raise MonitorError(
+                f"Market goods {clash!r} and {name!r} differ only by capitalisation; "
+                "keep whichever one you want and delete the other"
+            )
+        watched_names[name.casefold()] = name
+        # A misspelled knob would otherwise load as its default, which is the opposite of
+        # what was written for a knob being switched off.
+        unknown = sorted(set(raw_good) - MARKET_GOOD_KNOBS)
+        if unknown:
+            raise MonitorError(
+                f"Market good {name!r} has unknown settings {', '.join(unknown)}; "
+                f"valid settings are {', '.join(sorted(MARKET_GOOD_KNOBS))}"
+            )
+        market_goods.append(
+            WatchedGood(
+                name=name,
+                friends=market_good_flag(raw_good, name, "friends", default=True),
+                alliance=market_good_flag(raw_good, name, "alliance", default=True),
+                always=switchable_patterns(
+                    raw_good.get("always", []), f"always for market good {name!r}"
+                ),
+                never=switchable_patterns(
+                    raw_good.get("never", []), f"never for market good {name!r}"
+                ),
+            )
+        )
+    return tuple(market_goods)
+
+
 def load_settings(path: Path) -> MonitorSettings:
     """Read the optional settings file; every absent key falls back to a built-in default.
 
@@ -299,61 +357,9 @@ def load_settings(path: Path) -> MonitorSettings:
         report_ignore = switchable_patterns(reports_value["ignore"], "reports.ignore")
     alerts = replace(alerts, report_ignore=report_ignore)
 
-    market_value = value.get("market", {})
-    if not isinstance(market_value, dict):
-        raise MonitorError("The market setting must be a JSON object")
-    market_goods: List[WatchedGood] = []
-    if "goods" not in market_value:
-        defaults_used.append("market.goods")
-    else:
-        raw_goods = market_value["goods"]
-        if not isinstance(raw_goods, dict):
-            raise MonitorError(
-                "Setting market.goods must be a JSON object keyed by good name"
-            )
-        watched_names: Dict[str, str] = {}
-        for raw_name, raw_good in raw_goods.items():
-            name = raw_name.strip()
-            # JSON has no comments, so a leading # switches a good off where you can still
-            # see it; watching one means deleting two characters.
-            if name.startswith("#"):
-                continue
-            if not name:
-                raise MonitorError("Every market.goods key must be a non-empty good name")
-            if not isinstance(raw_good, dict):
-                raise MonitorError(
-                    f"Settings for market good {name!r} must be a JSON object"
-                )
-            # Two spellings of one good would mean two marketplace lookups and two alerts a
-            # poll, from a file that looks fine; say which keys clash rather than pick one.
-            clash = watched_names.get(name.casefold())
-            if clash is not None:
-                raise MonitorError(
-                    f"Market goods {clash!r} and {name!r} differ only by capitalisation; "
-                    "keep whichever one you want and delete the other"
-                )
-            watched_names[name.casefold()] = name
-            unknown = sorted(set(raw_good) - MARKET_GOOD_KNOBS)
-            if unknown:
-                raise MonitorError(
-                    f"Market good {name!r} has unknown settings "
-                    f"{', '.join(unknown)}; valid settings are "
-                    f"{', '.join(sorted(MARKET_GOOD_KNOBS))}"
-                )
-            market_goods.append(
-                WatchedGood(
-                    name=name,
-                    friends=market_good_flag(raw_good, name, "friends", default=True),
-                    alliance=market_good_flag(raw_good, name, "alliance", default=True),
-                    always=switchable_patterns(
-                        raw_good.get("always", []), f"always for market good {name!r}"
-                    ),
-                    never=switchable_patterns(
-                        raw_good.get("never", []), f"never for market good {name!r}"
-                    ),
-                )
-            )
-    alerts = replace(alerts, market_goods=tuple(market_goods))
+    alerts = replace(
+        alerts, market_goods=load_market_goods(value.get("market", {}), defaults_used)
+    )
 
     fourchan_thread: Optional[FourChanThreadSettings] = None
     fourchan_value = value.get("fourchan")
