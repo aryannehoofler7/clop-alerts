@@ -2557,5 +2557,481 @@ class MarketThroughAPollTests(unittest.TestCase):
         self.assertIn("Luna Sueno (friend) wants 12 at 5,000 bits each", notifier.messages[0])
 
 
+class ReloadNotifier:
+    """A notifier that records what it was told instead of blocking on a dialog."""
+
+    def __init__(self, sound=None):
+        self.sound = sound
+        self.failures = []
+
+    def notify_failure(self, message):
+        self.failures.append(message)
+        return True
+
+
+class SettingsChangeTests(unittest.TestCase):
+    """What counts as a change, and what the confirmation line calls it."""
+
+    def changes(self, **fields):
+        return clop_monitor.settings_changes(clop_monitor.MonitorSettings(), fields.pop("to"))
+
+    def test_an_untouched_file_changes_nothing(self):
+        settings = clop_monitor.MonitorSettings()
+        self.assertEqual(clop_monitor.settings_changes(settings, settings), ())
+
+    def test_what_the_file_left_out_is_not_a_change(self):
+        # defaults_used and file_found describe the file, not what the monitor is doing, so
+        # they must not make an otherwise identical reload look like an edit.
+        settings = clop_monitor.MonitorSettings()
+        noisy = clop_monitor.replace(
+            settings, defaults_used=("alerts.news",), file_found=False
+        )
+        self.assertEqual(clop_monitor.settings_changes(settings, noisy), ())
+
+    def test_each_section_is_named_the_way_the_file_names_it(self):
+        self.assertEqual(
+            self.changes(to=clop_monitor.MonitorSettings(alerts=AlertCategorySettings(news=False))),
+            ("alerts",),
+        )
+        self.assertEqual(
+            self.changes(
+                to=clop_monitor.MonitorSettings(
+                    alerts=AlertCategorySettings(report_ignore=("Build % completed.",))
+                )
+            ),
+            ("reports.ignore",),
+        )
+        self.assertEqual(
+            self.changes(
+                to=clop_monitor.MonitorSettings(
+                    alerts=AlertCategorySettings(
+                        market_goods=(clop_monitor.WatchedGood("Oil"),)
+                    )
+                )
+            ),
+            ("market.goods",),
+        )
+        self.assertEqual(
+            self.changes(
+                to=clop_monitor.MonitorSettings(
+                    sound=clop_monitor.SoundSettings(loop_while_popup_open=True)
+                )
+            ),
+            ("sound",),
+        )
+        self.assertEqual(
+            self.changes(to=clop_monitor.MonitorSettings(cache=clop_monitor.CacheSettings(False))),
+            ("cache",),
+        )
+        self.assertEqual(
+            self.changes(
+                to=clop_monitor.MonitorSettings(
+                    fourchan_thread=parse_fourchan_thread_url(
+                        "https://boards.4chan.org/mlp/thread/1"
+                    )
+                )
+            ),
+            ("fourchan.thread_url",),
+        )
+
+
+class SettingsReloadTests(unittest.TestCase):
+    """settings.json is re-read every poll and applied in full or not at all."""
+
+    #: The 4chan thread's own tests aside, no reload here may build a client of its own.
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("This reload must not build a client")
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "settings.json"
+        self.notifier = ReloadNotifier()
+        self.built = []
+
+    def build_notifier(self, sound):
+        self.built.append(sound)
+        return ReloadNotifier(sound)
+
+    def write(self, value):
+        self.path.write_text(json.dumps(value), encoding="utf-8")
+
+    def load(self, value):
+        self.write(value)
+        return load_settings(self.path)
+
+    def reload(self, settings, client):
+        """The reload as main drives it, with its terminal output captured."""
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            reloaded, notifier = clop_monitor.reload_settings(
+                self.path, settings, client, self.notifier, self.build_notifier
+            )
+        return reloaded, notifier, stdout.getvalue()
+
+    def test_an_unchanged_file_does_no_work_at_all(self):
+        # The point of gating on change detection: a file nobody touched must not rebuild
+        # the notifier, spend a request, or say anything.
+        settings = self.load({"alerts": {"news": False}})
+        client, calls = market_client({}, goods=())
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(self.built, [])
+        self.assertEqual(calls, [])
+        self.assertEqual(output, "")
+        self.assertEqual(self.notifier.failures, [])
+
+    def test_a_changed_alert_category_is_applied_and_named(self):
+        settings = self.load({"alerts": {"news": True}})
+        self.write({"alerts": {"news": False}})
+        client, calls = market_client({}, goods=())
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertFalse(reloaded.alerts.news)
+        self.assertEqual(output, "Settings reloaded: alerts.\n")
+        self.assertEqual(calls, [])
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(self.built, [])
+
+    def test_a_newly_watched_good_re_runs_the_preflight(self):
+        settings = self.load({})
+        self.write({"market": {"goods": {"Oil": {"alliance": False}}}})
+        client, calls = market_client({"buyermarketplace.php": MARKET_FORM}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertEqual(client.market_goods, (("Oil", 1),))
+        self.assertEqual([path for path, _ in calls], ["buyermarketplace.php"])
+        self.assertEqual(output, "Settings reloaded: market.goods.\n")
+        self.assertEqual([good.name for good in reloaded.alerts.market_goods], ["Oil"])
+
+    def test_an_unchanged_watch_list_does_not_re_run_the_preflight(self):
+        goods = {"Oil": {"alliance": False}}
+        settings = self.load({"market": {"goods": goods}, "alerts": {"news": True}})
+        self.write({"market": {"goods": goods}, "alerts": {"news": False}})
+        client, calls = market_client({}, goods=(("Oil", 1),))
+        self.reload(settings, client)
+        self.assertEqual(calls, [])
+        self.assertEqual(client.market_goods, (("Oil", 1),))
+
+    def test_muting_the_market_category_releases_the_preflight(self):
+        # Muting has to release the resolved goods the same way deleting them would, or the
+        # monitor keeps POSTing once a poll for orders nothing reads.
+        goods = {"Oil": {"alliance": False}}
+        settings = self.load({"market": {"goods": goods}})
+        self.write({"market": {"goods": goods}, "alerts": {"market_orders": False}})
+        client, calls = market_client({}, goods=(("Oil", 1),), alliance_id=7)
+        _, _, output = self.reload(settings, client)
+        self.assertEqual(client.market_goods, ())
+        self.assertIsNone(client.alliance_id)
+        self.assertEqual(calls, [])
+        self.assertIn("market.goods", output)
+
+    def test_changed_sound_settings_rebuild_the_notifier(self):
+        settings = self.load({"sound": {"loop_while_popup_open": False}})
+        self.write({"sound": {"loop_while_popup_open": True}})
+        client, _ = market_client({}, goods=())
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertEqual(self.built, [reloaded.sound])
+        self.assertIsNot(notifier, self.notifier)
+        self.assertEqual(notifier.sound, reloaded.sound)
+        self.assertEqual(output, "Settings reloaded: sound.\n")
+
+    def test_a_reload_that_leaves_the_sound_alone_keeps_the_notifier(self):
+        settings = self.load({"alerts": {"news": True}})
+        self.write({"alerts": {"news": False}})
+        client, _ = market_client({}, goods=())
+        _, notifier, _ = self.reload(settings, client)
+        self.assertEqual(self.built, [])
+        self.assertIs(notifier, self.notifier)
+
+    def test_an_unreadable_file_warns_and_keeps_the_previous_settings(self):
+        settings = self.load({"alerts": {"news": False}})
+        self.path.unlink()
+        self.path.mkdir()
+        client, calls = market_client({}, goods=())
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(len(self.notifier.failures), 1)
+        self.assertIn("still in force", self.notifier.failures[0])
+        self.assertIn("still polling", self.notifier.failures[0])
+        self.assertEqual(output, "")
+        self.assertEqual(calls, [])
+
+    def test_a_malformed_file_warns_and_keeps_the_previous_settings(self):
+        settings = self.load({"alerts": {"news": False}})
+        self.path.write_text("{not json", encoding="utf-8")
+        client, _ = market_client({}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertIn("Could not read settings file", self.notifier.failures[0])
+        self.assertEqual(output, "")
+
+    def test_a_file_that_fails_validation_warns_and_keeps_the_previous_settings(self):
+        settings = self.load({"alerts": {"news": False}})
+        self.write({"alerts": {"news": "yes please"}})
+        client, _ = market_client({}, goods=())
+        reloaded, _, _ = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertFalse(reloaded.alerts.news)
+        self.assertIn("must be true or false", self.notifier.failures[0])
+
+    def test_an_unresolvable_good_rejects_the_whole_reload(self):
+        # The alert half of a file must not land while its market half is refused; "which
+        # settings are live" has to stay answerable as one whole file.
+        settings = self.load({"alerts": {"news": True}})
+        self.write(
+            {
+                "alerts": {"news": False},
+                "market": {"goods": {"Unobtainium": {"alliance": False}}},
+            }
+        )
+        client, _ = market_client({"buyermarketplace.php": MARKET_FORM}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertTrue(reloaded.alerts.news)
+        self.assertEqual(reloaded.alerts.market_goods, ())
+        self.assertEqual(client.market_goods, ())
+        self.assertIn("Unobtainium", self.notifier.failures[0])
+        self.assertIn("None of it was applied", self.notifier.failures[0])
+        self.assertEqual(output, "")
+
+    def _thread(self, thread_id):
+        return {"fourchan": {"thread_url": f"https://boards.4chan.org/mlp/thread/{thread_id}"}}
+
+    def test_a_swapped_thread_re_runs_the_preflight_and_baselines_it(self):
+        settings = self.load(self._thread(1))
+        self.write(self._thread(2))
+        baseline = FourChanPost(
+            "https://boards.4chan.org/mlp/thread/2", 99, 1700000000, "Anonymous", "hello"
+        )
+        watched = []
+
+        class PreflightClient:
+            def __init__(self, base_url, username, password, fourchan_thread=None, **kwargs):
+                del base_url, username, password, kwargs
+                watched.append(fourchan_thread)
+
+            def _latest_fourchan_post(self):
+                return baseline
+
+        client, _ = market_client({}, goods=())
+        with mock.patch.object(clop_monitor, "ClopClient", PreflightClient):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertEqual([thread.thread_id for thread in watched], [2])
+        self.assertEqual(client.fourchan_thread, reloaded.fourchan_thread)
+        self.assertEqual(client.fourchan_thread.thread_id, 2)
+        self.assertIs(client.initial_fourchan_post, baseline)
+        self.assertEqual(output, "Settings reloaded: fourchan.thread_url.\n")
+
+        # The baseline is adopted rather than alerted on: the poll after the swap compares a
+        # post from the new thread against a marker from the old one.
+        previous = Snapshot(
+            0,
+            0,
+            None,
+            FourChanPost("https://boards.4chan.org/mlp/thread/1", 5, 1, "Anonymous", "old"),
+        )
+        self.assertEqual(build_alerts(previous, Snapshot(0, 0, None, baseline)), [])
+
+    def test_switching_the_thread_off_stops_watching_without_a_request(self):
+        settings = self.load(self._thread(1))
+        self.write({"fourchan": {"thread_url": None}})
+        client, _ = market_client({}, goods=())
+        client.fourchan_thread = settings.fourchan_thread
+        with mock.patch.object(clop_monitor, "ClopClient", self.ForbiddenClient):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIsNone(reloaded.fourchan_thread)
+        self.assertIsNone(client.fourchan_thread)
+        self.assertIsNone(client.initial_fourchan_post)
+        self.assertIn("fourchan.thread_url", output)
+
+    def test_a_newly_configured_archived_thread_is_a_rejected_reload(self):
+        # A thread that is already archived when you name it is a typo in a text file, not
+        # the game telling a running watch that its job is over.
+        settings = self.load({"alerts": {"news": True}})
+        broken = dict(self._thread(2))
+        broken["alerts"] = {"news": False}
+        self.write(broken)
+
+        class ArchivedClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            def _latest_fourchan_post(self):
+                raise ArchivedThreadError("Configured 4chan thread is archived")
+
+        client, _ = market_client({}, goods=())
+        with mock.patch.object(clop_monitor, "ClopClient", ArchivedClient):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertTrue(reloaded.alerts.news)
+        self.assertIsNone(client.fourchan_thread)
+        self.assertIn("archived", self.notifier.failures[0])
+        self.assertIn("still polling", self.notifier.failures[0])
+        self.assertEqual(output, "")
+
+
+class PollingClient:
+    """A client that logs in, watches nothing, and sees two unread messages every poll."""
+
+    base_url = "https://4clop.org/"
+
+    def __init__(self, *args, **kwargs):
+        del args
+        self.fourchan_thread = kwargs.get("fourchan_thread")
+        self.initial_fourchan_post = kwargs.get("initial_fourchan_post")
+        self.market_goods = ()
+        self.alliance_id = None
+
+    def login(self):
+        return None
+
+    def market_preflight(self, goods):
+        del goods
+        return None
+
+    def snapshot(self, include_market=True):
+        del include_market
+        return Snapshot(2, 0, None)
+
+
+class SettingsReloadThroughMainTests(unittest.TestCase):
+    """The reload as the polling loop drives it, end to end through main()."""
+
+    def _record_notifiers(self):
+        """Replace Notifier so a test can read every dialog, alert and rebuild."""
+        built = []
+
+        class RecordingNotifier(Notifier):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.messages = []
+                self.failures = []
+                built.append(self)
+
+            def notify(self, message):
+                self.messages.append(message)
+                return False
+
+            def notify_failure(self, message):
+                self.failures.append(message)
+                return True
+
+        patcher = mock.patch.object(clop_monitor, "Notifier", RecordingNotifier)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return built
+
+    def _run(self, directory, settings_value, sleep, client=PollingClient):
+        """Drive main() against a scripted client, with ``sleep`` editing between polls."""
+        path = Path(directory) / "settings.json"
+        path.write_text(json.dumps(settings_value), encoding="utf-8")
+        with mock.patch.object(clop_monitor, "ClopClient", client), mock.patch.object(
+            clop_monitor.time, "sleep", sleep
+        ), mock.patch.dict(clop_monitor.os.environ, {"CLOP_PASSWORD": "secret"}):
+            return path, main(
+                [
+                    "--settings",
+                    str(path),
+                    "--env-file",
+                    str(Path(directory) / "absent.env"),
+                    "--username",
+                    "tester",
+                    "--state",
+                    str(Path(directory) / "state.json"),
+                    "--no-desktop-notifications",
+                ]
+            )
+
+    def test_a_changed_alert_category_takes_effect_on_the_next_poll(self):
+        notifiers = self._record_notifiers()
+        quiet = {"alerts": {"user_messages": False}, "cache": {"persist_to_file": False}}
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            path = Path(directory) / "settings.json"
+
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) == 1:
+                    path.write_text(json.dumps(quiet), encoding="utf-8")
+                else:
+                    raise KeyboardInterrupt
+
+            _, code = self._run(
+                directory,
+                {"alerts": {"user_messages": True}, "cache": {"persist_to_file": False}},
+                sleep,
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 2)
+        # The bootstrap notifier is built before the settings are read; the real one is next.
+        self.assertEqual(len(notifiers[1].messages), 1)
+        self.assertIn("unread user message", notifiers[1].messages[0])
+
+    def test_a_broken_file_warns_every_poll_and_keeps_polling(self):
+        # A monitor running on settings you think you replaced is worth interrupting more
+        # than once, so the warning repeats for as long as the file stays broken.
+        notifiers = self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            path = Path(directory) / "settings.json"
+
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) == 1:
+                    path.write_text("{not json", encoding="utf-8")
+                elif len(polls) == 3:
+                    raise KeyboardInterrupt
+
+            _, code = self._run(directory, {"cache": {"persist_to_file": False}}, sleep)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 3)
+        failures = notifiers[1].failures
+        self.assertEqual(len(failures), 2)
+        for failure in failures:
+            self.assertIn("still polling", failure)
+        # Polling never stopped: every iteration still read the game.
+        self.assertEqual(len(notifiers[1].messages), 3)
+
+    def test_a_thread_that_archives_while_watched_still_stops_the_monitor(self):
+        notifiers = self._record_notifiers()
+
+        class ArchivingClient(PollingClient):
+            def _latest_fourchan_post(self):
+                return FourChanPost(
+                    "https://boards.4chan.org/mlp/thread/1", 5, 1, "Anonymous", "hi"
+                )
+
+            def snapshot(self, include_market=True):
+                del include_market
+                raise ArchivedThreadError(
+                    "Configured 4chan thread is archived and cannot receive new posts"
+                )
+
+        def unexpected_sleep(seconds):
+            del seconds
+            raise AssertionError("An archived thread must stop the monitor, not retry")
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            _, code = self._run(
+                directory,
+                {
+                    "cache": {"persist_to_file": False},
+                    "fourchan": {"thread_url": "https://boards.4chan.org/mlp/thread/1"},
+                },
+                unexpected_sleep,
+                client=ArchivingClient,
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("archived", notifiers[1].failures[0])
+        self.assertIn("The monitor has stopped", notifiers[1].failures[0])
+
+
 if __name__ == "__main__":
     unittest.main()

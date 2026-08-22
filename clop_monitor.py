@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 
 DEFAULT_BASE_URL = "https://4clop.org/"
@@ -1659,6 +1659,119 @@ def check_and_notify(
     return current, paused_for_alert
 
 
+def settings_changes(previous: MonitorSettings, current: MonitorSettings) -> Tuple[str, ...]:
+    """The settings sections that differ, named the way settings.json names them.
+
+    Named per section rather than as one "something changed" because the only question the
+    person who just saved the file has is whether *their* edit took. ``defaults_used`` and
+    ``file_found`` describe the file rather than what the monitor is doing, so they are not
+    compared at all.
+
+    The market is compared through ``goods_to_watch`` rather than ``alerts.market_goods`` so
+    that muting ``alerts.market_orders`` reads as "nothing watched" and releases the
+    preflight, exactly as deleting the goods would.
+    """
+
+    def categories(alerts: AlertCategorySettings) -> AlertCategorySettings:
+        # reports.ignore and market.goods live on this dataclass but are their own sections
+        # in the file, so they are held aside here and named separately below.
+        return replace(alerts, report_ignore=(), market_goods=())
+
+    changes: List[str] = []
+    if categories(previous.alerts) != categories(current.alerts):
+        changes.append("alerts")
+    if previous.alerts.report_ignore != current.alerts.report_ignore:
+        changes.append("reports.ignore")
+    if goods_to_watch(previous.alerts) != goods_to_watch(current.alerts):
+        changes.append("market.goods")
+    if previous.sound != current.sound:
+        changes.append("sound")
+    if previous.cache != current.cache:
+        changes.append("cache")
+    if previous.fourchan_thread != current.fourchan_thread:
+        changes.append("fourchan.thread_url")
+    return tuple(changes)
+
+
+def reload_settings(
+    path: Path,
+    settings: MonitorSettings,
+    client: ClopClient,
+    notifier: Notifier,
+    build_notifier: Callable[[SoundSettings], Notifier],
+) -> Tuple[MonitorSettings, Notifier]:
+    """Re-read settings.json for the coming poll, applying it in full or not at all.
+
+    A file that cannot be read, parsed, validated or brought into service is refused whole:
+    the monitor warns through the same blocking dialog as a failed poll, keeps the settings
+    it already had, and keeps polling. Applying only the half that worked would leave the
+    live configuration a mixture of two files with nothing naming which parts came from
+    where, and ending an overnight run over a stray keystroke in a text file is worse than
+    running on yesterday's settings for another minute.
+
+    Returns the settings and the notifier to use from here on, which are the ones passed in
+    whenever nothing changed or the reload was refused.
+    """
+    try:
+        reloaded = load_settings(path)
+    except MonitorError as error:
+        notifier.notify_failure(
+            f"settings.json could not be reloaded: {error}\n\n"
+            "The previous settings are still in force and the monitor is still polling."
+        )
+        return settings, notifier
+
+    changes = settings_changes(settings, reloaded)
+    # An untouched file costs this read and nothing else: no preflight, no request, no
+    # rebuilt notifier, no output.
+    if not changes:
+        return settings, notifier
+
+    # Everything that can fail runs before anything is applied. The 4chan check goes first
+    # because it works through a throwaway client and touches nothing, where market_preflight
+    # assigns to this client the moment it succeeds.
+    thread_changed = "fourchan.thread_url" in changes
+    goods = goods_to_watch(reloaded.alerts)
+    fourchan_post: Optional[FourChanPost] = None
+    try:
+        if thread_changed and reloaded.fourchan_thread is not None:
+            fourchan_post = ClopClient(
+                client.base_url, "", "", fourchan_thread=reloaded.fourchan_thread
+            )._latest_fourchan_post()
+        if "market.goods" in changes:
+            if goods:
+                client.market_preflight(goods)
+            else:
+                # market_preflight returns early with nothing to resolve, leaving these
+                # fields as they were. That is right for a startup that never set them, but
+                # a reload that emptied the watch list has to clear them or the monitor keeps
+                # POSTing once a poll for goods nobody is watching any more.
+                client.market_goods = ()
+                client.alliance_id = None
+    except MonitorError as error:
+        # ArchivedThreadError arrives here too, and is deliberately not fatal: a thread that
+        # is already archived when you name it is a typo in a text file, not the game telling
+        # a running watch that its job is over.
+        notifier.notify_failure(
+            f"The new settings.json could not be brought into service: {error}\n\n"
+            "None of it was applied. The previous settings are still in force and the "
+            "monitor is still polling."
+        )
+        return settings, notifier
+
+    if thread_changed:
+        client.fourchan_thread = reloaded.fourchan_thread
+        # The thread's current last post becomes the baseline, exactly as at startup, so the
+        # swap does not alert for a post that was already there when it was configured.
+        client.initial_fourchan_post = fourchan_post
+    if reloaded.sound != settings.sound:
+        notifier = build_notifier(reloaded.sound)
+    # A confirmation rather than a warning, so it stays a terminal line: popups are reserved
+    # for things that are wrong.
+    print("Settings reloaded: " + ", ".join(changes) + ".", flush=True)
+    return reloaded, notifier
+
+
 def validate_base_url(base_url: str) -> str:
     parsed = urllib.parse.urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -1721,11 +1834,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if startup_message is not None:
         print(startup_message, flush=True)
 
-    notifier = Notifier(
-        desktop=not args.no_desktop_notifications,
-        webhook_url=os.environ.get("CLOP_WEBHOOK_URL") or env_file.get("CLOP_WEBHOOK_URL"),
-        sound=settings.sound,
-    )
+    webhook_url = os.environ.get("CLOP_WEBHOOK_URL") or env_file.get("CLOP_WEBHOOK_URL")
+
+    def build_notifier(sound: SoundSettings) -> Notifier:
+        """The notifier for a set of sound settings, which a reload may replace."""
+        return Notifier(
+            desktop=not args.no_desktop_notifications,
+            webhook_url=webhook_url,
+            sound=sound,
+        )
+
+    notifier = build_notifier(settings.sound)
     if args.test_notification:
         notifier.notify("Test notification")
         return 0
@@ -1786,6 +1905,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             flush=True,
         )
         while True:
+            # Before the check rather than after it, so that an edit takes effect on the very
+            # next poll rather than the one after.
+            settings, notifier = reload_settings(
+                settings_path, settings, client, notifier, build_notifier
+            )
             poll_failed = False
             try:
                 current, _ = check_and_notify(
