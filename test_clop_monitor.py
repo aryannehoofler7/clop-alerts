@@ -2418,5 +2418,119 @@ class MutedMarketTests(unittest.TestCase):
         self.assertIsNone(client.alliance_id)
 
 
+class MarketThroughAPollTests(unittest.TestCase):
+    """The market halves joined: settings and pages in, a notifier message out.
+
+    Every other check_and_notify test passes the default AlertCategorySettings, which watches
+    no goods, so without these the market branch of build_alerts never runs inside the poll
+    loop at all and the fetching, the alerting and the muting are each proven only alone.
+    """
+
+    #: No pending counts, no news and no reports, so a market block is the only alert a poll
+    #: here can raise and the notifier needs no filtering.
+    QUIET_NAVIGATION = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
+
+    class RecordingNotifier:
+        """Records what it was told and never blocks, so a poll runs straight through."""
+
+        def __init__(self):
+            self.messages = []
+
+        def notify(self, message):
+            self.messages.append(message)
+            return False
+
+    def pages(self, rows_by_resource_id):
+        return {
+            "index.php": self.QUIET_NAVIGATION,
+            "news.php?page=1": self.QUIET_NAVIGATION + "<h3>News</h3>No news yet.",
+            "reports.php": self.QUIET_NAVIGATION + "<h3>Reports</h3><table></table>",
+            "buyermarketplace.php": market_responder(rows_by_resource_id),
+        }
+
+    def poll(self, client, previous, notifier, settings):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            current, _ = check_and_notify(
+                client, previous, notifier, state, settings, persist_state=False
+            )
+        return current
+
+    def test_a_pending_order_alerts_on_every_poll_it_is_still_pending_for(self):
+        # The premise of the whole feature: an order is a standing fact, not an event, so an
+        # unchanged second poll must alert again rather than treat it as already seen.
+        client, _ = market_client(
+            self.pages({"10": [market_row(42, "Luna Sueno", "text-info", 12, "5,000")]})
+        )
+        notifier = self.RecordingNotifier()
+        settings = AlertCategorySettings(
+            market_goods=(clop_monitor.WatchedGood("Machinery Parts"),)
+        )
+        first = self.poll(client, None, notifier, settings)
+        second = self.poll(client, first, notifier, settings)
+        self.assertEqual(first.market_orders, second.market_orders)
+        self.assertEqual(len(notifier.messages), 2)
+        for message in notifier.messages:
+            self.assertIn("Buy orders for Machinery Parts:", message)
+            self.assertIn("Luna Sueno (friend) wants 12 at 5,000 bits each", message)
+
+    def test_a_muted_market_costs_no_request_across_a_whole_poll(self):
+        # settings.json in, requests out: the marketplace is served here, so the only reason
+        # for no call to it is that muting stopped the work rather than discarded its result.
+        value = shipped_example()
+        value["alerts"]["market_orders"] = False
+        value["market"]["goods"] = {
+            "Machinery Parts": {"friends": True, "alliance": True, "always": [], "never": []}
+        }
+        # The bundled WAV is reached relative to the settings file, which a temp directory
+        # has no copy of; the sound is irrelevant here.
+        value["sound"]["wav_path"] = None
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            settings = load_settings(path)
+        self.assertEqual(
+            [good.name for good in settings.alerts.market_goods], ["Machinery Parts"]
+        )
+
+        client, calls = market_client(
+            self.pages({"10": [market_row(42, "Luna Sueno", "text-info", 12, "5,000")]}),
+            # Nothing is watched until the preflight resolves it, exactly as at startup.
+            goods=(),
+        )
+        self.assertIsNone(
+            client.market_preflight(clop_monitor.goods_to_watch(settings.alerts))
+        )
+        notifier = self.RecordingNotifier()
+        current = self.poll(client, None, notifier, settings.alerts)
+        self.assertEqual(current.market_orders, ())
+        self.assertEqual(notifier.messages, [])
+        self.assertEqual([path for path, _ in calls if path == "buyermarketplace.php"], [])
+
+    def test_a_good_typed_in_the_wrong_case_survives_preflight_and_alerts(self):
+        # The seam an earlier bug lived on: the preflight stores the game's spelling and the
+        # orders are stamped with it, while the alert block is headed with the settings file's
+        # spelling, so the two must be paired case-insensitively across the whole poll.
+        client, _ = market_client(
+            self.pages({"10": [market_row(42, "Luna Sueno", "text-info", 12, "5,000")]}),
+            goods=(),
+        )
+        # alliance=False keeps the preflight off the nation and alliance pages, which this
+        # test's fixtures do not serve and which the case question does not touch.
+        good = clop_monitor.WatchedGood("machinery PARTS", alliance=False)
+        message = client.market_preflight((good,))
+        self.assertIn("watching Machinery Parts", message)
+        self.assertEqual(client.market_goods, (("Machinery Parts", 10),))
+
+        notifier = self.RecordingNotifier()
+        current = self.poll(
+            client, None, notifier, AlertCategorySettings(market_goods=(good,))
+        )
+        self.assertEqual([order.good for order in current.market_orders], ["Machinery Parts"])
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("Buy orders for machinery PARTS:", notifier.messages[0])
+        self.assertIn("Luna Sueno (friend) wants 12 at 5,000 bits each", notifier.messages[0])
+
+
 if __name__ == "__main__":
     unittest.main()
