@@ -348,6 +348,25 @@ by exactly the same rule as report ignore patterns: matching **ignores case**, a
 **anywhere** in the name, `%` stands for **any run of characters**, everything else is literal, and
 an entry starting with `#` is switched off.
 
+**Write the nation name, not the player's username.** These two are different things in CLOP and
+are usually nothing like each other: the player `Lacera Viscera` plays a nation called
+`Fish Bucket`, and `Winter Moon` plays `Green Mountain Republic`. What you write here is matched
+against the **Buyer column of the buyer's marketplace**, which shows the nation. Open the market,
+select the good, and copy the name you see there — a username will simply never match, and it will
+fail silently, because a name that matches nothing is indistinguishable from a nation that has not
+posted an order.
+
+There is a second consequence of that. A player may own more than one nation, and the two kinds of
+setting treat that differently:
+
+- `friends` and `alliance` work at the **player** level, because the game decides both from the
+  account behind the nation. Every nation that player owns is covered.
+- `always` and `never` work at the **nation** level. `"never": ["Fish Bucket"]` silences that one
+  nation and none of the same player's others.
+
+So to silence a player who fields several nations, list each nation, or use `%` to cover a shared
+naming pattern if they have one.
+
 `never` beats `always`, and `always` beats both relation checks. So a nation named in `always`
 alerts even when it is your enemy, and both checks switched off with a populated `always` reads as
 "only these nations, whoever they are":

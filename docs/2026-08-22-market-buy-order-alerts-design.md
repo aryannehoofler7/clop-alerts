@@ -207,6 +207,28 @@ alliance mid-run is not detected; restart the monitor.
 A nation with no alliance resolves to an empty roster, so `alliance: true` matches nothing. That
 is a startup note, not an error.
 
+### Which name the overrides match, and at what level
+
+`always` and `never` match the **nation** name — `n.name`, rendered in the Buyer column
+(`backend_buyermarketplace.php:265`) — never the player's username. In CLOP the two are unrelated
+strings: on the live game the player `Lacera Viscera` fields the nation `Fish Bucket`, and
+`Winter Moon` fields `Green Mountain Republic`. A username written into `always` or `never` cannot
+match anything, and fails silently, because "matched nothing" is indistinguishable from "that
+nation posted no order".
+
+The three settings also resolve at two different levels, which matters when a player owns more than
+one nation:
+
+| Setting | Resolved from | Level |
+|---|---|---|
+| `friends` | the blue span, which the game derives from `friends.friendee` — a **user_id** | player |
+| `alliance` | `nation_id` membership of the roster, which lists every nation of every member user | player |
+| `always` / `never` | the nation-name text of the one order | nation |
+
+So `friends` and `alliance` cover every nation a player owns, while a `never` entry silences only
+the nation it names. This is not a defect — naming a nation is what the Buyer column lets you do —
+but it is the one asymmetry in the feature, and the README states it.
+
 ### Deciding on one order
 
 For each order under a watched good, in this order:

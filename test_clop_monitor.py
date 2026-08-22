@@ -2415,6 +2415,34 @@ class MutedMarketTests(unittest.TestCase):
         self.assertIsNone(client.alliance_id)
 
 
+class OverrideNameIsTheNationTests(unittest.TestCase):
+    """always and never match the Buyer column, which is the nation, never the username.
+
+    The two are unrelated strings in CLOP: on the live game the player 'Lacera Viscera' fields
+    the nation 'Fish Bucket'. A username written into either list matches nothing, and does so
+    silently, so this pins which one the parser puts in front of the patterns.
+    """
+
+    def orders(self):
+        return clop_monitor.parse_market_orders(
+            market_page(market_row(26, "Fish Bucket", "text-success", 35, "1,000")),
+            "Machinery Parts",
+            frozenset({26}),
+        )
+
+    def test_the_buyer_column_supplies_the_nation_name(self):
+        self.assertEqual(self.orders()[0].nation_name, "Fish Bucket")
+
+    def test_never_silences_by_nation_name(self):
+        good = clop_monitor.WatchedGood("Machinery Parts", never=("Fish Bucket",))
+        self.assertFalse(clop_monitor.market_order_alerts(self.orders()[0], good))
+
+    def test_the_players_username_matches_nothing(self):
+        good = clop_monitor.WatchedGood("Machinery Parts", never=("Lacera Viscera",))
+        # The ally still alerts: the username never reached the comparison.
+        self.assertTrue(clop_monitor.market_order_alerts(self.orders()[0], good))
+
+
 class MarketThroughAPollTests(unittest.TestCase):
     """The market halves joined: settings and pages in, a notifier message out.
 
