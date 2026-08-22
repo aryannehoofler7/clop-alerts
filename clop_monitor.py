@@ -1208,7 +1208,7 @@ class ClopClient:
             if not orders_for_good and EMPTY_MARKET_MARKER not in html:
                 raise MonitorError(
                     f"The buyer's marketplace did not return the order table for {good}; "
-                    "the session may have expired"
+                    "the session may have expired, or the page may have changed"
                 )
             orders.extend(orders_for_good)
         return tuple(orders)
