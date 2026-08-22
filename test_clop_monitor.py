@@ -1754,11 +1754,19 @@ class MarketFormParsingTests(unittest.TestCase):
             clop_monitor.parse_current_nation_id(MULTI_NATION_HEADER.replace(" selected ", " "))
         )
 
-    def test_a_nation_page_yields_its_alliance_id(self):
-        self.assertEqual(clop_monitor.parse_alliance_id(NATION_PAGE), 7)
+    def test_a_nation_page_yields_its_alliance_id_and_name(self):
+        self.assertEqual(clop_monitor.parse_alliance_link(NATION_PAGE), (7, "The Best Alliance"))
 
     def test_a_nation_page_without_an_alliance_link_yields_none(self):
-        self.assertIsNone(clop_monitor.parse_alliance_id("<h4>Alliance: none</h4>"))
+        self.assertIsNone(clop_monitor.parse_alliance_link("<h4>Alliance: none</h4>"))
+
+    def test_a_nation_in_no_alliance_yields_zero_rather_than_none(self):
+        # viewnation.php:23 links unconditionally, so "no alliance" arrives as alliance 0 and
+        # a caller testing `is not None` would go and fetch alliance 0.
+        link = clop_monitor.parse_alliance_link(
+            '<h4>Alliance: <a href="viewalliance.php?alliance_id=0">None</a></h4>'
+        )
+        self.assertEqual(link[0], 0)
 
     def test_the_alliance_page_yields_every_member_nation(self):
         self.assertEqual(
@@ -1951,31 +1959,67 @@ class MarketAlertTests(unittest.TestCase):
         self.assertNotIn("market_orders", snapshot.to_json())
 
 
+#: buyermarketplace.php:162-166 renders this only under `$_POST['resource_id'] && empty($errors)`,
+#: so it is the game's positive marker for "the request ran and nobody is buying".
+EMPTY_MARKET_BANNER = '<div class="alert alert-warning">Nobody wants to buy that item.</div>'
+
+#: What the page returns when it refuses the POST: the form comes back (with a rotated token,
+#: because backend_buyermarketplace.php:55-57 rotates unconditionally) but the deals SELECT at
+#: :264 sits inside `if (!$errors)`, so there is neither a table nor the empty-market banner.
+MARKET_ERROR_PAGE = MARKET_FORM + '<div class="alert alert-danger">Try again.</div>'
+
+
+def market_responder(rows_by_resource_id):
+    """buyermarketplace.php as the game serves it, keyed on the good the POST asked for.
+
+    The GET renders the form alone; the order table exists only for a POST, filtered to that
+    POST's resource_id. Serving the same page to both would let an implementation that read
+    the GET's HTML for every good pass.
+    """
+
+    def serve(form):
+        if form is None:
+            return MARKET_FORM
+        rows = rows_by_resource_id.get(form["resource_id"], ())
+        return MARKET_FORM + (market_page(*rows) if rows else EMPTY_MARKET_BANNER)
+
+    return serve
+
+
+def market_client(pages, goods=(("Machinery Parts", 10),), alliance_id=None):
+    """A client whose _open serves canned pages and records every call.
+
+    A page may be a string or a callable taking the POST form, which is None for a GET, so a
+    test can serve a path's GET and POST differently the way the real page does.
+    """
+    client = ClopClient("https://4clop.org", "user", "password")
+    client.market_goods = goods
+    client.alliance_id = alliance_id
+    calls = []
+
+    def fake_open(path, form=None):
+        calls.append((path, form))
+        if path == "myalliance.php":
+            raise AssertionError("myalliance.php marks alliance messages read")
+        if path not in pages:
+            raise AssertionError(f"Unexpected path: {path}")
+        page = pages[path]
+        return page(form) if callable(page) else page
+
+    client._open = fake_open
+    return client, calls
+
+
 class MarketFetchTests(unittest.TestCase):
     def client(self, pages, goods=(("Machinery Parts", 10),), alliance_id=None):
-        """A client whose _open serves canned pages and records every call."""
-        client = ClopClient("https://4clop.org", "user", "password")
-        client.market_goods = goods
-        client.alliance_id = alliance_id
-        calls = []
-
-        def fake_open(path, form=None):
-            calls.append((path, form))
-            if path == "myalliance.php":
-                raise AssertionError("myalliance.php marks alliance messages read")
-            if path not in pages:
-                raise AssertionError(f"Unexpected path: {path}")
-            page = pages[path]
-            return page(form) if callable(page) else page
-
-        client._open = fake_open
-        return client, calls
+        return market_client(pages, goods, alliance_id)
 
     def test_each_post_spends_the_token_from_the_previous_response(self):
         tokens = iter(["token-1", "token-2", "token-3"])
 
-        def form(_form=None):
-            return MARKET_FORM.replace("abc123", next(tokens))
+        def form(posted=None):
+            page = MARKET_FORM.replace("abc123", next(tokens))
+            return page if posted is None else page + EMPTY_MARKET_BANNER
 
         client, calls = self.client(
             {"buyermarketplace.php": form},
@@ -1993,7 +2037,7 @@ class MarketFetchTests(unittest.TestCase):
         # offer, remove, sellone, sellall and sellamount are the only fields that make
         # backend_buyermarketplace.php spend funds, delete orders or sell goods; without
         # them the POST is a pure filter-and-display of the deals table.
-        client, calls = self.client({"buyermarketplace.php": MARKET_FORM})
+        client, calls = self.client({"buyermarketplace.php": market_responder({})})
         client._market_orders(None)
         posts = [form_data for _, form_data in calls if form_data is not None]
         self.assertEqual(len(posts), 1)
@@ -2002,8 +2046,13 @@ class MarketFetchTests(unittest.TestCase):
         )
 
     def test_orders_are_tagged_with_the_good_that_was_requested(self):
-        page = MARKET_FORM + market_page(market_row(42, "Luna Sueno", "text-info", 12, "5,000"))
-        client, _ = self.client({"buyermarketplace.php": page})
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": market_responder(
+                    {"10": [market_row(42, "Luna Sueno", "text-info", 12, "5,000")]}
+                )
+            }
+        )
         orders = client._market_orders(None)
         self.assertEqual([order.good for order in orders], ["Machinery Parts"])
         self.assertEqual(orders[0].nation_name, "Luna Sueno")
@@ -2012,6 +2061,98 @@ class MarketFetchTests(unittest.TestCase):
         client, _ = self.client({"buyermarketplace.php": "<form></form>"})
         with self.assertRaisesRegex(MonitorError, "CSRF token"):
             client._market_orders(None)
+
+    def test_each_goods_orders_come_from_its_own_response(self):
+        # The table is filtered server-side to the posted resource_id, so reading the wrong
+        # response would attribute one good's buyers to another.
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": market_responder(
+                    {
+                        "3": [market_row(42, "Apple Buyer", "text-info", 12, "5,000")],
+                        "1": [market_row(43, "Oil Buyer", "text-success", 3, "4,800")],
+                    }
+                )
+            },
+            goods=(("Apples", 3), ("Oil", 1)),
+        )
+        orders = client._market_orders(None)
+        self.assertEqual(
+            [(order.good, order.nation_name) for order in orders],
+            [("Apples", "Apple Buyer"), ("Oil", "Oil Buyer")],
+        )
+
+    def test_the_request_shape_is_one_get_plus_one_post_per_good(self):
+        # Pins the N+1 shape so a refactor cannot quietly make it N squared.
+        goods = (("Apples", 3), ("Oil", 1), ("Pies", 5), ("Gems", 7), ("Copper", 9))
+        client, calls = self.client(
+            {"buyermarketplace.php": market_responder({})}, goods=goods
+        )
+        client._market_orders(None)
+        market_calls = [form for path, form in calls if path == "buyermarketplace.php"]
+        self.assertEqual(len(market_calls), len(goods) + 1)
+        self.assertEqual([form is None for form in market_calls], [True] + [False] * len(goods))
+
+    def test_a_genuinely_empty_market_is_no_orders_and_no_error(self):
+        client, _ = self.client({"buyermarketplace.php": market_responder({})})
+        self.assertEqual(client._market_orders(None), ())
+
+    def test_a_rejected_post_on_a_non_final_good_is_not_read_as_no_orders(self):
+        # The page rotates its token even when it rejects the POST, so the NEXT good's POST
+        # succeeds and the loop self-heals: without a check here the rejected good silently
+        # contributes zero orders and nothing ever reports it.
+        def serve(form):
+            if form is None:
+                return MARKET_FORM
+            if form["resource_id"] == "3":
+                return MARKET_ERROR_PAGE
+            return MARKET_FORM + market_page(market_row(1, "Oil Buyer", "text-info", 1, "100"))
+
+        client, _ = self.client(
+            {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
+        )
+        with self.assertRaisesRegex(MonitorError, "Apples"):
+            client._market_orders(None)
+
+    def test_a_rejected_post_on_the_final_good_is_not_read_as_no_orders(self):
+        def serve(form):
+            if form is None:
+                return MARKET_FORM
+            if form["resource_id"] == "1":
+                return MARKET_ERROR_PAGE
+            return MARKET_FORM + market_page(market_row(1, "Apple Buyer", "text-info", 1, "100"))
+
+        client, _ = self.client(
+            {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
+        )
+        with self.assertRaisesRegex(MonitorError, "Oil"):
+            client._market_orders(None)
+
+    def test_a_login_page_served_to_the_last_post_is_not_read_as_no_orders(self):
+        # A session that dies mid-loop gets the login form back, which has neither the order
+        # table nor the empty-market banner.
+        login_page = '<form action="login.php" method="post"><input name="username"/></form>'
+
+        def serve(form):
+            if form is None:
+                return MARKET_FORM
+            if form["resource_id"] == "1":
+                return login_page
+            return MARKET_FORM + market_page(market_row(1, "Apple Buyer", "text-info", 1, "100"))
+
+        client, _ = self.client(
+            {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
+        )
+        with self.assertRaisesRegex(MonitorError, "Oil"):
+            client._market_orders(None)
+
+    def test_an_unresolved_alliance_is_an_error_not_an_empty_roster(self):
+        # None means "never resolved", which is a different fact from "in no alliance"; a
+        # caller that got frozenset() for it would silently lose every ally.
+        client, calls = self.client({}, alliance_id=None)
+        with self.assertRaisesRegex(MonitorError, "not been resolved"):
+            client._alliance_roster()
+        self.assertEqual(calls, [])
 
     def test_the_roster_comes_from_viewalliance_never_myalliance(self):
         client, calls = self.client(
@@ -2063,13 +2204,14 @@ class MarketFetchTests(unittest.TestCase):
 
     def test_a_snapshot_with_goods_fetches_the_roster_and_the_orders(self):
         navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
-        page = MARKET_FORM + market_page(market_row(42, "Theirs", "text-danger", 12, "5,000"))
         client, calls = self.client(
             {
                 "index.php": navigation,
                 "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
                 "reports.php": navigation + "<h3>Reports</h3><table></table>",
-                "buyermarketplace.php": page,
+                "buyermarketplace.php": market_responder(
+                    {"10": [market_row(42, "Theirs", "text-danger", 12, "5,000")]}
+                ),
                 "viewalliance.php?alliance_id=7": ALLIANCE_PAGE,
             },
             alliance_id=7,
@@ -2083,19 +2225,8 @@ class MarketFetchTests(unittest.TestCase):
 
 class MarketPreflightTests(unittest.TestCase):
     def client(self, pages):
-        client = ClopClient("https://4clop.org", "user", "password")
-        calls = []
-
-        def fake_open(path, form=None):
-            calls.append((path, form))
-            if path == "myalliance.php":
-                raise AssertionError("myalliance.php marks alliance messages read")
-            if path not in pages:
-                raise AssertionError(f"Unexpected path: {path}")
-            return pages[path]
-
-        client._open = fake_open
-        return client, calls
+        # Nothing is watched until the preflight resolves it, which is what these tests drive.
+        return market_client(pages, goods=())
 
     def test_nothing_watched_makes_no_requests(self):
         client, calls = self.client({})
@@ -2184,6 +2315,34 @@ class MarketPreflightTests(unittest.TestCase):
         message = client.market_preflight((clop_monitor.WatchedGood("Oil"),))
         self.assertEqual(client.alliance_id, 0)
         self.assertIn("no alliance", message)
+
+    def test_an_unreadable_alliance_says_how_to_run_without_it(self):
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": MULTI_NATION_HEADER,
+                "viewnation.php?nation_id=12": "<h4>Alliance: none</h4>",
+            }
+        )
+        # A non-technical successor needs the way out, not just the diagnosis.
+        with self.assertRaisesRegex(MonitorError, 'alliance": false'):
+            client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+
+    def test_a_failed_preflight_leaves_nothing_half_applied(self):
+        # Assigning the goods before the alliance is known would let a caller that logged the
+        # error and carried on poll the market with alliance detection quietly degraded to
+        # the green-colour heuristic the roster exists to replace.
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": MULTI_NATION_HEADER,
+                "viewnation.php?nation_id=12": "<h4>Alliance: none</h4>",
+            }
+        )
+        with self.assertRaises(MonitorError):
+            client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+        self.assertEqual(client.market_goods, ())
+        self.assertIsNone(client.alliance_id)
 
     def test_the_alliance_is_not_resolved_when_no_good_checks_it(self):
         client, calls = self.client({"buyermarketplace.php": MARKET_FORM})

@@ -34,6 +34,10 @@ TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 COUNT_RE = re.compile(r"\(\s*(\d+)\s*\)")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HAVE_SUFFIX_RE = re.compile(r"\s*\(Have \d+\)$")
+#: The buyer's marketplace says this, and only this, when a POST ran and found no buyers
+#: (buyermarketplace.php:164). It is the one positive signal that separates a genuinely empty
+#: market from a request the page refused, which renders neither a table nor this banner.
+EMPTY_MARKET_MARKER = "Nobody wants to buy that item."
 
 
 class MonitorError(RuntimeError):
@@ -770,19 +774,22 @@ def _links(html: str) -> List[Tuple[str, str]]:
     return parser.links
 
 
-def parse_alliance_id(html: str) -> Optional[int]:
-    """The alliance linked from a nation page, or None when there is no such link.
+def parse_alliance_link(html: str) -> Optional[Tuple[int, str]]:
+    """The (id, name) of the alliance linked from a nation page, or None for no such link.
 
     viewnation.php:23 renders the link unconditionally, so a nation with no alliance yields
-    ``0`` rather than None; a caller deciding whether to fetch a roster has to treat that as
-    "no alliance", not as alliance number zero.
+    id ``0`` rather than None; a caller deciding whether to fetch a roster has to treat that
+    as "no alliance", not as alliance number zero.
+
+    The name comes back with the id because the only caller that wants one wants both, and
+    matching the link twice invites the two matches to drift apart.
     """
-    for href, _ in _links(html):
+    for href, text in _links(html):
         if _path_from_href(href) != "viewalliance.php":
             continue
         values = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query).get("alliance_id")
         if values and values[0].isdigit():
-            return int(values[0])
+            return int(values[0]), text
     return None
 
 
@@ -1043,7 +1050,13 @@ class ClopClient:
         self.initial_fourchan_post = initial_fourchan_post
         #: (good name, resource_id) pairs, filled in by market_preflight.
         self.market_goods: Tuple[Tuple[str, int], ...] = ()
-        #: The account's own alliance, or None when no watched good checks alliance.
+        #: The account's own alliance, with three distinct meanings:
+        #: ``None`` it has not been resolved — no watched good checks alliance, or the
+        #: preflight has not run or did not finish; membership is simply unknown.
+        #: ``0`` it was resolved and this nation is in no alliance, so nobody is an ally.
+        #: ``N`` it was resolved to alliance N, whose roster decides who is an ally.
+        #: The zero comes from the game: viewnation.php:23 renders the alliance link even for
+        #: a nation in no alliance, pointing it at alliance 0.
         self.alliance_id: Optional[int] = None
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
@@ -1125,8 +1138,17 @@ class ClopClient:
         Read from viewalliance.php. myalliance.php is never used: it sets
         alliance_messages_last_checked on every load, which would silently mark the alliance
         messages this monitor exists to report.
+
+        Requires a resolved ``alliance_id``: "in no alliance" and "not looked up" are
+        different facts, and answering the second with an empty roster would report every
+        ally as a stranger rather than admitting the gap.
         """
-        if not self.alliance_id:
+        if self.alliance_id is None:
+            raise MonitorError(
+                "The account's alliance has not been resolved; market_preflight must run "
+                "before the alliance roster can be read"
+            )
+        if self.alliance_id == 0:
             return frozenset()
         roster = parse_alliance_nation_ids(
             self._open(f"viewalliance.php?alliance_id={self.alliance_id}")
@@ -1138,7 +1160,9 @@ class ClopClient:
         # for.
         if not roster:
             raise MonitorError(
-                f"The alliance page for alliance {self.alliance_id} listed no member nations"
+                f"The alliance page for alliance {self.alliance_id} listed no member nations, "
+                'so the roster could not be read. Set "alliance": false on your watched '
+                "goods in settings.json to run without the alliance check."
             )
         return roster
 
@@ -1159,7 +1183,10 @@ class ClopClient:
         for good, resource_id in self.market_goods:
             token = parse_hidden_field(html, "token_buyermarketplace")
             if not token:
-                raise MonitorError("The buyer's marketplace form has no CSRF token")
+                raise MonitorError(
+                    "The buyer's marketplace form has no CSRF token; the session may have "
+                    "expired or the page may have changed"
+                )
             html = self._open(
                 "buyermarketplace.php",
                 {
@@ -1168,7 +1195,22 @@ class ClopClient:
                     "resource_id": str(resource_id),
                 },
             )
-            orders.extend(parse_market_orders(html, good, roster))
+            orders_for_good = parse_market_orders(html, good, roster)
+            # A refused POST cannot be caught by the next iteration's token check: the page
+            # rotates its token unconditionally on any POST
+            # (backend_buyermarketplace.php:55-57), *before* the `if (!$errors)` gate, so an
+            # error page still carries a fresh, valid token and the next good succeeds. The
+            # loop would self-heal and the refused good would silently contribute nothing.
+            # The empty-market banner is the game's positive marker for the genuine case:
+            # buyermarketplace.php:162-166 renders it only under
+            # `$_POST['resource_id'] && empty($errors)`, so no rows and no banner means the
+            # request never ran.
+            if not orders_for_good and EMPTY_MARKET_MARKER not in html:
+                raise MonitorError(
+                    f"The buyer's marketplace did not return the order table for {good}; "
+                    "the session may have expired"
+                )
+            orders.extend(orders_for_good)
         return tuple(orders)
 
     def _own_nation_id(self, navigation_html: str) -> int:
@@ -1201,11 +1243,11 @@ class ClopClient:
         available = parse_good_ids(self._open("buyermarketplace.php"))
         if not available:
             raise MonitorError("The buyer's marketplace listed no tradeable goods")
-        by_lowercase = {name.lower(): (name, value) for name, value in available.items()}
+        by_folded = {name.casefold(): (name, value) for name, value in available.items()}
         resolved: List[Tuple[str, int]] = []
         unknown: List[str] = []
         for good in goods:
-            match = by_lowercase.get(good.name.lower())
+            match = by_folded.get(good.name.casefold())
             if match is None:
                 unknown.append(good.name)
             else:
@@ -1221,32 +1263,41 @@ class ClopClient:
         # the good the way the game does. build_alerts pairs orders back to their watch entry
         # case-insensitively precisely because of this; do not "fix" that by storing the
         # user's spelling here instead.
-        self.market_goods = tuple(resolved)
+        market_goods = tuple(resolved)
         watching = ", ".join(name for name, _ in resolved)
-        if not any(good.alliance for good in goods):
-            return f"Market preflight passed; watching {watching} (friends only)."
-        nation_id = self._own_nation_id(self._open("index.php"))
-        nation_html = self._open(f"viewnation.php?nation_id={nation_id}")
-        alliance_id = parse_alliance_id(nation_html)
-        if alliance_id is None:
-            raise MonitorError(f"Could not read the alliance of nation {nation_id}")
+
+        # Everything above resolved into locals, and everything below either resolves the
+        # alliance or raises, so the two fields are assigned together at the end: a preflight
+        # that failed part-way must not leave a caller watching goods with alliance detection
+        # silently degraded to the green-colour heuristic the roster exists to replace.
+        alliance_id: Optional[int] = None
+        message = f"Market preflight passed; watching {watching} (friends only)."
+        if any(good.alliance for good in goods):
+            nation_id = self._own_nation_id(self._open("index.php"))
+            link = parse_alliance_link(self._open(f"viewnation.php?nation_id={nation_id}"))
+            if link is None:
+                raise MonitorError(
+                    f"Could not read the alliance of nation {nation_id}: its page has no "
+                    'alliance link. Set "alliance": false on your watched goods in '
+                    "settings.json to run without the alliance check."
+                )
+            alliance_id, alliance_name = link
+            # viewnation.php links even a nation in no alliance, at alliance 0, so this is a
+            # real answer rather than a missing one.
+            if alliance_id == 0:
+                message = (
+                    f"Market preflight passed; watching {watching}. This nation has "
+                    "no alliance, so the alliance check will never match."
+                )
+            else:
+                message = (
+                    f"Market preflight passed; watching {watching}; "
+                    f"alliance is {alliance_name} (#{alliance_id})."
+                )
+
+        self.market_goods = market_goods
         self.alliance_id = alliance_id
-        # viewnation.php renders the alliance link even for a nation in no alliance, where it
-        # points at alliance 0, so a bare "is not None" here would go and fetch alliance 0.
-        if not alliance_id:
-            return (
-                f"Market preflight passed; watching {watching}. This nation has "
-                "no alliance, so the alliance check will never match."
-            )
-        alliance_name = ""
-        for href, text in _links(nation_html):
-            if _path_from_href(href) == "viewalliance.php":
-                alliance_name = text
-                break
-        return (
-            f"Market preflight passed; watching {watching}; "
-            f"alliance is {alliance_name} (#{alliance_id})."
-        )
+        return message
 
     def login(self) -> str:
         html = self._open(

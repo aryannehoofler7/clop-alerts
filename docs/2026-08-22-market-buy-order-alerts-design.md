@@ -31,10 +31,36 @@ POST carrying `resource_id`.
 ### The POST needs a rotating CSRF token
 
 `backend_buyermarketplace.php:52` rejects a POST whose `token_buyermarketplace` field does not
-equal `$_SESSION['token_buyermarketplace']`, and a rejected POST falls into `if (!$errors)` so
-no orders are returned. Line 55 then regenerates the token on *every* POST, and the freshly
+equal `$_SESSION['token_buyermarketplace']`, pushing `"Try again."` into `$errors`; the deals
+query at `:264` sits inside the `if (!$errors)` block opened at `:58`, so a rejected POST
+returns no orders. Line 55 then regenerates the token on *every* POST, and the freshly
 rendered form carries the new value. Tokens therefore have to be chained: read one from the
 current page, spend it on the next POST, and take the replacement out of that response.
+
+### A refused POST is indistinguishable from an empty market — except for one banner
+
+Two facts about that rejection combine into a trap, and both are load-bearing for the fetch
+loop:
+
+1. **The token rotates even when the POST is refused.** Lines 55-57 rotate unconditionally on
+   any POST, *before* the `if (!$errors)` gate at `:58`. So the error page comes back carrying
+   a fresh, valid token. In a loop that posts once per watched good, the next good's POST then
+   succeeds and the loop silently self-heals — the refused good just contributes zero orders,
+   and nothing anywhere reports that its request never ran. Chaining the token is therefore
+   *not* enough to detect a refusal: the token check at the top of the next iteration can never
+   fire on this path.
+
+2. **The empty-market banner is the positive marker for the genuine case.**
+   `buyermarketplace.php:162-166` renders
+   `<div class="alert alert-warning">Nobody wants to buy that item.</div>` under
+   `else if ($_POST['resource_id'] && empty($errors))` — that is, *only* when the request
+   actually ran and found nobody. A refusal renders neither the table nor this banner.
+
+So the response to each POST has to be checked directly, and the rule is: no order rows **and**
+no banner means the request never ran, which is an error rather than an absence of buyers. This
+is the same invariant as the alliance roster below — a fetch that failed must raise rather than
+be reported as "nothing found", because a silent under-report is exactly the failure this
+monitor exists to prevent.
 
 ### The colours
 
@@ -219,7 +245,11 @@ Skipped entirely when no good is uncommented: zero extra requests, exactly as an
 2. GET `buyermarketplace.php` for the current `token_buyermarketplace`.
 3. For each watched good, POST `buyermarketplace.php` with `token_buyermarketplace`,
    `mode` (empty, meaning resources), and `resource_id`. Take the next token from each
-   response and spend it on the next POST.
+   response and spend it on the next POST, and check each response before moving on: no order
+   rows *and* no `Nobody wants to buy that item.` banner means the page refused the request,
+   which raises rather than being counted as "no buyers". Per *A refused POST is
+   indistinguishable from an empty market* above, the token chain cannot catch this by
+   itself — the refusal hands back a valid token and the loop would heal over it.
 
 Cost per poll is `2 + N` requests for N watched goods, or `1 + N` when no good checks alliance.
 
@@ -287,6 +317,20 @@ A market page, roster page, or nation page that cannot be read raises `MonitorEr
 the existing per-poll failure dialog — "still running, retries in N seconds". A bad `market`
 section, like any other bad settings, and an unresolvable good name are fatal startup errors.
 Neither path is new.
+
+Three cases are worth naming because each would otherwise be a *silent* under-report rather than
+a visible failure, which is the outcome this design most wants to avoid:
+
+- a POST the page refused, detected by the missing empty-market banner (above);
+- a roster page that parsed to no member nations, which cannot happen for an alliance you are in;
+- an `alliance_id` that was never resolved, which is a different fact from being in no alliance
+  and must not be answered with an empty roster.
+
+For the last of these, `ClopClient.alliance_id` is deliberately tri-state: `None` not resolved,
+`0` resolved to no alliance, `N` resolved to alliance N. The preflight assigns it and
+`market_goods` together only once every step has succeeded, so a preflight that raises part-way
+leaves the client untouched rather than watching goods with alliance detection quietly degraded
+back to the green-colour heuristic the roster exists to replace.
 
 ## Testing
 
