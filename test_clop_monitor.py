@@ -407,7 +407,8 @@ class StateTests(unittest.TestCase):
                 self.snapshots = [detected, after_dismissal]
                 self.calls = 0
 
-            def snapshot(self):
+            def snapshot(self, include_market=True):
+                del include_market
                 result = self.snapshots[self.calls]
                 self.calls += 1
                 return result
@@ -937,7 +938,8 @@ class ReportsDuringAnAlertTests(unittest.TestCase):
             def __init__(self):
                 self.snapshots = [before, after]
 
-            def snapshot(self):
+            def snapshot(self, include_market=True):
+                del include_market
                 return self.snapshots.pop(0)
 
         class BlockingNotifier(Notifier):
@@ -977,7 +979,8 @@ class MarkerCarryOverTests(unittest.TestCase):
             def __init__(self):
                 self.snapshots = [before, after]
 
-            def snapshot(self):
+            def snapshot(self, include_market=True):
+                del include_market
                 return self.snapshots.pop(0)
 
         class BlockingNotifier(Notifier):
@@ -1033,7 +1036,8 @@ class CombinedAlertTests(unittest.TestCase):
         )
 
         class OnePollClient:
-            def snapshot(self):
+            def snapshot(self, include_market=True):
+                del include_market
                 return current
 
         messages = []
@@ -1181,7 +1185,12 @@ class FailureNotificationTests(unittest.TestCase):
             def login(self):
                 return None
 
-            def snapshot(self):
+            def market_preflight(self, goods):
+                del goods
+                return None
+
+            def snapshot(self, include_market=True):
+                del include_market
                 raise MonitorError("Could not reach https://4clop.org")
 
         settings = self._write_settings(directory, {"cache": {"persist_to_file": False}})
@@ -2349,6 +2358,28 @@ class MarketPreflightTests(unittest.TestCase):
         client.market_preflight((clop_monitor.WatchedGood("Oil", alliance=False),))
         self.assertIsNone(client.alliance_id)
         self.assertEqual([path for path, _ in calls], ["buyermarketplace.php"])
+
+
+class MarketDuringAnAlertTests(unittest.TestCase):
+    def test_the_refresh_after_a_dismissal_skips_the_market(self):
+        """Dismissing a dialog re-reads the counts; replaying N market POSTs to do that
+        would cost a request per watched good for information the refresh does not use."""
+        calls = []
+
+        class FakeClient:
+            def snapshot(self, include_market=True):
+                calls.append(include_market)
+                return Snapshot(1, 0, None, None, None, False, (), ())
+
+        class FakeNotifier:
+            def notify(self, message):
+                del message
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            check_and_notify(FakeClient(), None, FakeNotifier(), state, persist_state=False)
+        self.assertEqual(calls, [True, False])
 
 
 if __name__ == "__main__":

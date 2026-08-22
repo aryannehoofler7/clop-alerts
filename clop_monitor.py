@@ -1630,7 +1630,10 @@ def check_and_notify(
             # The news, report, and 4chan markers deliberately stay at what was alerted on:
             # anything that arrived while the dialog was open has not been seen yet, and
             # adopting the refreshed markers here would step over it without ever showing it.
-            refreshed = client.snapshot()
+            # The market is deliberately not re-read: its alerting is every-poll, so the next
+            # poll reports whatever is still pending, and refetching would cost one request
+            # per watched good for a value this refresh does not use.
+            refreshed = client.snapshot(include_market=False)
             current = replace(
                 refreshed,
                 latest_news=current.latest_news,
@@ -1757,6 +1760,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         previous = load_snapshot(args.state) if settings.cache.persist_to_file else None
         client.login()
+        market_message = client.market_preflight(settings.alerts.market_goods)
+        if market_message is not None:
+            print(market_message, flush=True)
         cache_status = (
             f"file cache enabled at {args.state.resolve()}"
             if settings.cache.persist_to_file
@@ -1786,7 +1792,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     f"latest_news={current.latest_news[1] if current.latest_news else 'none'}, "
                     f"latest_report={current.latest_report[1] if current.latest_report else 'none'}, "
                     "fourchan_post="
-                    f"{current.fourchan_post.number if current.fourchan_post else 'disabled'}",
+                    f"{current.fourchan_post.number if current.fourchan_post else 'disabled'}, "
+                    f"market_orders={len(current.market_orders)}",
                     flush=True,
                 )
             except (AuthenticationError, ArchivedThreadError):
