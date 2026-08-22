@@ -24,7 +24,8 @@ The monitor is a read-only scraper of the hosted PHP game at `https://4clop.org`
 - `viewalliance.php` is read-only on GET (every mutating branch is `$_POST`-gated) and lists each member nation as a `viewnation.php?nation_id=` link (`viewalliance.php:70`). It needs `?alliance_id=N`: `backend_viewalliance.php:11` reads `$mysql['alliance_id']`, which is populated from `$_POST` only, so a bare GET looks up alliance 0.
 - `header.php:186-192` renders a `<select name="switchnation_id">` with the current nation's option marked `selected` — but **only when the account has more than one nation** (`header.php:182`).
 - `empireoverview.php:36` renders `<button name="switchnation_id" value="{nation_id}">` for every nation on the account, and `backend_empireoverview.php` contains no `INSERT`/`UPDATE`/`DELETE`.
-- `viewnation.php:23` renders `<a href="viewalliance.php?alliance_id=N">`. `backend_viewnation.php` contains no `INSERT`/`UPDATE`/`DELETE` and reads no `$_POST`.
+- `viewnation.php:23` renders `<a href="viewalliance.php?alliance_id=N">`. `backend_viewnation.php` contains no `INSERT`/`UPDATE`/`DELETE`. It does merge `$_POST` into
+  `$_GET` at line 3, but there is no mutating query in the file for that merge to reach.
 - 28 resources are tradeable; `Machinery Parts` is `resource_id` 10.
 
 **Conventions in this repo you must follow:**
