@@ -1822,7 +1822,7 @@ class MarketDecisionTests(unittest.TestCase):
 
 class MarketAlertTests(unittest.TestCase):
     def snapshot(self, *orders):
-        return Snapshot(0, 0, None, None, None, False, (), tuple(orders))
+        return Snapshot(0, 0, None, market_orders=tuple(orders))
 
     def settings(self, *goods):
         return AlertCategorySettings(market_goods=tuple(goods))
@@ -1853,16 +1853,62 @@ class MarketAlertTests(unittest.TestCase):
         alerts = build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil")))
         self.assertIn("Both Nation (friend, alliance) wants 40 at 4,500 bits each", alerts[0])
 
+    def test_an_enemy_reached_through_always_is_labelled_as_an_enemy(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 9, "Sombra", 6, 300, is_enemy=True)
+        )
+        good = clop_monitor.WatchedGood("Oil", always=("Sombra",))
+        alerts = build_alerts(None, current, self.settings(good))
+        self.assertIn("Sombra (enemy) wants 6 at 300 bits each", alerts[0])
+
+    def test_a_buyer_with_no_relation_reached_through_always_says_so(self):
+        current = self.snapshot(clop_monitor.MarketOrder("Oil", 5, "Stranger", 2, 900))
+        good = clop_monitor.WatchedGood("Oil", always=("Stranger",))
+        alerts = build_alerts(None, current, self.settings(good))
+        self.assertIn("Stranger (no relation) wants 2 at 900 bits each", alerts[0])
+
     def test_a_good_with_no_matching_orders_produces_no_block(self):
         current = self.snapshot(clop_monitor.MarketOrder("Oil", 5, "Stranger", 1, 100))
         self.assertEqual(
             build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil"))), []
         )
 
-    def test_each_good_gets_its_own_block(self):
+    def test_a_good_with_no_orders_at_all_produces_no_block(self):
+        self.assertEqual(
+            build_alerts(
+                None, self.snapshot(), self.settings(clop_monitor.WatchedGood("Oil"))
+            ),
+            [],
+        )
+
+    def test_an_unwatched_good_is_silently_ignored(self):
+        # Task 9 fetches only the watched goods, so an order for anything else can only be a
+        # bug; dropping it silently is deliberate rather than an oversight.
         current = self.snapshot(
-            clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True),
+            clop_monitor.MarketOrder("Gems", 1, "A", 1, 100, is_friend=True)
+        )
+        self.assertEqual(
+            build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil"))), []
+        )
+
+    def test_a_good_matches_the_games_spelling_whatever_case_the_settings_use(self):
+        # market_preflight stamps orders with the game's spelling, not the one typed into
+        # settings.json, so a lowercase setting must still find its own orders.
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Machinery Parts", 1, "A", 1, 100, is_friend=True)
+        )
+        alerts = build_alerts(
+            None, current, self.settings(clop_monitor.WatchedGood("machinery parts"))
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertTrue(alerts[0].startswith("Buy orders for machinery parts:"))
+
+    def test_each_good_gets_its_own_block_in_the_order_the_settings_list_them(self):
+        # The orders arrive in the opposite order to the settings, so this fails if the
+        # blocks follow the orders rather than the watch list.
+        current = self.snapshot(
             clop_monitor.MarketOrder("Apples", 2, "B", 2, 200, is_friend=True),
+            clop_monitor.MarketOrder("Oil", 1, "A", 1, 100, is_friend=True),
         )
         alerts = build_alerts(
             None,
