@@ -1465,5 +1465,122 @@ class ShippedMarketGoodsTests(unittest.TestCase):
         )
 
 
+def market_row(nation_id, name, colour, amount, price, region="Saddle Arabia"):
+    """One deals-table row shaped exactly as buyermarketplace.php renders it."""
+    if colour:
+        shown_name = f'<span class="{colour}">{name}</span>'
+        shown_region = f'<span class="{colour}">{region}</span>'
+    else:
+        shown_name, shown_region = name, region
+    return f"""
+<tr><td><div class="row">
+  <div class="col-md-1"><p class="text-danger">{price}</p></div>
+  <div class="col-md-1"><p class="text-success">{amount}</p></div>
+  <div class="col-md-5"><p><a href="viewnation.php?nation_id={nation_id}">{shown_name}
+    (<img src="images/icons/Oil.png"/>{shown_region})</a></p></div>
+  <div class="col-md-5"><div class="row"><div class="col-xs-6">
+    <form action="buyermarketplace.php" method="post">
+    <input type="hidden" name="resource_id" value="10"/>
+    <input type="submit" name="sellone" value="Sell One" class="btn btn-primary"/>
+    </form></div></div></div>
+</div></td></tr>
+"""
+
+
+MARKET_TABLE_HEAD = """
+<table class="table table-striped table-bordered">
+<thead><tr><td><div class="row">
+  <div class="col-md-1">Offering</div>
+  <div class="col-md-1">Amount</div>
+  <div class="col-md-5">Buyer</div>
+  <div class="col-md-5">Actions</div>
+</div></td></tr></thead><tbody>
+"""
+
+
+def market_page(*rows):
+    return MARKET_TABLE_HEAD + "".join(rows) + "</tbody></table>"
+
+
+class MarketRowParsingTests(unittest.TestCase):
+    def parse(self, html, roster=None):
+        return clop_monitor.parse_market_orders(html, "Machinery Parts", roster)
+
+    def test_a_friend_row_is_read_as_a_friend(self):
+        orders = self.parse(market_page(market_row(42, "Luna Sueno", "text-info", 12, "5,000")))
+        self.assertEqual(len(orders), 1)
+        order = orders[0]
+        self.assertEqual(order.good, "Machinery Parts")
+        self.assertEqual(order.nation_id, 42)
+        self.assertEqual(order.nation_name, "Luna Sueno")
+        self.assertEqual(order.amount, 12)
+        self.assertEqual(order.price, 5000)
+        self.assertTrue(order.is_friend)
+        self.assertFalse(order.is_enemy)
+
+    def test_an_alliance_row_is_read_as_an_ally(self):
+        orders = self.parse(market_page(market_row(7, "Ally Nation", "text-success", 3, "4,800")))
+        self.assertTrue(orders[0].is_ally)
+        self.assertFalse(orders[0].is_friend)
+
+    def test_an_enemy_row_is_read_as_an_enemy(self):
+        orders = self.parse(market_page(market_row(9, "Sombra", "text-danger", 1, "100")))
+        self.assertTrue(orders[0].is_enemy)
+        self.assertFalse(orders[0].is_friend)
+
+    def test_an_unstyled_row_has_no_relation_despite_the_coloured_price_and_amount_cells(self):
+        # The colour trap: the price cell is text-danger and the amount cell text-success in
+        # every row, so a page-wide class match would call this stranger an enemy and an ally.
+        orders = self.parse(market_page(market_row(5, "Some Stranger", "", 2, "9,000")))
+        self.assertEqual(orders[0].nation_name, "Some Stranger")
+        self.assertFalse(orders[0].is_friend)
+        self.assertFalse(orders[0].is_enemy)
+        self.assertFalse(orders[0].is_ally)
+
+    def test_the_header_row_is_not_an_order(self):
+        self.assertEqual(self.parse(market_page()), [])
+
+    def test_every_row_is_returned_in_page_order(self):
+        orders = self.parse(
+            market_page(
+                market_row(1, "First", "text-info", 1, "9,000"),
+                market_row(2, "Second", "text-success", 2, "8,000"),
+                market_row(3, "Third", "", 3, "7,000"),
+            )
+        )
+        self.assertEqual([order.nation_name for order in orders], ["First", "Second", "Third"])
+
+    def test_a_roster_decides_alliance_regardless_of_colour(self):
+        html = market_page(
+            market_row(42, "Friend And Ally", "text-info", 1, "1,000"),
+            market_row(43, "Friend Only", "text-info", 1, "1,000"),
+            market_row(44, "Enemy And Ally", "text-danger", 1, "1,000"),
+        )
+        orders = self.parse(html, roster=frozenset({42, 44}))
+        self.assertEqual([order.is_ally for order in orders], [True, False, True])
+        self.assertEqual([order.is_friend for order in orders], [True, True, False])
+
+    def test_without_a_roster_only_green_reads_as_an_ally(self):
+        html = market_page(
+            market_row(42, "Friend", "text-info", 1, "1,000"),
+            market_row(7, "Ally", "text-success", 1, "1,000"),
+        )
+        self.assertEqual([order.is_ally for order in self.parse(html)], [False, True])
+
+
+class RelationLabelTests(unittest.TestCase):
+    def label(self, **flags):
+        return clop_monitor.MarketOrder("Oil", 1, "N", 1, 1, **flags).relation_label()
+
+    def test_a_friend_who_is_also_an_ally_is_labelled_as_both(self):
+        self.assertEqual(self.label(is_friend=True, is_ally=True), "friend, alliance")
+
+    def test_a_buyer_with_no_relation_says_so(self):
+        self.assertEqual(self.label(), "no relation")
+
+    def test_an_enemy_is_named(self):
+        self.assertEqual(self.label(is_enemy=True), "enemy")
+
+
 if __name__ == "__main__":
     unittest.main()

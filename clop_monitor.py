@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 
 DEFAULT_BASE_URL = "https://4clop.org/"
@@ -33,6 +33,7 @@ DEFAULT_ENV_PATH = Path(__file__).resolve().parent / ".env"
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 COUNT_RE = re.compile(r"\(\s*(\d+)\s*\)")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+HAVE_SUFFIX_RE = re.compile(r"\s*\(Have \d+\)$")
 
 
 class MonitorError(RuntimeError):
@@ -61,6 +62,31 @@ class WatchedGood:
     alliance: bool = True
     always: Tuple[str, ...] = ()
     never: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MarketOrder:
+    """One pending buy order on the buyer's marketplace."""
+
+    good: str
+    nation_id: int
+    nation_name: str
+    amount: int
+    price: int
+    is_friend: bool = False
+    is_enemy: bool = False
+    is_ally: bool = False
+
+    def relation_label(self) -> str:
+        """Every relation that is true of this buyer, for the alert line."""
+        labels = []
+        if self.is_friend:
+            labels.append("friend")
+        if self.is_enemy:
+            labels.append("enemy")
+        if self.is_ally:
+            labels.append("alliance")
+        return ", ".join(labels) if labels else "no relation"
 
 
 @dataclass(frozen=True)
@@ -473,6 +499,135 @@ class NewsTableParser(HTMLParser):
             self._row = []
             self._in_row = False
             self._cell_parts = None
+
+
+def nation_id_from_href(href: str) -> Optional[int]:
+    """The nation_id of a viewnation.php link, or None for any other link."""
+    parsed = urllib.parse.urlsplit(href)
+    if parsed.path.rsplit("/", 1)[-1].lower() != "viewnation.php":
+        return None
+    values = urllib.parse.parse_qs(parsed.query).get("nation_id")
+    if not values or not values[0].isdigit():
+        return None
+    return int(values[0])
+
+
+def parse_market_number(text: str) -> Optional[int]:
+    """A price or amount cell; prices are rendered with thousands separators."""
+    digits = text.replace(",", "").strip()
+    return int(digits) if digits.isdigit() else None
+
+
+class BuyerMarketParser(HTMLParser):
+    """Rows of the buyer's-marketplace deals table.
+
+    The buyer's colour is taken from the first span inside the row's viewnation link and
+    never from colour classes elsewhere in the row: the price cell is text-danger and the
+    amount cell text-success in every row, so a page-wide class match would call every buyer
+    an enemy and an ally at once.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        #: nation_id, nation name, colour class, amount, price
+        self.rows: List[Tuple[int, str, str, int, int]] = []
+        self._start_row()
+
+    def _start_row(self) -> None:
+        self._numbers: List[str] = []
+        self._number_parts: Optional[List[str]] = None
+        self._anchor_parts: Optional[List[str]] = None
+        self._anchor_text = ""
+        self._nation_id: Optional[int] = None
+        self._colour = ""
+        self._colour_taken = False
+        self._span_parts: Optional[List[str]] = None
+        self._span_text = ""
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        attributes = dict(attrs)
+        if tag == "tr":
+            self._start_row()
+        elif tag == "div" and "col-md-1" in (attributes.get("class") or "").split():
+            self._number_parts = []
+        elif tag == "a" and self._nation_id is None:
+            nation_id = nation_id_from_href(attributes.get("href") or "")
+            if nation_id is not None:
+                self._nation_id = nation_id
+                self._anchor_parts = []
+        elif tag == "span" and self._anchor_parts is not None and not self._colour_taken:
+            self._colour_taken = True
+            self._colour = (attributes.get("class") or "").strip()
+            self._span_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._number_parts is not None:
+            self._number_parts.append(data)
+        if self._span_parts is not None:
+            self._span_parts.append(data)
+        if self._anchor_parts is not None:
+            self._anchor_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "div" and self._number_parts is not None:
+            self._numbers.append(normalize_text(self._number_parts))
+            self._number_parts = None
+        elif tag == "span" and self._span_parts is not None:
+            self._span_text = normalize_text(self._span_parts)
+            self._span_parts = None
+        elif tag == "a" and self._anchor_parts is not None:
+            self._anchor_text = normalize_text(self._anchor_parts)
+            self._anchor_parts = None
+        elif tag == "tr":
+            self._finish_row()
+            self._start_row()
+
+    def _finish_row(self) -> None:
+        # The header row has the same two numeric cells but no buyer link, so requiring the
+        # link is what keeps it out.
+        if self._nation_id is None or len(self._numbers) < 2:
+            return
+        price = parse_market_number(self._numbers[0])
+        amount = parse_market_number(self._numbers[1])
+        if price is None or amount is None:
+            return
+        # An unstyled buyer has no span, so the name is the anchor text up to the region.
+        name = (self._span_text or self._anchor_text.split("(")[0]).strip()
+        if not name:
+            return
+        self.rows.append((self._nation_id, name, self._colour, amount, price))
+
+
+def parse_market_orders(
+    html: str, good: str, roster: Optional[FrozenSet[int]]
+) -> List[MarketOrder]:
+    """Every pending buy order for one good, newest-priced first as the page orders them.
+
+    ``roster`` is the set of nation ids in your alliance, or None when it was not looked up.
+    Without it the green colour is the only alliance signal available; with it, membership is
+    exact even for a buyer the game painted blue or red instead.
+    """
+    parser = BuyerMarketParser()
+    parser.feed(html)
+    orders: List[MarketOrder] = []
+    for nation_id, name, colour, amount, price in parser.rows:
+        classes = colour.split()
+        is_green = "text-success" in classes
+        orders.append(
+            MarketOrder(
+                good=good,
+                nation_id=nation_id,
+                nation_name=name,
+                amount=amount,
+                price=price,
+                is_friend="text-info" in classes,
+                is_enemy="text-danger" in classes,
+                is_ally=(nation_id in roster) if roster is not None else is_green,
+            )
+        )
+    return orders
 
 
 class FourChanCommentParser(HTMLParser):
