@@ -34,6 +34,11 @@ from clop_monitor import (
 )
 
 
+def shipped_example():
+    """The tracked settings.example.json, parsed."""
+    return json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
+
+
 AUTHENTICATED_HEADER = """
 <nav>
   <a href="messages.php">Messages <span class="badge"> (2)</span></a>
@@ -768,7 +773,7 @@ class ReportIgnorePatternTests(unittest.TestCase):
         self.assertFalse(report_is_ignored(WORTH_ALERTING, []))
 
     def test_shipped_patterns_are_present_but_all_commented_out(self):
-        value = json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
+        value = shipped_example()
         self.assertEqual(
             value["reports"]["ignore"],
             [f"# {pattern}" for pattern, _ in IGNORABLE_REPORTS],
@@ -778,7 +783,7 @@ class ReportIgnorePatternTests(unittest.TestCase):
         self.assertEqual(load_settings(Path("settings.example.json")).alerts.report_ignore, ())
 
     def test_uncommenting_a_shipped_pattern_switches_it_on(self):
-        value = json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
+        value = shipped_example()
         value["reports"]["ignore"] = [
             entry[2:] if "Burn Oil" in entry else entry for entry in value["reports"]["ignore"]
         ]
@@ -1267,7 +1272,11 @@ class MarketSettingsTests(unittest.TestCase):
         settings = self.load({"goods": {"Machinery Parts": {}}})
         self.assertEqual(
             settings.alerts.market_goods,
-            (clop_monitor.WatchedGood("Machinery Parts", True, True, (), ()),),
+            (
+                clop_monitor.WatchedGood(
+                    "Machinery Parts", friends=True, alliance=True, always=(), never=()
+                ),
+            ),
         )
 
     def test_every_knob_is_loaded(self):
@@ -1285,7 +1294,15 @@ class MarketSettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             settings.alerts.market_goods,
-            (clop_monitor.WatchedGood("Oil", False, True, ("Luna Sueno",), ("Sombra",)),),
+            (
+                clop_monitor.WatchedGood(
+                    "Oil",
+                    friends=False,
+                    alliance=True,
+                    always=("Luna Sueno",),
+                    never=("Sombra",),
+                ),
+            ),
         )
 
     def test_a_commented_out_nation_name_is_dropped(self):
@@ -1410,15 +1427,12 @@ TRADEABLE_GOODS = [
 
 
 class ShippedMarketGoodsTests(unittest.TestCase):
-    def example(self):
-        return json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
-
     def test_every_tradeable_good_ships_commented_out(self):
-        goods = self.example()["market"]["goods"]
+        goods = shipped_example()["market"]["goods"]
         self.assertEqual(list(goods), [f"# {name}" for name in TRADEABLE_GOODS])
 
     def test_every_shipped_good_shows_all_four_knobs(self):
-        for key, good in self.example()["market"]["goods"].items():
+        for key, good in shipped_example()["market"]["goods"].items():
             with self.subTest(good=key):
                 self.assertEqual(
                     sorted(good), ["alliance", "always", "friends", "never"]
@@ -1434,7 +1448,7 @@ class ShippedMarketGoodsTests(unittest.TestCase):
         self.assertTrue(settings.alerts.market_orders)
 
     def test_uncommenting_a_shipped_good_switches_it_on(self):
-        value = self.example()
+        value = shipped_example()
         value["market"]["goods"] = {
             (key[2:] if key == "# Machinery Parts" else key): good
             for key, good in value["market"]["goods"].items()
