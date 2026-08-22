@@ -200,7 +200,11 @@ def market_good_flag(
 def load_market_goods(
     market_value: object, defaults_used: List[str]
 ) -> Tuple[WatchedGood, ...]:
-    """The goods switched on in the market section, in the order the file lists them."""
+    """The goods switched on in the market section, in the order the file lists them.
+
+    Appends to ``defaults_used`` when the section leaves the goods out, so that startup can
+    name what it filled in.
+    """
     if not isinstance(market_value, dict):
         raise MonitorError("The market setting must be a JSON object")
     if "goods" not in market_value:
@@ -245,10 +249,12 @@ def load_market_goods(
                 friends=market_good_flag(raw_good, name, "friends", default=True),
                 alliance=market_good_flag(raw_good, name, "alliance", default=True),
                 always=switchable_patterns(
-                    raw_good.get("always", []), f"always for market good {name!r}"
+                    raw_good.get("always", []),
+                    f"always for market good {name!r} (nation names)",
                 ),
                 never=switchable_patterns(
-                    raw_good.get("never", []), f"never for market good {name!r}"
+                    raw_good.get("never", []),
+                    f"never for market good {name!r} (nation names)",
                 ),
             )
         )
