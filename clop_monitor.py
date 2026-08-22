@@ -763,11 +763,21 @@ def parse_empire_nation_ids(html: str) -> List[int]:
     return [int(value) for value in parser.values if value.isdigit()]
 
 
-def parse_alliance_id(html: str) -> Optional[int]:
-    """The alliance linked from a nation page, or None when there is no such link."""
+def _links(html: str) -> List[Tuple[str, str]]:
+    """Every (href, text) pair on the page, in document order."""
     parser = LinkTextParser()
     parser.feed(html)
-    for href, _ in parser.links:
+    return parser.links
+
+
+def parse_alliance_id(html: str) -> Optional[int]:
+    """The alliance linked from a nation page, or None when there is no such link.
+
+    viewnation.php:23 renders the link unconditionally, so a nation with no alliance yields
+    ``0`` rather than None; a caller deciding whether to fetch a roster has to treat that as
+    "no alliance", not as alliance number zero.
+    """
+    for href, _ in _links(html):
         if _path_from_href(href) != "viewalliance.php":
             continue
         values = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query).get("alliance_id")
@@ -791,11 +801,9 @@ def parse_alliance_nation_ids(html: str) -> FrozenSet[int]:
     ``parse_pending_counts``, which raises for the same reason. This stays a pure parser and
     reports what it found.
     """
-    parser = LinkTextParser()
-    parser.feed(html)
     return frozenset(
         nation_id
-        for href, _ in parser.links
+        for href, _ in _links(html)
         if (nation_id := nation_id_from_href(href)) is not None
     )
 
@@ -1162,6 +1170,83 @@ class ClopClient:
             )
             orders.extend(parse_market_orders(html, good, roster))
         return tuple(orders)
+
+    def _own_nation_id(self, navigation_html: str) -> int:
+        """The active nation's id.
+
+        The header carries it in the nation switcher, but header.php renders that switcher
+        only for an account with more than one nation, so a single-nation account is read
+        from the empire overview instead, where exactly one button means exactly one nation.
+        """
+        nation_id = parse_current_nation_id(navigation_html)
+        if nation_id is not None:
+            return nation_id
+        nation_ids = parse_empire_nation_ids(self._open("empireoverview.php"))
+        if len(nation_ids) != 1:
+            raise MonitorError(
+                "Could not identify which nation is active: the header has no nation "
+                f"switcher and the empire overview lists {len(nation_ids)} nations"
+            )
+        return nation_ids[0]
+
+    def market_preflight(self, goods: Sequence[WatchedGood]) -> Optional[str]:
+        """Resolve watched good names and, if needed, the account's own alliance.
+
+        Run once at startup so that a mistyped good name stops the monitor instead of
+        silently watching nothing, and so that the game gaining or losing a good later
+        cannot kill a monitor that is already running.
+        """
+        if not goods:
+            return None
+        available = parse_good_ids(self._open("buyermarketplace.php"))
+        if not available:
+            raise MonitorError("The buyer's marketplace listed no tradeable goods")
+        by_lowercase = {name.lower(): (name, value) for name, value in available.items()}
+        resolved: List[Tuple[str, int]] = []
+        unknown: List[str] = []
+        for good in goods:
+            match = by_lowercase.get(good.name.lower())
+            if match is None:
+                unknown.append(good.name)
+            else:
+                resolved.append(match)
+        if unknown:
+            raise MonitorError(
+                "These market.goods are not tradeable goods: "
+                + ", ".join(sorted(unknown))
+                + ". The tradeable goods are: "
+                + ", ".join(sorted(available))
+            )
+        # The game's spelling is kept, not the settings file's, so the startup message names
+        # the good the way the game does. build_alerts pairs orders back to their watch entry
+        # case-insensitively precisely because of this; do not "fix" that by storing the
+        # user's spelling here instead.
+        self.market_goods = tuple(resolved)
+        watching = ", ".join(name for name, _ in resolved)
+        if not any(good.alliance for good in goods):
+            return f"Market preflight passed; watching {watching} (friends only)."
+        nation_id = self._own_nation_id(self._open("index.php"))
+        nation_html = self._open(f"viewnation.php?nation_id={nation_id}")
+        alliance_id = parse_alliance_id(nation_html)
+        if alliance_id is None:
+            raise MonitorError(f"Could not read the alliance of nation {nation_id}")
+        self.alliance_id = alliance_id
+        # viewnation.php renders the alliance link even for a nation in no alliance, where it
+        # points at alliance 0, so a bare "is not None" here would go and fetch alliance 0.
+        if not alliance_id:
+            return (
+                f"Market preflight passed; watching {watching}. This nation has "
+                "no alliance, so the alliance check will never match."
+            )
+        alliance_name = ""
+        for href, text in _links(nation_html):
+            if _path_from_href(href) == "viewalliance.php":
+                alliance_name = text
+                break
+        return (
+            f"Market preflight passed; watching {watching}; "
+            f"alliance is {alliance_name} (#{alliance_id})."
+        )
 
     def login(self) -> str:
         html = self._open(

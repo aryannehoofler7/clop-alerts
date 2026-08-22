@@ -1667,6 +1667,15 @@ EMPIRE_OVERVIEW = """
 </tr></table>
 """
 
+#: The single-nation account, which is the case header.php gives no nation switcher, so the
+#: empire overview is the only place its id can be read.
+SINGLE_NATION_EMPIRE_OVERVIEW = """
+<table><tr>
+<td><div title="Only Nation"><form action="overview.php" method="post">
+<button name="switchnation_id" type="submit" value="12">Only Nation</button></form></div></td>
+</tr></table>
+"""
+
 NATION_PAGE = """
 <center><h4>Alliance:
 <a href="viewalliance.php?alliance_id=7">The Best Alliance</a></h4></center>
@@ -2070,6 +2079,117 @@ class MarketFetchTests(unittest.TestCase):
         self.assertEqual(len(snapshot.market_orders), 1)
         self.assertTrue(snapshot.market_orders[0].is_ally)
         self.assertTrue(snapshot.market_orders[0].is_enemy)
+
+
+class MarketPreflightTests(unittest.TestCase):
+    def client(self, pages):
+        client = ClopClient("https://4clop.org", "user", "password")
+        calls = []
+
+        def fake_open(path, form=None):
+            calls.append((path, form))
+            if path == "myalliance.php":
+                raise AssertionError("myalliance.php marks alliance messages read")
+            if path not in pages:
+                raise AssertionError(f"Unexpected path: {path}")
+            return pages[path]
+
+        client._open = fake_open
+        return client, calls
+
+    def test_nothing_watched_makes_no_requests(self):
+        client, calls = self.client({})
+        self.assertIsNone(client.market_preflight(()))
+        self.assertEqual(calls, [])
+
+    def test_good_names_resolve_to_resource_ids(self):
+        client, _ = self.client({"buyermarketplace.php": MARKET_FORM})
+        message = client.market_preflight(
+            (clop_monitor.WatchedGood("Machinery Parts", alliance=False),)
+        )
+        self.assertEqual(client.market_goods, (("Machinery Parts", 10),))
+        self.assertIn("Machinery Parts", message)
+
+    def test_good_names_match_regardless_of_case(self):
+        client, _ = self.client({"buyermarketplace.php": MARKET_FORM})
+        client.market_preflight((clop_monitor.WatchedGood("machinery PARTS", alliance=False),))
+        self.assertEqual(client.market_goods, (("Machinery Parts", 10),))
+
+    def test_an_unknown_good_is_fatal_and_names_itself(self):
+        client, _ = self.client({"buyermarketplace.php": MARKET_FORM})
+        with self.assertRaisesRegex(MonitorError, "Machinry Parts"):
+            client.market_preflight((clop_monitor.WatchedGood("Machinry Parts", alliance=False),))
+
+    def test_the_alliance_is_resolved_through_the_header_switcher(self):
+        client, calls = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": MULTI_NATION_HEADER,
+                "viewnation.php?nation_id=12": NATION_PAGE,
+            }
+        )
+        message = client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+        self.assertEqual(client.alliance_id, 7)
+        self.assertIn("The Best Alliance", message)
+        self.assertNotIn("empireoverview.php", [path for path, _ in calls])
+
+    def test_a_single_nation_account_falls_back_to_the_empire_overview(self):
+        client, calls = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": AUTHENTICATED_HEADER,
+                "empireoverview.php": SINGLE_NATION_EMPIRE_OVERVIEW,
+                "viewnation.php?nation_id=12": NATION_PAGE,
+            }
+        )
+        client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+        self.assertEqual(client.alliance_id, 7)
+        self.assertIn("empireoverview.php", [path for path, _ in calls])
+
+    def test_an_unidentifiable_nation_is_a_monitor_error(self):
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": AUTHENTICATED_HEADER,
+                "empireoverview.php": SINGLE_NATION_EMPIRE_OVERVIEW.replace(
+                    'value="12"', 'value=""'
+                ),
+            }
+        )
+        with self.assertRaisesRegex(MonitorError, "which nation is active"):
+            client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+
+    def test_a_multi_nation_account_without_a_switcher_is_a_monitor_error(self):
+        # Guessing the first of several nations would silently watch the wrong nation's
+        # alliance, so an ambiguous account stops the monitor instead.
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": AUTHENTICATED_HEADER,
+                "empireoverview.php": EMPIRE_OVERVIEW,
+            }
+        )
+        with self.assertRaisesRegex(MonitorError, "which nation is active"):
+            client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+
+    def test_no_alliance_is_reported_not_an_error(self):
+        client, _ = self.client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": MULTI_NATION_HEADER,
+                "viewnation.php?nation_id=12":
+                    '<h4>Alliance: <a href="viewalliance.php?alliance_id=0">None</a></h4>',
+            }
+        )
+        message = client.market_preflight((clop_monitor.WatchedGood("Oil"),))
+        self.assertEqual(client.alliance_id, 0)
+        self.assertIn("no alliance", message)
+
+    def test_the_alliance_is_not_resolved_when_no_good_checks_it(self):
+        client, calls = self.client({"buyermarketplace.php": MARKET_FORM})
+        client.market_preflight((clop_monitor.WatchedGood("Oil", alliance=False),))
+        self.assertIsNone(client.alliance_id)
+        self.assertEqual([path for path, _ in calls], ["buyermarketplace.php"])
 
 
 if __name__ == "__main__":
