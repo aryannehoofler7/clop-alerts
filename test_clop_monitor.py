@@ -1909,8 +1909,8 @@ class MarketAlertTests(unittest.TestCase):
         )
 
     def test_an_unwatched_good_is_silently_ignored(self):
-        # Task 9 fetches only the watched goods, so an order for anything else can only be a
-        # bug; dropping it silently is deliberate rather than an oversight.
+        # The poll POSTs for the watched goods and nothing else, so an order for anything
+        # else can only be a bug; dropping it silently is deliberate rather than an oversight.
         current = self.snapshot(
             clop_monitor.MarketOrder("Gems", 1, "A", 1, 100, is_friend=True)
         )
@@ -2021,9 +2021,6 @@ def market_client(pages, goods=(("Machinery Parts", 10),), alliance_id=None):
 
 
 class MarketFetchTests(unittest.TestCase):
-    def client(self, pages, goods=(("Machinery Parts", 10),), alliance_id=None):
-        return market_client(pages, goods, alliance_id)
-
     def test_each_post_spends_the_token_from_the_previous_response(self):
         tokens = iter(["token-1", "token-2", "token-3"])
 
@@ -2031,7 +2028,7 @@ class MarketFetchTests(unittest.TestCase):
             page = MARKET_FORM.replace("abc123", next(tokens))
             return page if posted is None else page + EMPTY_MARKET_BANNER
 
-        client, calls = self.client(
+        client, calls = market_client(
             {"buyermarketplace.php": form},
             goods=(("Apples", 3), ("Oil", 1)),
         )
@@ -2047,7 +2044,7 @@ class MarketFetchTests(unittest.TestCase):
         # offer, remove, sellone, sellall and sellamount are the only fields that make
         # backend_buyermarketplace.php spend funds, delete orders or sell goods; without
         # them the POST is a pure filter-and-display of the deals table.
-        client, calls = self.client({"buyermarketplace.php": market_responder({})})
+        client, calls = market_client({"buyermarketplace.php": market_responder({})})
         client._market_orders(None)
         posts = [form_data for _, form_data in calls if form_data is not None]
         self.assertEqual(len(posts), 1)
@@ -2056,7 +2053,7 @@ class MarketFetchTests(unittest.TestCase):
         )
 
     def test_orders_are_tagged_with_the_good_that_was_requested(self):
-        client, _ = self.client(
+        client, _ = market_client(
             {
                 "buyermarketplace.php": market_responder(
                     {"10": [market_row(42, "Luna Sueno", "text-info", 12, "5,000")]}
@@ -2068,14 +2065,14 @@ class MarketFetchTests(unittest.TestCase):
         self.assertEqual(orders[0].nation_name, "Luna Sueno")
 
     def test_a_missing_token_is_a_monitor_error(self):
-        client, _ = self.client({"buyermarketplace.php": "<form></form>"})
+        client, _ = market_client({"buyermarketplace.php": "<form></form>"})
         with self.assertRaisesRegex(MonitorError, "CSRF token"):
             client._market_orders(None)
 
     def test_each_goods_orders_come_from_its_own_response(self):
         # The table is filtered server-side to the posted resource_id, so reading the wrong
         # response would attribute one good's buyers to another.
-        client, _ = self.client(
+        client, _ = market_client(
             {
                 "buyermarketplace.php": market_responder(
                     {
@@ -2095,7 +2092,7 @@ class MarketFetchTests(unittest.TestCase):
     def test_the_request_shape_is_one_get_plus_one_post_per_good(self):
         # Pins the N+1 shape so a refactor cannot quietly make it N squared.
         goods = (("Apples", 3), ("Oil", 1), ("Pies", 5), ("Gems", 7), ("Copper", 9))
-        client, calls = self.client(
+        client, calls = market_client(
             {"buyermarketplace.php": market_responder({})}, goods=goods
         )
         client._market_orders(None)
@@ -2104,7 +2101,7 @@ class MarketFetchTests(unittest.TestCase):
         self.assertEqual([form is None for form in market_calls], [True] + [False] * len(goods))
 
     def test_a_genuinely_empty_market_is_no_orders_and_no_error(self):
-        client, _ = self.client({"buyermarketplace.php": market_responder({})})
+        client, _ = market_client({"buyermarketplace.php": market_responder({})})
         self.assertEqual(client._market_orders(None), ())
 
     def test_a_rejected_post_on_a_non_final_good_is_not_read_as_no_orders(self):
@@ -2118,7 +2115,7 @@ class MarketFetchTests(unittest.TestCase):
                 return MARKET_ERROR_PAGE
             return MARKET_FORM + market_page(market_row(1, "Oil Buyer", "text-info", 1, "100"))
 
-        client, _ = self.client(
+        client, _ = market_client(
             {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
         )
         with self.assertRaisesRegex(MonitorError, "Apples"):
@@ -2132,7 +2129,7 @@ class MarketFetchTests(unittest.TestCase):
                 return MARKET_ERROR_PAGE
             return MARKET_FORM + market_page(market_row(1, "Apple Buyer", "text-info", 1, "100"))
 
-        client, _ = self.client(
+        client, _ = market_client(
             {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
         )
         with self.assertRaisesRegex(MonitorError, "Oil"):
@@ -2150,7 +2147,7 @@ class MarketFetchTests(unittest.TestCase):
                 return login_page
             return MARKET_FORM + market_page(market_row(1, "Apple Buyer", "text-info", 1, "100"))
 
-        client, _ = self.client(
+        client, _ = market_client(
             {"buyermarketplace.php": serve}, goods=(("Apples", 3), ("Oil", 1))
         )
         with self.assertRaisesRegex(MonitorError, "Oil"):
@@ -2159,20 +2156,20 @@ class MarketFetchTests(unittest.TestCase):
     def test_an_unresolved_alliance_is_an_error_not_an_empty_roster(self):
         # None means "never resolved", which is a different fact from "in no alliance"; a
         # caller that got frozenset() for it would silently lose every ally.
-        client, calls = self.client({}, alliance_id=None)
+        client, calls = market_client({}, alliance_id=None)
         with self.assertRaisesRegex(MonitorError, "not been resolved"):
             client._alliance_roster()
         self.assertEqual(calls, [])
 
     def test_the_roster_comes_from_viewalliance_never_myalliance(self):
-        client, calls = self.client(
+        client, calls = market_client(
             {"viewalliance.php?alliance_id=7": ALLIANCE_PAGE}, alliance_id=7
         )
         self.assertEqual(client._alliance_roster(), frozenset({12, 13, 42}))
         self.assertEqual([path for path, _ in calls], ["viewalliance.php?alliance_id=7"])
 
     def test_no_alliance_yields_an_empty_roster_without_a_request(self):
-        client, calls = self.client({}, alliance_id=0)
+        client, calls = market_client({}, alliance_id=0)
         self.assertEqual(client._alliance_roster(), frozenset())
         self.assertEqual(calls, [])
 
@@ -2180,7 +2177,7 @@ class MarketFetchTests(unittest.TestCase):
         # Your own nation is always on your own alliance page, so nothing there means the
         # fetch failed. Returning it would demote every ally to a stranger and silently
         # stop the alerts this feature exists for.
-        client, _ = self.client(
+        client, _ = market_client(
             {"viewalliance.php?alliance_id=7": "<h3>Alliance</h3><table></table>"},
             alliance_id=7,
         )
@@ -2189,7 +2186,7 @@ class MarketFetchTests(unittest.TestCase):
 
     def test_a_snapshot_without_market_goods_makes_no_market_requests(self):
         navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
-        client, calls = self.client(
+        client, calls = market_client(
             {
                 "index.php": navigation,
                 "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
@@ -2202,7 +2199,7 @@ class MarketFetchTests(unittest.TestCase):
 
     def test_include_market_false_skips_the_market_requests(self):
         navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
-        client, calls = self.client(
+        client, calls = market_client(
             {
                 "index.php": navigation,
                 "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
@@ -2214,7 +2211,7 @@ class MarketFetchTests(unittest.TestCase):
 
     def test_a_snapshot_with_goods_fetches_the_roster_and_the_orders(self):
         navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
-        client, calls = self.client(
+        client, calls = market_client(
             {
                 "index.php": navigation,
                 "news.php?page=1": navigation + "<h3>News</h3>No news yet.",

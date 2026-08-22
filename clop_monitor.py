@@ -1435,25 +1435,26 @@ def build_alerts(
             )
     # No previous to compare against, unlike the branches above: a standing buy order is a
     # current fact, not an event, so it alerts every poll for as long as it is pending.
-    if settings.market_orders:
-        for good in settings.market_goods:
-            # market_preflight resolves good names case-insensitively and stores the game's
-            # canonical spelling, which is what stamps each order, while good.name is
-            # whatever was typed into settings.json. Comparing those exactly would silently
-            # match nothing for a user who wrote "machinery parts".
-            watched = good.name.casefold()
-            lines = [
-                f"  {order.nation_name} ({order.relation_label()}) "
-                f"wants {order.amount:,} at {order.price:,} bits each"
-                for order in current.market_orders
-                if order.good.casefold() == watched and market_order_alerts(order, good)
-            ]
-            if lines:
-                alerts.append(
-                    f"Buy orders for {good.name}:\n"
-                    + "\n".join(lines)
-                    + "\nhttps://4clop.org/buyermarketplace.php"
-                )
+    # goods_to_watch, rather than an inline market_orders check, so that "muted means nothing
+    # is watched" is stated once and the alerting cannot drift from what the poll fetches.
+    for good in goods_to_watch(settings):
+        # market_preflight resolves good names case-insensitively and stores the game's
+        # canonical spelling, which is what stamps each order, while good.name is
+        # whatever was typed into settings.json. Comparing those exactly would silently
+        # match nothing for a user who wrote "machinery parts".
+        watched = good.name.casefold()
+        lines = [
+            f"  {order.nation_name} ({order.relation_label()}) "
+            f"wants {order.amount:,} at {order.price:,} bits each"
+            for order in current.market_orders
+            if order.good.casefold() == watched and market_order_alerts(order, good)
+        ]
+        if lines:
+            alerts.append(
+                f"Buy orders for {good.name}:\n"
+                + "\n".join(lines)
+                + "\nhttps://4clop.org/buyermarketplace.php"
+            )
     if (
         current.fourchan_post is not None
         and previous is not None
