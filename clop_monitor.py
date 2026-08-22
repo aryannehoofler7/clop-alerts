@@ -1033,6 +1033,10 @@ class ClopClient:
         self.timeout = timeout
         self.fourchan_thread = fourchan_thread
         self.initial_fourchan_post = initial_fourchan_post
+        #: (good name, resource_id) pairs, filled in by market_preflight.
+        self.market_goods: Tuple[Tuple[str, int], ...] = ()
+        #: The account's own alliance, or None when no watched good checks alliance.
+        self.alliance_id: Optional[int] = None
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
         self.opener.addheaders = [("User-Agent", "CLOP-notification-monitor/0.1")]
@@ -1107,6 +1111,58 @@ class ClopClient:
             comment=comment,
         )
 
+    def _alliance_roster(self) -> FrozenSet[int]:
+        """The nation ids in this account's alliance.
+
+        Read from viewalliance.php. myalliance.php is never used: it sets
+        alliance_messages_last_checked on every load, which would silently mark the alliance
+        messages this monitor exists to report.
+        """
+        if not self.alliance_id:
+            return frozenset()
+        roster = parse_alliance_nation_ids(
+            self._open(f"viewalliance.php?alliance_id={self.alliance_id}")
+        )
+        # You are a member of the alliance you looked up, so your own nation is always in
+        # that table: an empty parse means the fetch failed, not that the alliance is empty.
+        # A fetched roster is treated as authoritative, so returning an empty one would
+        # demote every ally to a stranger and silently stop the alerts this feature exists
+        # for.
+        if not roster:
+            raise MonitorError(
+                f"The alliance page for alliance {self.alliance_id} listed no member nations"
+            )
+        return roster
+
+    def _market_orders(self, roster: Optional[FrozenSet[int]]) -> Tuple[MarketOrder, ...]:
+        """Every pending buy order for the watched goods.
+
+        The order table exists only for a POST, and the page regenerates its CSRF token on
+        every POST, so each response carries the token the next one has to spend.
+
+        The form carries only the token, the mode and the good: offer, remove, sellone,
+        sellall and sellamount are the fields that make the page change game state, so
+        leaving them out is what keeps this a read-only filter of the deals table.
+        """
+        if not self.market_goods:
+            return ()
+        html = self._open("buyermarketplace.php")
+        orders: List[MarketOrder] = []
+        for good, resource_id in self.market_goods:
+            token = parse_hidden_field(html, "token_buyermarketplace")
+            if not token:
+                raise MonitorError("The buyer's marketplace form has no CSRF token")
+            html = self._open(
+                "buyermarketplace.php",
+                {
+                    "token_buyermarketplace": token,
+                    "mode": "",
+                    "resource_id": str(resource_id),
+                },
+            )
+            orders.extend(parse_market_orders(html, good, roster))
+        return tuple(orders)
+
     def login(self) -> str:
         html = self._open(
             "login.php",
@@ -1116,7 +1172,7 @@ class ClopClient:
             raise AuthenticationError("Login failed; check the credentials or the hosted login flow")
         return html
 
-    def snapshot(self) -> Snapshot:
+    def snapshot(self, include_market: bool = True) -> Snapshot:
         navigation_html = self._open("index.php")
         if not is_logged_in(navigation_html):
             self.login()
@@ -1141,6 +1197,10 @@ class ClopClient:
             raise MonitorError("The authenticated reports page could not be read")
         report_rows = parse_report_rows(reports_html)
         latest_fourchan_post = self._latest_fourchan_post()
+        market_orders: Tuple[MarketOrder, ...] = ()
+        if include_market and self.market_goods:
+            roster = self._alliance_roster() if self.alliance_id is not None else None
+            market_orders = self._market_orders(roster)
         return Snapshot(
             user_messages=user_messages,
             alliance_messages=alliance_messages,
@@ -1149,6 +1209,7 @@ class ClopClient:
             latest_report=report_rows[0] if report_rows else None,
             reports_checked=True,
             report_rows=tuple(report_rows),
+            market_orders=market_orders,
         )
 
 

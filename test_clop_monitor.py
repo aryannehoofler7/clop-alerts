@@ -1942,5 +1942,135 @@ class MarketAlertTests(unittest.TestCase):
         self.assertNotIn("market_orders", snapshot.to_json())
 
 
+class MarketFetchTests(unittest.TestCase):
+    def client(self, pages, goods=(("Machinery Parts", 10),), alliance_id=None):
+        """A client whose _open serves canned pages and records every call."""
+        client = ClopClient("https://4clop.org", "user", "password")
+        client.market_goods = goods
+        client.alliance_id = alliance_id
+        calls = []
+
+        def fake_open(path, form=None):
+            calls.append((path, form))
+            if path == "myalliance.php":
+                raise AssertionError("myalliance.php marks alliance messages read")
+            if path not in pages:
+                raise AssertionError(f"Unexpected path: {path}")
+            page = pages[path]
+            return page(form) if callable(page) else page
+
+        client._open = fake_open
+        return client, calls
+
+    def test_each_post_spends_the_token_from_the_previous_response(self):
+        tokens = iter(["token-1", "token-2", "token-3"])
+
+        def form(_form=None):
+            return MARKET_FORM.replace("abc123", next(tokens))
+
+        client, calls = self.client(
+            {"buyermarketplace.php": form},
+            goods=(("Apples", 3), ("Oil", 1)),
+        )
+        client._market_orders(None)
+        posts = [form_data for path, form_data in calls if form_data is not None]
+        self.assertEqual(
+            [post["token_buyermarketplace"] for post in posts], ["token-1", "token-2"]
+        )
+        self.assertEqual([post["resource_id"] for post in posts], ["3", "1"])
+        self.assertEqual([post["mode"] for post in posts], ["", ""])
+
+    def test_a_market_post_carries_nothing_that_could_change_the_game(self):
+        # offer, remove, sellone, sellall and sellamount are the only fields that make
+        # backend_buyermarketplace.php spend funds, delete orders or sell goods; without
+        # them the POST is a pure filter-and-display of the deals table.
+        client, calls = self.client({"buyermarketplace.php": MARKET_FORM})
+        client._market_orders(None)
+        posts = [form_data for _, form_data in calls if form_data is not None]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(
+            sorted(posts[0]), ["mode", "resource_id", "token_buyermarketplace"]
+        )
+
+    def test_orders_are_tagged_with_the_good_that_was_requested(self):
+        page = MARKET_FORM + market_page(market_row(42, "Luna Sueno", "text-info", 12, "5,000"))
+        client, _ = self.client({"buyermarketplace.php": page})
+        orders = client._market_orders(None)
+        self.assertEqual([order.good for order in orders], ["Machinery Parts"])
+        self.assertEqual(orders[0].nation_name, "Luna Sueno")
+
+    def test_a_missing_token_is_a_monitor_error(self):
+        client, _ = self.client({"buyermarketplace.php": "<form></form>"})
+        with self.assertRaisesRegex(MonitorError, "CSRF token"):
+            client._market_orders(None)
+
+    def test_the_roster_comes_from_viewalliance_never_myalliance(self):
+        client, calls = self.client(
+            {"viewalliance.php?alliance_id=7": ALLIANCE_PAGE}, alliance_id=7
+        )
+        self.assertEqual(client._alliance_roster(), frozenset({12, 13, 42}))
+        self.assertEqual([path for path, _ in calls], ["viewalliance.php?alliance_id=7"])
+
+    def test_no_alliance_yields_an_empty_roster_without_a_request(self):
+        client, calls = self.client({}, alliance_id=0)
+        self.assertEqual(client._alliance_roster(), frozenset())
+        self.assertEqual(calls, [])
+
+    def test_an_empty_fetched_roster_is_a_failure_not_a_membership_of_none(self):
+        # Your own nation is always on your own alliance page, so nothing there means the
+        # fetch failed. Returning it would demote every ally to a stranger and silently
+        # stop the alerts this feature exists for.
+        client, _ = self.client(
+            {"viewalliance.php?alliance_id=7": "<h3>Alliance</h3><table></table>"},
+            alliance_id=7,
+        )
+        with self.assertRaisesRegex(MonitorError, "listed no member nations"):
+            client._alliance_roster()
+
+    def test_a_snapshot_without_market_goods_makes_no_market_requests(self):
+        navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
+        client, calls = self.client(
+            {
+                "index.php": navigation,
+                "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
+                "reports.php": navigation + "<h3>Reports</h3><table></table>",
+            },
+            goods=(),
+        )
+        self.assertEqual(client.snapshot().market_orders, ())
+        self.assertNotIn("buyermarketplace.php", [path for path, _ in calls])
+
+    def test_include_market_false_skips_the_market_requests(self):
+        navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
+        client, calls = self.client(
+            {
+                "index.php": navigation,
+                "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
+                "reports.php": navigation + "<h3>Reports</h3><table></table>",
+            }
+        )
+        client.snapshot(include_market=False)
+        self.assertNotIn("buyermarketplace.php", [path for path, _ in calls])
+
+    def test_a_snapshot_with_goods_fetches_the_roster_and_the_orders(self):
+        navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
+        page = MARKET_FORM + market_page(market_row(42, "Theirs", "text-danger", 12, "5,000"))
+        client, calls = self.client(
+            {
+                "index.php": navigation,
+                "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
+                "reports.php": navigation + "<h3>Reports</h3><table></table>",
+                "buyermarketplace.php": page,
+                "viewalliance.php?alliance_id=7": ALLIANCE_PAGE,
+            },
+            alliance_id=7,
+        )
+        snapshot = client.snapshot()
+        # Nation 42 is in the roster, so the red enemy colour does not hide their membership.
+        self.assertEqual(len(snapshot.market_orders), 1)
+        self.assertTrue(snapshot.market_orders[0].is_ally)
+        self.assertTrue(snapshot.market_orders[0].is_enemy)
+
+
 if __name__ == "__main__":
     unittest.main()
