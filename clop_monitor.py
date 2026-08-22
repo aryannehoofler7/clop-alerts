@@ -166,6 +166,30 @@ def parse_fourchan_thread_url(url: str) -> FourChanThreadSettings:
     return FourChanThreadSettings(page_url, api_url, board, thread_id)
 
 
+def market_boolean_setting(section: Dict[str, object], good: str, name: str) -> bool:
+    result = section.get(name, True)
+    if not isinstance(result, bool):
+        raise MonitorError(f"Setting {name} for market good {good!r} must be true or false")
+    return result
+
+
+def market_name_patterns(section: Dict[str, object], good: str, name: str) -> Tuple[str, ...]:
+    raw = section.get(name, [])
+    if not isinstance(raw, list):
+        raise MonitorError(
+            f"Setting {name} for market good {good!r} must be a list of nation names"
+        )
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise MonitorError(
+                f"Every {name} entry for market good {good!r} must be a non-empty string"
+            )
+    # As in reports.ignore, a leading # switches one entry off without deleting it.
+    return tuple(
+        entry.strip() for entry in raw if not entry.strip().startswith("#")
+    )
+
+
 def load_settings(path: Path) -> MonitorSettings:
     """Read the optional settings file; every absent key falls back to a built-in default.
 
@@ -213,6 +237,7 @@ def load_settings(path: Path) -> MonitorSettings:
         alliance_messages=boolean_setting(alerts_value, "alerts", "alliance_messages", True),
         news=boolean_setting(alerts_value, "alerts", "news", True),
         reports=boolean_setting(alerts_value, "alerts", "reports", True),
+        market_orders=boolean_setting(alerts_value, "alerts", "market_orders", True),
     )
 
     wav_path: Optional[Path] = None
@@ -276,6 +301,41 @@ def load_settings(path: Path) -> MonitorSettings:
             entry.strip() for entry in raw_ignore if not entry.strip().startswith("#")
         )
     alerts = replace(alerts, report_ignore=report_ignore)
+
+    market_value = value.get("market", {})
+    if not isinstance(market_value, dict):
+        raise MonitorError("The market setting must be a JSON object")
+    market_goods: List[WatchedGood] = []
+    if "goods" not in market_value:
+        defaults_used.append("market.goods")
+    else:
+        raw_goods = market_value["goods"]
+        if not isinstance(raw_goods, dict):
+            raise MonitorError(
+                "Setting market.goods must be a JSON object keyed by good name"
+            )
+        for raw_name, raw_good in raw_goods.items():
+            name = raw_name.strip()
+            # JSON has no comments, so a leading # switches a good off where you can still
+            # see it; watching one means deleting two characters.
+            if name.startswith("#"):
+                continue
+            if not name:
+                raise MonitorError("Every market.goods key must be a non-empty good name")
+            if not isinstance(raw_good, dict):
+                raise MonitorError(
+                    f"Settings for market good {name!r} must be a JSON object"
+                )
+            market_goods.append(
+                WatchedGood(
+                    name=name,
+                    friends=market_boolean_setting(raw_good, name, "friends"),
+                    alliance=market_boolean_setting(raw_good, name, "alliance"),
+                    always=market_name_patterns(raw_good, name, "always"),
+                    never=market_name_patterns(raw_good, name, "never"),
+                )
+            )
+    alerts = replace(alerts, market_goods=tuple(market_goods))
 
     fourchan_thread: Optional[FourChanThreadSettings] = None
     fourchan_value = value.get("fourchan")

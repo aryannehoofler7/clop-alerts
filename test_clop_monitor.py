@@ -585,6 +585,7 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "alliance_messages": True,
                             "news": True,
                             "reports": True,
+                            "market_orders": True,
                         },
                         "sound": {
                             "wav_path": None,
@@ -599,7 +600,7 @@ class SettingsDefaultsTests(unittest.TestCase):
         self.assertEqual(
             message,
             "Settings: using defaults for sound.repeat_interval_seconds, "
-            "cache.persist_to_file, reports.ignore.",
+            "cache.persist_to_file, reports.ignore, market.goods.",
         )
 
     def test_complete_settings_file_reports_nothing(self):
@@ -613,6 +614,7 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "alliance_messages": True,
                             "news": True,
                             "reports": True,
+                            "market_orders": True,
                         },
                         "sound": {
                             "wav_path": None,
@@ -621,6 +623,7 @@ class SettingsDefaultsTests(unittest.TestCase):
                         },
                         "cache": {"persist_to_file": True},
                         "reports": {"ignore": []},
+                        "market": {"goods": {}},
                         "fourchan": {"thread_url": None},
                     }
                 ),
@@ -1246,6 +1249,91 @@ class PatternMatchTests(unittest.TestCase):
 
     def test_no_patterns_match_nothing(self):
         self.assertFalse(clop_monitor.matches_any_pattern("Luna Sueno", []))
+
+
+class MarketSettingsTests(unittest.TestCase):
+    def load(self, market):
+        value = {"sound": {"wav_path": None}, "market": market}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            return load_settings(path)
+
+    def test_a_commented_out_good_is_not_watched(self):
+        settings = self.load({"goods": {"# Machinery Parts": {}}})
+        self.assertEqual(settings.alerts.market_goods, ())
+
+    def test_uncommenting_a_good_watches_it_with_the_documented_defaults(self):
+        settings = self.load({"goods": {"Machinery Parts": {}}})
+        self.assertEqual(
+            settings.alerts.market_goods,
+            (clop_monitor.WatchedGood("Machinery Parts", True, True, (), ()),),
+        )
+
+    def test_every_knob_is_loaded(self):
+        settings = self.load(
+            {
+                "goods": {
+                    "Oil": {
+                        "friends": False,
+                        "alliance": True,
+                        "always": ["Luna Sueno"],
+                        "never": ["Sombra"],
+                    }
+                }
+            }
+        )
+        self.assertEqual(
+            settings.alerts.market_goods,
+            (clop_monitor.WatchedGood("Oil", False, True, ("Luna Sueno",), ("Sombra",)),),
+        )
+
+    def test_a_commented_out_nation_name_is_dropped(self):
+        settings = self.load({"goods": {"Oil": {"always": ["# Luna Sueno", "Sombra"]}}})
+        self.assertEqual(settings.alerts.market_goods[0].always, ("Sombra",))
+
+    def test_goods_keep_the_order_the_file_lists_them_in(self):
+        settings = self.load({"goods": {"Oil": {}, "Apples": {}, "Copper": {}}})
+        self.assertEqual(
+            [good.name for good in settings.alerts.market_goods],
+            ["Oil", "Apples", "Copper"],
+        )
+
+    def test_a_good_whose_value_is_not_an_object_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "Machinery Parts"):
+            self.load({"goods": {"Machinery Parts": True}})
+
+    def test_a_non_boolean_knob_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "friends"):
+            self.load({"goods": {"Oil": {"friends": "yes"}}})
+
+    def test_a_non_list_name_override_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "never"):
+            self.load({"goods": {"Oil": {"never": "Sombra"}}})
+
+    def test_an_empty_name_override_entry_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "always"):
+            self.load({"goods": {"Oil": {"always": ["  "]}}})
+
+    def test_a_non_object_goods_section_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "market.goods"):
+            self.load({"goods": ["Oil"]})
+
+    def test_an_absent_market_section_is_reported_as_a_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"sound": {"wav_path": None}}), encoding="utf-8")
+            settings = load_settings(path)
+        self.assertEqual(settings.alerts.market_goods, ())
+        self.assertIn("market.goods", settings.defaults_used)
+
+    def test_market_orders_category_can_be_disabled(self):
+        value = {"sound": {"wav_path": None}, "alerts": {"market_orders": False}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            settings = load_settings(path)
+        self.assertFalse(settings.alerts.market_orders)
 
 
 if __name__ == "__main__":
