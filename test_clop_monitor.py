@@ -80,7 +80,8 @@ class ParserTests(unittest.TestCase):
         """
         self.assertEqual(
             parse_latest_report(html),
-            ("You gained 3 Pies. Done.", "2026-08-17 08:02:33"),
+            # The <br> stays a line break: reports are judged and shown a line at a time.
+            ("You gained 3 Pies.\nDone.", "2026-08-17 08:02:33"),
         )
 
     def test_fourchan_comment_html_becomes_plain_text(self):
@@ -814,6 +815,46 @@ NON_BUILD_COMPLETIONS = [
 WORTH_ALERTING = "Your nation was attacked by Sombra and lost 3 Tanks."
 
 
+def tick_report(detail_lines, satisfaction="-2"):
+    """One two-hourly tick report, shaped the way cron/frequent.php:786-799 writes it.
+
+    Copied structurally rather than paraphrased: the Show/Hide wrapper is two <div>s, the
+    detail lines are joined with <br/>, and nothing but a </div> separates the last detail
+    line from "Change in Satisfaction:". Those three facts are what the line split has to
+    survive, so a tidied-up fixture would test the wrong page.
+    """
+    details = "<br/>\n".join(detail_lines)
+    return (
+        '<div id="r1" class="report-showbutton">'
+        "<a href=\"javascript:;\" onclick=\"document.getElementById('r1').style.display = 'none';\n"
+        "document.getElementById('r1x').style.display = 'block';\">Show Details</a></div>\n"
+        '\t<div id="r1x" class="report-details">'
+        "<a href=\"javascript:;\" onclick=\"document.getElementById('r1').style.display = 'block';\n"
+        "document.getElementById('r1x').style.display = 'none';\">Hide Details</a><br/>\n"
+        f"{details}\n"
+        "\t</div>\n"
+        "\t<b>\n"
+        f"\tChange in Satisfaction: {satisfaction}<br/>\n"
+        "\tChange in SE Relation: +1<br/>\n"
+        "\tChange in NLR Relation: 0<br/>\n"
+        "\t</b>"
+    )
+
+
+def action_report(*infos):
+    """One finished action's report: backend_actions.php:246 joins its lines with <br/>."""
+    return "<br/>".join(infos)
+
+
+def reports_page(cells, timestamps=None):
+    """The reports.php table, newest first, as reports.php renders it."""
+    stamps = timestamps or [f"2026-08-17 08:{index:02d}:00" for index in range(len(cells), 0, -1)]
+    rows = "".join(
+        f"<tr><td>{cell}</td><td>{stamp}</td></tr>" for cell, stamp in zip(cells, stamps)
+    )
+    return f"<h3>Reports</h3><table><tr><th>Report</th><th>When</th></tr>{rows}</table>"
+
+
 class ReportIgnorePatternTests(unittest.TestCase):
     """Patterns match anywhere in a report; % stands for any run of characters."""
 
@@ -1035,6 +1076,72 @@ class ReportRowParsingTests(unittest.TestCase):
                 ("Newest report", "2026-08-17 08:02:33"),
                 ("Older report", "2026-08-16 04:05:06"),
             ],
+        )
+
+
+class ReportLineParsingTests(unittest.TestCase):
+    """A report cell keeps the line structure the game wrote; a news cell does not."""
+
+    def test_a_tick_report_comes_back_as_the_lines_the_page_shows(self):
+        html = reports_page(
+            [
+                tick_report(
+                    [
+                        "You gained 5 Oil from your 1 Basic Oil Well.",
+                        "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+                    ]
+                )
+            ]
+        )
+        (message, _), = parse_report_rows(html)
+        self.assertEqual(
+            message.split("\n"),
+            [
+                "Show Details",
+                "Hide Details",
+                "You gained 5 Oil from your 1 Basic Oil Well.",
+                "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+                "Change in Satisfaction: -2",
+                "Change in SE Relation: +1",
+                "Change in NLR Relation: 0",
+            ],
+        )
+
+    def test_the_last_detail_line_is_not_glued_to_the_satisfaction_line(self):
+        # cron/frequent.php:786-799 puts no <br/> between the last detail line and
+        # "Change in Satisfaction:" - only the </div> that closes the details block. Judged as
+        # one line, the routine satisfaction pattern would silence whatever that last line was.
+        html = reports_page([tick_report(["Too many Basic Oil Wells cause environmental damage! (-5 sat)"])])
+        (message, _), = parse_report_rows(html)
+        self.assertIn("Too many Basic Oil Wells cause environmental damage! (-5 sat)", message.split("\n"))
+
+    def test_a_literal_newline_inside_one_message_stays_one_line(self):
+        # Three tick reports are heredocs that span two source lines (frequent.php:952, :985,
+        # :1310), so the newline is inside the sentence rather than between two of them.
+        html = reports_page(
+            [
+                "Your satisfaction is below the minimum - your ponies are revolting!\n"
+                "(You gain 30 sat among the rest of your nation as the subversives stop "
+                "participating in it.)"
+            ]
+        )
+        (message, _), = parse_report_rows(html)
+        self.assertEqual(
+            message,
+            "Your satisfaction is below the minimum - your ponies are revolting! "
+            "(You gain 30 sat among the rest of your nation as the subversives stop "
+            "participating in it.)",
+        )
+
+    def test_news_is_still_flattened_to_one_line(self):
+        html = """
+        <h3>News</h3>
+        <table>
+          <tr><td>War declared<br/>by Sombra</td><td>2026-08-17 08:02:33</td></tr>
+        </table>
+        """
+        self.assertEqual(
+            parse_latest_news(html), ("War declared by Sombra", "2026-08-17 08:02:33")
         )
 
 

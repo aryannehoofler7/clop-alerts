@@ -490,15 +490,39 @@ class LinkTextParser(HTMLParser):
             self._active = None
 
 
-class NewsTableParser(HTMLParser):
-    """Collect timestamped, two-cell rows from the news table."""
+#: The tags that end a line inside a table cell. ``<br>`` is the one the game writes on
+#: purpose, but the tick wraps its detail lines in ``<div>``s (cron/frequent.php:786-799) and
+#: puts no ``<br>`` between the last detail line and ``Change in Satisfaction:`` — only the
+#: ``</div>`` that closes the block. Treating the block elements as line ends too is what
+#: makes the split the page's own visible lines rather than a subset of them.
+LINE_BREAK_TAGS = frozenset({"br", "div", "p"})
 
-    def __init__(self) -> None:
+
+class NewsTableParser(HTMLParser):
+    """Collect timestamped, two-cell rows from the news table.
+
+    ``line_separator`` decides what a cell's line breaks become. News reads as one sentence
+    and keeps the space it always had; reports are judged and shown a line at a time
+    (docs/2026-08-23-per-line-report-judging-design.md) and keep a newline. Both are built
+    from the same split, and joining with a space reproduces the old flattening exactly, so
+    the news text is unchanged by the report work.
+
+    Only these tags break a line: a newline in the cell's *text* does not, because three tick
+    reports are heredocs that span two source lines and their sentence has to survive as one.
+    """
+
+    def __init__(self, line_separator: str = " ") -> None:
         super().__init__(convert_charrefs=True)
+        self.line_separator = line_separator
         self._in_row = False
-        self._cell_parts: Optional[List[str]] = None
+        #: The open cell's lines, each a list of text fragments; None outside a cell.
+        self._cell_lines: Optional[List[List[str]]] = None
         self._row: List[str] = []
         self.rows: List[Tuple[str, str]] = []
+
+    def _break_line(self) -> None:
+        if self._cell_lines is not None:
+            self._cell_lines.append([])
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
         del attrs
@@ -507,25 +531,35 @@ class NewsTableParser(HTMLParser):
             self._in_row = True
             self._row = []
         elif tag == "td" and self._in_row:
-            self._cell_parts = []
-        elif tag == "br" and self._cell_parts is not None:
-            self._cell_parts.append("\n")
+            self._cell_lines = [[]]
+        elif tag in LINE_BREAK_TAGS:
+            self._break_line()
 
     def handle_data(self, data: str) -> None:
-        if self._cell_parts is not None:
-            self._cell_parts.append(data)
+        if self._cell_lines is not None:
+            self._cell_lines[-1].append(data)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag == "td" and self._cell_parts is not None:
-            self._row.append(normalize_text(self._cell_parts))
-            self._cell_parts = None
+        if tag == "td" and self._cell_lines is not None:
+            self._row.append(self._cell_text())
+            self._cell_lines = None
         elif tag == "tr" and self._in_row:
             if len(self._row) == 2 and TIMESTAMP_RE.match(self._row[1]):
                 self.rows.append((self._row[0], self._row[1]))
             self._row = []
             self._in_row = False
-            self._cell_parts = None
+            self._cell_lines = None
+        elif tag in LINE_BREAK_TAGS:
+            # Both ends of a block count, so a cell laid out as <div>a</div><div>b</div> is two
+            # lines rather than one. The empty line that a start-then-end pair leaves behind is
+            # dropped below, which is also what makes a self-closing <br/> harmless here.
+            self._break_line()
+
+    def _cell_text(self) -> str:
+        assert self._cell_lines is not None
+        lines = (normalize_text(parts) for parts in self._cell_lines)
+        return self.line_separator.join(line for line in lines if line)
 
 
 def _path_from_href(href: str) -> str:
@@ -895,8 +929,13 @@ def parse_latest_news(html: str) -> Optional[Tuple[str, str]]:
 
 
 def parse_report_rows(html: str) -> List[Tuple[str, str]]:
-    """Every timestamped report row on the page, newest first."""
-    parser = NewsTableParser()
+    """Every timestamped report row on the page, newest first, one line per line of the page.
+
+    The lines are kept because a report is judged and shown a line at a time: a tick packs
+    routine production and a lost military force into the same row, and only per-line
+    matching can silence the first without the second.
+    """
+    parser = NewsTableParser("\n")
     parser.feed(html)
     return parser.rows
 
