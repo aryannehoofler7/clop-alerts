@@ -501,12 +501,16 @@ class NewsTableParser(HTMLParser):
             self._cell_parts = None
 
 
+def _path_from_href(href: str) -> str:
+    return urllib.parse.urlsplit(href).path.rsplit("/", 1)[-1].lower()
+
+
 def nation_id_from_href(href: str) -> Optional[int]:
     """The nation_id of a viewnation.php link, or None for any other link."""
-    parsed = urllib.parse.urlsplit(href)
-    if parsed.path.rsplit("/", 1)[-1].lower() != "viewnation.php":
+    if _path_from_href(href) != "viewnation.php":
         return None
-    values = urllib.parse.parse_qs(parsed.query).get("nation_id")
+    query = urllib.parse.urlsplit(href).query
+    values = urllib.parse.parse_qs(query).get("nation_id")
     if not values or not values[0].isdigit():
         return None
     return int(values[0])
@@ -589,12 +593,17 @@ class BuyerMarketParser(HTMLParser):
         # link is what keeps it out.
         if self._nation_id is None or len(self._numbers) < 2:
             return
+        # The two col-md-1 cells are Offering (the price) then Amount, in that order
+        # (buyermarketplace.php:56-58). Should the site ever add or reorder a numeric column,
+        # the two would silently swap and the alerts would read plausibly but wrongly, so this
+        # is the assumption to check first when the numbers look odd.
         price = parse_market_number(self._numbers[0])
         amount = parse_market_number(self._numbers[1])
         if price is None or amount is None:
             return
-        # An unstyled buyer has no span, so the name is the anchor text up to the region.
-        name = (self._span_text or self._anchor_text.split("(")[0]).strip()
+        # An unstyled buyer has no span, so the name is the anchor text up to the region,
+        # which is the last bracket rather than the first in case a name ever contains one.
+        name = (self._span_text or self._anchor_text.rsplit("(", 1)[0]).strip()
         if not name:
             return
         self.rows.append((self._nation_id, name, self._colour, amount, price))
@@ -603,7 +612,11 @@ class BuyerMarketParser(HTMLParser):
 def parse_market_orders(
     html: str, good: str, roster: Optional[FrozenSet[int]]
 ) -> List[MarketOrder]:
-    """Every pending buy order for one good, newest-priced first as the page orders them.
+    """Every pending buy order for one good, in page order: highest price first.
+
+    The page's order is ``ORDER BY m.price DESC, n.nation_id DESC``
+    (backend_buyermarketplace.php:266), so the best offer leads and a tie goes to the newest
+    nation; it is not a recency order and nothing here re-sorts it.
 
     ``roster`` is the set of nation ids in your alliance, or None when it was not looked up.
     Without it the green colour is the only alliance signal available; with it, membership is
@@ -766,8 +779,17 @@ def parse_alliance_id(html: str) -> Optional[int]:
 def parse_alliance_nation_ids(html: str) -> FrozenSet[int]:
     """Every member nation on an alliance page.
 
-    viewalliance.php links a nation only from its member table, so every viewnation link on
-    the page is a member of that alliance.
+    viewalliance.php links a nation only from its member table (viewalliance.php:70), so every
+    viewnation link on the page is a member of that alliance.
+
+    **An empty result means the fetch failed, not that the alliance is empty.** You are a
+    member of the alliance you looked up, so your own nation is always in that table and a
+    real page can never come back with nothing; an empty set means an error page, a logged-out
+    page, or drifted markup. A caller must raise on it rather than pass it on as a roster —
+    handing an empty roster to ``parse_market_orders`` would demote every genuine ally to a
+    stranger and the monitor would quietly stop alerting on the case it exists for. Compare
+    ``parse_pending_counts``, which raises for the same reason. This stays a pure parser and
+    reports what it found.
     """
     parser = LinkTextParser()
     parser.feed(html)
@@ -804,10 +826,6 @@ def is_logged_in(html: str) -> bool:
     parser = LinkTextParser()
     parser.feed(html)
     return any(_path_from_href(href) == "logout.php" for href, _ in parser.links)
-
-
-def _path_from_href(href: str) -> str:
-    return urllib.parse.urlsplit(href).path.rsplit("/", 1)[-1].lower()
 
 
 def parse_pending_counts(html: str) -> Tuple[int, int]:
