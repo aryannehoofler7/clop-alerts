@@ -1755,6 +1755,10 @@ Add to `ClopClient`, after `_market_orders`:
                 + ". The tradeable goods are: "
                 + ", ".join(sorted(available))
             )
+        # The game's spelling is kept, not the settings file's, so the startup message names
+        # the good the way the game does. build_alerts pairs orders back to their watch entry
+        # case-insensitively precisely because of this; do not "fix" that by storing the
+        # user's spelling here instead.
         self.market_goods = tuple(resolved)
         watching = ", ".join(name for name, _ in resolved)
         if not any(good.alliance for good in goods):

@@ -269,6 +269,17 @@ https://4clop.org/buyermarketplace.php
 
 `(no relation)` appears only for a buyer matched by an `always` pattern.
 
+**Good names are matched case-insensitively when orders are paired back to their settings.**
+Two spellings of one good name are in play: the preflight resolves what the settings file says
+against the game's own selector and keeps the **game's** canonical spelling, which is what each
+fetched order is stamped with, while the watch list keeps the **user's** spelling, which is what
+the alert header displays. Comparing those exactly would mean that a settings file saying
+`machinery parts` fetched orders correctly, stamped them `Machinery Parts`, matched nothing, and
+alerted on nothing — with no error and no log line, because an order for an unwatched good is
+dropped silently by design. The two are therefore compared case-insensitively on purpose. This is
+the one place in the feature where that is not obvious, since the drop it guards is meant to be
+silent.
+
 ### Failures
 
 A market page, roster page, or nation page that cannot be read raises `MonitorError` and reaches
