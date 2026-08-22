@@ -1,7 +1,11 @@
 # Buyer's-marketplace order alerts — design
 
 **Date:** 2026-08-22
-**Status:** approved, not yet implemented
+**Status:** implemented, reviewed, and verified against the live game on 2026-08-23
+
+Live verification (2026-08-23): a scan of all 28 tradeable goods found 2 alliance buy orders for
+Machinery Parts and correctly classified 26 enemy and 6 alliance buyers, flagging none of the ~23
+unrelated buyers. The run changed no game state.
 
 Alert when somepony you care about has a pending buy order for a good you care about, so you
 can sell into it before somepony else does.

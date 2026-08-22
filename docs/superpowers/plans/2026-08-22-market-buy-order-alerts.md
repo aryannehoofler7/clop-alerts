@@ -12,6 +12,22 @@
 
 ---
 
+## As built
+
+This plan is a point-in-time record of what was *planned* on 2026-08-22, kept for history. Every
+task below was completed, and the feature is implemented, reviewed, and live-verified. Where the
+shipped code and this text disagree, **the code is right** — the divergences below were deliberate
+improvements made during implementation, and the plan has not been rewritten to hide them.
+
+- **Muting stops the work, not just the alert.** The plan calls `market_preflight(settings.alerts.market_goods)` ungated; the shipped code calls `goods_to_watch(settings.alerts)`, so `alerts.market_orders: false` skips the market fetching entirely instead of doing it and discarding the result.
+- **Stricter settings loading.** The plan's loader has neither the unknown-knob rejection nor the case-clash rejection that shipped (and that `README.md:367-370` documents).
+- **`parse_alliance_id` became `parse_alliance_link`**, returning `(id, name)`, which removed a duplicated link-walk.
+- **`_market_orders` gained a refusal guard.** It now raises when a POST returns neither order rows nor the game's "Nobody wants to buy that item." banner; without it, a refused POST would be silently reported as "this good has no buy orders".
+- **Task 11's status-line fragment** carried a trailing `", "` that would have produced malformed output; the separator was moved.
+- **Two task details were simply wrong** and were corrected as encountered: Task 3's stated test count (13) and Task 10's `EMPIRE_OVERVIEW` fixture assumption. See the task reports.
+
+---
+
 ## Background you need
 
 The monitor is a read-only scraper of the hosted PHP game at `https://4clop.org`. Facts about the game's pages that this plan depends on, all verified against the source in `D:\Koan\clop\clop`:
@@ -57,7 +73,7 @@ The monitor is a read-only scraper of the hosted PHP game at `https://4clop.org`
 - Modify: `clop_monitor.py:50-57` (`AlertCategorySettings`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -77,12 +93,12 @@ class WatchedGoodTests(unittest.TestCase):
         self.assertEqual(settings.market_goods, ())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.WatchedGoodTests -v`
 Expected: FAIL with `AttributeError: module 'clop_monitor' has no attribute 'WatchedGood'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `clop_monitor.py`, insert immediately **before** `class AlertCategorySettings` (line 50):
 
@@ -111,12 +127,12 @@ Then add two fields to `AlertCategorySettings`, after `report_ignore`:
     market_goods: Tuple[WatchedGood, ...] = ()
 ```
 
-- [ ] **Step 4: Run the whole suite**
+- [x] **Step 4: Run the whole suite**
 
 Run: `python -m unittest -v`
 Expected: PASS, no existing test broken.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -133,7 +149,7 @@ git commit -m "feat: add per-good market watch settings dataclass"
 - Modify: `clop_monitor.py:441-451` (`report_is_ignored`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -149,12 +165,12 @@ class PatternMatchTests(unittest.TestCase):
         self.assertFalse(clop_monitor.matches_any_pattern("Luna Sueno", []))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.PatternMatchTests -v`
 Expected: FAIL with `AttributeError: module 'clop_monitor' has no attribute 'matches_any_pattern'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Replace `report_is_ignored` in `clop_monitor.py` (lines 441-451) with:
 
@@ -179,12 +195,12 @@ def report_is_ignored(message: str, patterns: Sequence[str]) -> bool:
     return matches_any_pattern(message, patterns)
 ```
 
-- [ ] **Step 4: Run the whole suite**
+- [x] **Step 4: Run the whole suite**
 
 Run: `python -m unittest -v`
 Expected: PASS. The existing `ReportIgnorePatternTests` still pass unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -199,7 +215,7 @@ git commit -m "refactor: name the pattern matcher for its rule, not its first ca
 - Modify: `clop_monitor.py:150-284` (`load_settings`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -289,12 +305,12 @@ class MarketSettingsTests(unittest.TestCase):
         self.assertFalse(settings.alerts.market_orders)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketSettingsTests -v`
 Expected: FAIL — `market_goods` is always `()` and no `MonitorError` is raised.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `clop_monitor.py`, add these two module-level helpers immediately **before** `def load_settings` (line 150):
 
@@ -374,7 +390,7 @@ Then, immediately **after** the `alerts = replace(alerts, report_ignore=report_i
     alerts = replace(alerts, market_goods=tuple(market_goods))
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketSettingsTests -v`
 Expected: PASS (13 tests)
@@ -382,7 +398,7 @@ Expected: PASS (13 tests)
 Run: `python -m unittest -v`
 Expected: PASS. `test_startup_message_names_only_the_omitted_settings` and `test_complete_settings_file_reports_nothing` may now fail because `market.goods` joined the defaults list — if so, update those two tests to include `market.goods` in the expected names and add a `market` section to the complete-settings fixture.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -397,7 +413,7 @@ git commit -m "feat: load the per-good market watch settings"
 - Modify: `settings.example.json`
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -478,12 +494,12 @@ class ShippedMarketGoodsTests(unittest.TestCase):
         )
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.ShippedMarketGoodsTests -v`
 Expected: FAIL with `KeyError: 'market'`
 
-- [ ] **Step 3: Write the settings example**
+- [x] **Step 3: Write the settings example**
 
 Add `"market_orders": true` to the `alerts` object in `settings.example.json`, then add this `market` section after the `reports` section:
 
@@ -523,7 +539,7 @@ Add `"market_orders": true` to the `alerts` object in `settings.example.json`, t
   },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.ShippedMarketGoodsTests -v`
 Expected: PASS (4 tests)
@@ -531,7 +547,7 @@ Expected: PASS (4 tests)
 Run: `python -m unittest -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add settings.example.json test_clop_monitor.py
@@ -546,7 +562,7 @@ git commit -m "feat: ship every tradeable good commented out in the settings exa
 - Modify: `clop_monitor.py` (new parser after `NewsTableParser`, ends line 367)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`. The HTML mirrors `buyermarketplace.php:95-101` exactly, including the `text-danger` price cell and `text-success` amount cell that make the colour trap real:
 
@@ -668,12 +684,12 @@ class RelationLabelTests(unittest.TestCase):
         self.assertEqual(self.label(is_enemy=True), "enemy")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketRowParsingTests test_clop_monitor.RelationLabelTests -v`
 Expected: FAIL with `AttributeError: module 'clop_monitor' has no attribute 'parse_market_orders'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `clop_monitor.py`, add this constant beside the other module regexes (after line 35):
 
@@ -847,12 +863,12 @@ def parse_market_orders(
     return orders
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketRowParsingTests test_clop_monitor.RelationLabelTests -v`
 Expected: PASS (11 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -867,7 +883,7 @@ git commit -m "feat: parse buyer's-marketplace order rows and buyer relations"
 - Modify: `clop_monitor.py` (new parsers after `BuyerMarketParser`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -952,12 +968,12 @@ class MarketFormParsingTests(unittest.TestCase):
         )
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketFormParsingTests -v`
 Expected: FAIL with `AttributeError: module 'clop_monitor' has no attribute 'parse_hidden_field'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `clop_monitor.py` after `parse_market_orders`:
 
@@ -1105,12 +1121,12 @@ def parse_alliance_nation_ids(html: str) -> FrozenSet[int]:
 
 > **Python 3.8 note:** the walrus in the final comprehension needs 3.8+, which the README already requires (3.9+). Keep it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketFormParsingTests -v`
 Expected: PASS (9 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1125,7 +1141,7 @@ git commit -m "feat: parse the form fields and pages that reach the market and r
 - Modify: `clop_monitor.py` (new function before `build_alerts`, line 735)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -1192,12 +1208,12 @@ class MarketDecisionTests(unittest.TestCase):
         self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketDecisionTests -v`
 Expected: FAIL with `AttributeError: module 'clop_monitor' has no attribute 'market_order_alerts'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `clop_monitor.py`, immediately before `def build_alerts` (line 735):
 
@@ -1219,12 +1235,12 @@ def market_order_alerts(order: MarketOrder, good: WatchedGood) -> bool:
     return good.alliance and order.is_ally
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketDecisionTests -v`
 Expected: PASS (13 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1239,7 +1255,7 @@ git commit -m "feat: decide which buy orders alert under a good's settings"
 - Modify: `clop_monitor.py:488-497` (`Snapshot`), `clop_monitor.py:735-781` (`build_alerts`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -1320,12 +1336,12 @@ class MarketAlertTests(unittest.TestCase):
         self.assertNotIn("market_orders", snapshot.to_json())
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketAlertTests -v`
 Expected: FAIL with `TypeError: __init__() takes from 4 to 8 positional arguments but 9 were given`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add a field to `Snapshot`, **after** `report_rows` (line 497) so the positional construction in the existing tests keeps working:
 
@@ -1354,7 +1370,7 @@ Add this branch to `build_alerts`, immediately **after** the reports branch and 
                 )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketAlertTests -v`
 Expected: PASS (7 tests)
@@ -1362,7 +1378,7 @@ Expected: PASS (7 tests)
 Run: `python -m unittest -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1377,7 +1393,7 @@ git commit -m "feat: build the buy-order alert blocks"
 - Modify: `clop_monitor.py:575-707` (`ClopClient`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -1500,12 +1516,12 @@ class MarketFetchTests(unittest.TestCase):
         self.assertTrue(snapshot.market_orders[0].is_enemy)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketFetchTests -v`
 Expected: FAIL with `AttributeError: 'ClopClient' object has no attribute '_market_orders'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ClopClient.__init__` (after line 593), add:
 
@@ -1579,12 +1595,12 @@ Change the `snapshot` signature (line 674) to `def snapshot(self, include_market
 
 Then add `market_orders=market_orders,` as the last argument of that `Snapshot(...)` construction.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketFetchTests -v`
 Expected: PASS (8 tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1599,7 +1615,7 @@ git commit -m "feat: fetch buy orders and the alliance roster read-only"
 - Modify: `clop_monitor.py` (`ClopClient`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -1700,12 +1716,12 @@ class MarketPreflightTests(unittest.TestCase):
         self.assertEqual([path for path, _ in calls], ["buyermarketplace.php"])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketPreflightTests -v`
 Expected: FAIL with `AttributeError: 'ClopClient' object has no attribute 'market_preflight'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `ClopClient`, after `_market_orders`:
 
@@ -1797,7 +1813,7 @@ def _links(html: str) -> List[Tuple[str, str]]:
 
 Refactor `parse_alliance_id` and `parse_alliance_nation_ids` to call `_links(html)` instead of constructing `LinkTextParser` themselves.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest test_clop_monitor.MarketPreflightTests -v`
 Expected: PASS (9 tests)
@@ -1805,7 +1821,7 @@ Expected: PASS (9 tests)
 Run: `python -m unittest -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1820,7 +1836,7 @@ git commit -m "feat: preflight watched good names and the account's alliance"
 - Modify: `clop_monitor.py:934-964` (`check_and_notify`), `clop_monitor.py:1077-1111` (`main`)
 - Test: `test_clop_monitor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test_clop_monitor.py`:
 
@@ -1847,12 +1863,12 @@ class MarketDuringAnAlertTests(unittest.TestCase):
         self.assertEqual(calls, [True, False])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest test_clop_monitor.MarketDuringAnAlertTests -v`
 Expected: FAIL — `calls` is `[True, True]`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `check_and_notify`, change the refresh call (line 953) from `refreshed = client.snapshot()` to:
 
@@ -1878,17 +1894,17 @@ Then extend the per-poll status line (lines 1102-1111) by adding this before the
                     f"market_orders={len(current.market_orders)}, "
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest -v`
 Expected: PASS, whole suite.
 
-- [ ] **Step 5: Verify the monitor still starts with nothing watched**
+- [x] **Step 5: Verify the monitor still starts with nothing watched**
 
 Run: `python .\clop_monitor.py --settings settings.example.json --test-notification`
 Expected: a popup appears; no market requests are made (the example watches nothing).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add clop_monitor.py test_clop_monitor.py
@@ -1902,7 +1918,7 @@ git commit -m "feat: run the market preflight and check on every poll"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update the settings example block**
+- [x] **Step 1: Update the settings example block**
 
 In the `## Settings` section, add `"market_orders": true` to the `alerts` object in the sample JSON and add the `market` section after `reports`, abbreviated to three goods with a note that all 28 ship:
 
@@ -1916,7 +1932,7 @@ In the `## Settings` section, add `"market_orders": true` to the `alerts` object
   }
 ```
 
-- [ ] **Step 2: Add the feature to the bullet list at the top of the README**
+- [x] **Step 2: Add the feature to the bullet list at the top of the README**
 
 Insert after the reports bullet:
 
@@ -1925,7 +1941,7 @@ Insert after the reports bullet:
   alliance member has a pending order for it;
 ```
 
-- [ ] **Step 3: Add a `### Watching the buyer's marketplace` section after `### Ignoring routine reports`**
+- [x] **Step 3: Add a `### Watching the buyer's marketplace` section after `### Ignoring routine reports`**
 
 It must cover, in prose matching the README's existing register:
 
@@ -1938,16 +1954,16 @@ It must cover, in prose matching the README's existing register:
 - Your `alliance_id` is resolved once at startup; joining or leaving an alliance while the monitor runs needs a restart.
 - A good name that is not a tradeable good stops the monitor at startup and names the offending entry, rather than silently watching nothing. Names are matched case-insensitively.
 
-- [ ] **Step 4: Update the `## Failures` section**
+- [x] **Step 4: Update the `## Failures` section**
 
 Add the unresolvable good name and an unidentifiable active nation to the list of things that stop the monitor.
 
-- [ ] **Step 5: Verify the README's own example still parses**
+- [x] **Step 5: Verify the README's own example still parses**
 
 Run: `python -m unittest test_clop_monitor.ShippedMarketGoodsTests -v`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md
@@ -1963,17 +1979,17 @@ This is the check the user asked for. It contacts the real game, so it is the la
 **Files:**
 - Modify: none (temporary `settings.json` only, which is git-ignored)
 
-- [ ] **Step 1: Switch Machinery Parts on in the private settings**
+- [x] **Step 1: Switch Machinery Parts on in the private settings**
 
 If `settings.json` does not exist, copy the example: `Copy-Item .\settings.example.json .\settings.json`. Then delete the `# ` from the `"# Machinery Parts"` key so it reads `"Machinery Parts"`.
 
-- [ ] **Step 2: Run one poll**
+- [x] **Step 2: Run one poll**
 
 Run: `python .\clop_monitor.py --once --no-desktop-notifications`
 
 Expected on stdout: a `Market preflight passed; watching Machinery Parts; alliance is ... (#N).` line, then a poll line ending `market_orders=<count>`, and, if any order matches, a `Buy orders for Machinery Parts:` block naming each buyer and their relation.
 
-- [ ] **Step 3: Compare against the game**
+- [x] **Step 3: Compare against the game**
 
 Open `https://4clop.org/buyermarketplace.php` in a browser, select **Machinery Parts**, and check that:
 
@@ -1983,11 +1999,11 @@ Open `https://4clop.org/buyermarketplace.php` in a browser, select **Machinery P
 
 The spec records that both a friend order and an alliance order were pending when this was designed. **If neither is pending now, that is not a failure of the code** — orders get filled. In that case pick another good that does have a coloured buyer, switch it on the same way, and repeat. Report to the user exactly what was found, including if nothing coloured was pending anywhere.
 
-- [ ] **Step 4: Confirm the read-only claim**
+- [x] **Step 4: Confirm the read-only claim**
 
 Re-run with the same settings and confirm the game state is unchanged: your funds are the same, no new report appeared on `reports.php`, and the alliance badge in the header still shows the same unread count (proving `myalliance.php` was not touched).
 
-- [ ] **Step 5: Report the result**
+- [x] **Step 5: Report the result**
 
 Report to the user: the preflight line, the alert block verbatim, and whether it matched the browser. Do not commit `settings.json` — it is git-ignored and personal.
 
