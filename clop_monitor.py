@@ -170,28 +170,31 @@ def parse_fourchan_thread_url(url: str) -> FourChanThreadSettings:
 MARKET_GOOD_KNOBS = frozenset({"friends", "alliance", "always", "never"})
 
 
-def market_boolean_setting(section: Dict[str, object], good: str, name: str) -> bool:
-    result = section.get(name, True)
+def switchable_patterns(raw: object, label: str) -> Tuple[str, ...]:
+    """A list of match patterns, minus the ones switched off with a leading #.
+
+    JSON has no comments, so a leading # switches an entry off in place: the shipped entries
+    all sit there commented out, and enabling one means deleting two characters. Report
+    ignore-patterns and a good's nation-name overrides are both loaded this way so that the
+    settings file has one convention rather than two. ``label`` names the setting in any
+    error, because the reader has to go and find it in the file.
+    """
+    if not isinstance(raw, list):
+        raise MonitorError(f"Setting {label} must be a list of patterns")
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise MonitorError(f"Every pattern in {label} must be a non-empty string")
+    return tuple(entry.strip() for entry in raw if not entry.strip().startswith("#"))
+
+
+def market_good_flag(
+    section: Dict[str, object], good: str, name: str, default: bool
+) -> bool:
+    """One of a good's true/false knobs, falling back to ``default`` when it is left out."""
+    result = section.get(name, default)
     if not isinstance(result, bool):
         raise MonitorError(f"Setting {name} for market good {good!r} must be true or false")
     return result
-
-
-def market_name_patterns(section: Dict[str, object], good: str, name: str) -> Tuple[str, ...]:
-    raw = section.get(name, [])
-    if not isinstance(raw, list):
-        raise MonitorError(
-            f"Setting {name} for market good {good!r} must be a list of nation names"
-        )
-    for entry in raw:
-        if not isinstance(entry, str) or not entry.strip():
-            raise MonitorError(
-                f"Every {name} entry for market good {good!r} must be a non-empty string"
-            )
-    # As in reports.ignore, a leading # switches one entry off without deleting it.
-    return tuple(
-        entry.strip() for entry in raw if not entry.strip().startswith("#")
-    )
 
 
 def load_settings(path: Path) -> MonitorSettings:
@@ -293,17 +296,7 @@ def load_settings(path: Path) -> MonitorSettings:
     if "ignore" not in reports_value:
         defaults_used.append("reports.ignore")
     else:
-        raw_ignore = reports_value["ignore"]
-        if not isinstance(raw_ignore, list):
-            raise MonitorError("Setting reports.ignore must be a list of patterns")
-        for entry in raw_ignore:
-            if not isinstance(entry, str) or not entry.strip():
-                raise MonitorError("Every reports.ignore pattern must be a non-empty string")
-        # JSON has no comments, so a leading # switches a pattern off in place: the shipped
-        # patterns all sit there commented out, and enabling one means deleting two characters.
-        report_ignore = tuple(
-            entry.strip() for entry in raw_ignore if not entry.strip().startswith("#")
-        )
+        report_ignore = switchable_patterns(reports_value["ignore"], "reports.ignore")
     alerts = replace(alerts, report_ignore=report_ignore)
 
     market_value = value.get("market", {})
@@ -350,10 +343,14 @@ def load_settings(path: Path) -> MonitorSettings:
             market_goods.append(
                 WatchedGood(
                     name=name,
-                    friends=market_boolean_setting(raw_good, name, "friends"),
-                    alliance=market_boolean_setting(raw_good, name, "alliance"),
-                    always=market_name_patterns(raw_good, name, "always"),
-                    never=market_name_patterns(raw_good, name, "never"),
+                    friends=market_good_flag(raw_good, name, "friends", default=True),
+                    alliance=market_good_flag(raw_good, name, "alliance", default=True),
+                    always=switchable_patterns(
+                        raw_good.get("always", []), f"always for market good {name!r}"
+                    ),
+                    never=switchable_patterns(
+                        raw_good.get("never", []), f"never for market good {name!r}"
+                    ),
                 )
             )
     alerts = replace(alerts, market_goods=tuple(market_goods))
@@ -554,7 +551,12 @@ def matches_any_pattern(text: str, patterns: Sequence[str]) -> bool:
 
 
 def report_is_ignored(message: str, patterns: Sequence[str]) -> bool:
-    """Whether a report matches an ignore pattern."""
+    """Whether a report matches an ignore pattern.
+
+    This is deliberately a domain-named entry point over the shared matching rule rather
+    than a rename left half-finished: the reports call site is about reports, and the market
+    call site is about nation names, so neither should read as the other.
+    """
     return matches_any_pattern(message, patterns)
 
 
