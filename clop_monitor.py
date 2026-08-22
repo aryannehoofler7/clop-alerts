@@ -423,6 +423,29 @@ def load_settings(path: Path) -> MonitorSettings:
     )
 
 
+@dataclass(frozen=True)
+class LoadedSettings:
+    """The settings in force, paired with the exact bytes they were parsed from.
+
+    The bytes travel with the settings because they are what decides whether a reload has
+    anything to do at all. They are never inspected, only compared.
+    """
+
+    settings: MonitorSettings
+    #: None when there is no settings file, which is a state rather than a failure.
+    source: Optional[bytes] = None
+
+
+def read_settings_source(path: Path) -> Optional[bytes]:
+    """The settings file's raw bytes, or None when there is no file."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise MonitorError(f"Could not read settings file {path}: {error}") from error
+
+
 def settings_startup_message(settings: MonitorSettings, path: Path) -> Optional[str]:
     """Name the settings that came from built-in defaults, or None when nothing was filled in."""
     if not settings.file_found:
@@ -1244,9 +1267,13 @@ class ClopClient:
     def market_preflight(self, goods: Sequence[WatchedGood]) -> Optional[str]:
         """Resolve watched good names and, if needed, the account's own alliance.
 
-        Run once at startup so that a mistyped good name stops the monitor instead of
-        silently watching nothing, and so that the game gaining or losing a good later
-        cannot kill a monitor that is already running.
+        Run at startup, and again whenever a reload changes the watched goods, so that a
+        mistyped good name is caught rather than silently watching nothing, and so that the
+        game gaining or losing a good later cannot kill a monitor already running. What a
+        failure costs depends on which caller ran it: at startup a mistyped name stops the
+        monitor, where the same name in a reload is a refused reload that leaves the previous
+        settings in force. Either way the assignment below is all-or-nothing, which is what
+        lets the reload caller treat a failure as "nothing happened".
         """
         if not goods:
             return None
@@ -1705,31 +1732,56 @@ def settings_changes(previous: MonitorSettings, current: MonitorSettings) -> Tup
 
 def reload_settings(
     path: Path,
-    settings: MonitorSettings,
+    loaded: LoadedSettings,
     client: ClopClient,
     notifier: Notifier,
     build_notifier: Callable[[SoundSettings], Notifier],
-) -> Tuple[MonitorSettings, Notifier]:
+) -> Tuple[LoadedSettings, Notifier]:
     """Re-read settings.json for the coming poll, applying it in full or not at all.
 
     A file that cannot be read, parsed, validated or brought into service is refused whole:
     the monitor warns through the same blocking dialog as a failed poll, keeps the settings
-    it already had, and keeps polling. Applying only the half that worked would leave the
+    it already had, and goes on polling. Applying only the half that worked would leave the
     live configuration a mixture of two files with nothing naming which parts came from
     where, and ending an overnight run over a stray keystroke in a text file is worse than
     running on yesterday's settings for another minute.
 
-    Returns the settings and the notifier to use from here on, which are the ones passed in
-    whenever nothing changed or the reload was refused.
+    **This reconfigures ``client`` in place** — ``fourchan_thread``, ``initial_fourchan_post``,
+    ``market_goods`` and ``alliance_id`` — while returning the settings and the notifier.
+    The asymmetry is because a client is long-lived and holds a session, where a notifier
+    holding changed sound settings is cheaper to replace than to mutate. Both returned values
+    are the ones passed in whenever nothing changed or the reload was refused.
     """
+
+    def refuse(reason: str) -> Tuple[LoadedSettings, Notifier]:
+        """Warn, change nothing, and leave the next poll to try the file again."""
+        notifier.notify_failure(reason)
+        return loaded, notifier
+
+    still_polling = (
+        "The previous settings are still in force and the monitor will go on polling."
+    )
+    try:
+        source = read_settings_source(path)
+    except MonitorError as error:
+        return refuse(f"settings.json could not be reloaded: {error}\n\n{still_polling}")
+
+    # The file's own bytes are the gate, not the parsed result: load_settings validates
+    # against the world outside the file — wav_path has to still exist — so parsing an
+    # untouched file every 60 seconds turns a WAV on a USB stick, a network share or an
+    # on-demand cloud path into a blocking dialog every poll that nobody caused, and because
+    # this runs before the check, the game goes unread until somebody clicks OK. Only the
+    # bytes can say "nobody touched this" without consulting anything outside the file.
+    # This is not the mtime watching the design rejects: mtime is a proxy that can lie in
+    # either direction, where the bytes are the thing itself.
+    if source == loaded.source:
+        return loaded, notifier
+
+    settings = loaded.settings
     try:
         reloaded = load_settings(path)
     except MonitorError as error:
-        notifier.notify_failure(
-            f"settings.json could not be reloaded: {error}\n\n"
-            "The previous settings are still in force and the monitor is still polling."
-        )
-        return settings, notifier
+        return refuse(f"settings.json could not be reloaded: {error}\n\n{still_polling}")
 
     # An absent file loads cleanly as the built-in defaults, which is right at startup and
     # wrong here: a file that vanishes under a running monitor would switch every muted
@@ -1739,24 +1791,26 @@ def reload_settings(
     # reload landing inside a non-atomic editor save, than a deliberate "revert everything",
     # and refusing it costs the deliberate case nothing: writing {} still asks for defaults.
     if settings.file_found and not reloaded.file_found:
-        notifier.notify_failure(
+        return refuse(
             f"The settings file has disappeared: there is no file at {path}\n\n"
-            "The previous settings are still in force and the monitor is still polling. "
-            "To go back to the built-in defaults on purpose, put an empty JSON object ({}) "
-            "in the file instead of deleting it."
+            f"{still_polling} To go back to the built-in defaults on purpose, put an empty "
+            "JSON object ({}) in the file instead of deleting it."
         )
-        return settings, notifier
 
     changes = settings_changes(settings, reloaded)
-    # An untouched file costs this read and nothing else: no preflight, no request, no
-    # rebuilt notifier, no output.
+    # A cosmetic edit — reindenting, reordering keys — parses to the same settings. The new
+    # bytes are still adopted, or that one edit would be re-parsed on every remaining poll.
     if not changes:
-        return settings, notifier
+        return LoadedSettings(settings, source), notifier
 
-    # Everything that can fail runs before anything is applied. The 4chan check goes first
-    # because it works through a throwaway client and touches nothing, where market_preflight
-    # assigns to this client the moment it succeeds.
+    # Everything that can fail runs here, before anything is applied, and this block contains
+    # exactly one mutating call: market_preflight, which is atomic by construction because it
+    # assigns its two fields together at the end or not at all. Nothing else may join it. The
+    # 4chan check goes first because it works through a throwaway client and touches nothing,
+    # and an apply that lands before a later step raises is the partial reload this whole
+    # function exists to prevent.
     thread_changed = "fourchan.thread_url" in changes
+    market_changed = "market.goods" in changes
     goods = goods_to_watch(reloaded.alerts)
     fourchan_post: Optional[FourChanPost] = None
     market_message: Optional[str] = None
@@ -1765,26 +1819,24 @@ def reload_settings(
             fourchan_post = ClopClient(
                 client.base_url, "", "", fourchan_thread=reloaded.fourchan_thread
             )._latest_fourchan_post()
-        if "market.goods" in changes:
-            if goods:
-                market_message = client.market_preflight(goods)
-            else:
-                # market_preflight returns early with nothing to resolve, so it leaves these
-                # fields as it found them; a reload that emptied the watch list has to clear
-                # them or the monitor keeps POSTing once a poll for goods nobody watches.
-                client.market_goods = ()
-                client.alliance_id = None
+        if market_changed and goods:
+            market_message = client.market_preflight(goods)
     except MonitorError as error:
         # ArchivedThreadError arrives here too, and is deliberately not fatal: a thread that
         # is already archived when you name it is a typo in a text file, not the game telling
         # a running watch that its job is over.
-        notifier.notify_failure(
+        return refuse(
             f"The new settings.json could not be brought into service: {error}\n\n"
-            "None of it was applied. The previous settings are still in force and the "
-            "monitor is still polling."
+            f"None of it was applied. {still_polling}"
         )
-        return settings, notifier
 
+    # From here nothing can fail, so this is the one contiguous region that changes anything.
+    if market_changed and not goods:
+        # market_preflight returns early with nothing to resolve, so it leaves these fields
+        # as it found them; a reload that emptied the watch list has to clear them or the
+        # monitor keeps POSTing once a poll for goods nobody watches.
+        client.market_goods = ()
+        client.alliance_id = None
     if thread_changed:
         client.fourchan_thread = reloaded.fourchan_thread
         # The thread's current last post becomes the baseline, exactly as at startup, so the
@@ -1801,7 +1853,7 @@ def reload_settings(
         print(market_message, flush=True)
     if fourchan_post is not None:
         print(fourchan_preflight_message(fourchan_post), flush=True)
-    return reloaded, notifier
+    return LoadedSettings(reloaded, source), notifier
 
 
 def validate_base_url(base_url: str) -> str:
@@ -1857,6 +1909,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     settings_path = args.settings.resolve()
     try:
+        # The bytes are read before the parse, so that a file edited in between reads as
+        # changed on the next poll rather than as already loaded.
+        settings_source = read_settings_source(settings_path)
         settings = load_settings(settings_path)
         env_file = load_env_file(args.env_file.resolve())
     except MonitorError as error:
@@ -1933,12 +1988,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"{cache_status}. Press Ctrl+C to stop.",
             flush=True,
         )
+        loaded = LoadedSettings(settings, settings_source)
         while True:
             # Before the check rather than after it, so that an edit takes effect on the very
             # next poll rather than the one after.
-            settings, notifier = reload_settings(
-                settings_path, settings, client, notifier, build_notifier
+            loaded, notifier = reload_settings(
+                settings_path, loaded, client, notifier, build_notifier
             )
+            settings = loaded.settings
             poll_failed = False
             try:
                 current, _ = check_and_notify(

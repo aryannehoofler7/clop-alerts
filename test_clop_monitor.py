@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -2635,6 +2636,52 @@ class SettingsChangeTests(unittest.TestCase):
         )
 
 
+class SettingsChangeCompletenessTests(unittest.TestCase):
+    """Every field of MonitorSettings is either compared or knowingly not compared.
+
+    A field added later that nobody adds to settings_changes would mean edits to it never
+    take effect while the monitor runs, silently and for good. Enumerating the dataclass
+    rather than the comparison makes that an obligation the suite enforces instead of one a
+    reviewer has to remember.
+    """
+
+    #: A value differing from the default, per field settings_changes compares.
+    COMPARED = {
+        "alerts": AlertCategorySettings(news=False),
+        "sound": clop_monitor.SoundSettings(loop_while_popup_open=True),
+        "cache": clop_monitor.CacheSettings(persist_to_file=False),
+        "fourchan_thread": parse_fourchan_thread_url(
+            "https://boards.4chan.org/mlp/thread/1"
+        ),
+    }
+
+    #: Fields deliberately left out of the comparison, and why.
+    NOT_COMPARED = {
+        "defaults_used": "describes what the file omitted, not what the monitor is doing",
+        "file_found": "handled as a true-to-false transition, not as a changed section",
+    }
+
+    def test_every_field_is_either_compared_or_listed_as_not_compared(self):
+        self.assertEqual(
+            {field.name for field in dataclasses.fields(clop_monitor.MonitorSettings)},
+            set(self.COMPARED) | set(self.NOT_COMPARED),
+        )
+
+    def test_every_compared_field_actually_registers_a_change(self):
+        base = clop_monitor.MonitorSettings()
+        for name, value in self.COMPARED.items():
+            with self.subTest(field=name):
+                edited = clop_monitor.replace(base, **{name: value})
+                self.assertNotEqual(clop_monitor.settings_changes(base, edited), ())
+
+    def test_no_field_left_out_of_the_comparison_registers_one(self):
+        base = clop_monitor.MonitorSettings()
+        for name in self.NOT_COMPARED:
+            with self.subTest(field=name):
+                edited = clop_monitor.replace(base, **{name: ("something else",)})
+                self.assertEqual(clop_monitor.settings_changes(base, edited), ())
+
+
 class SettingsReloadTests(unittest.TestCase):
     """settings.json is re-read every poll and applied in full or not at all."""
 
@@ -2650,6 +2697,8 @@ class SettingsReloadTests(unittest.TestCase):
         self.path = Path(directory.name) / "settings.json"
         self.notifier = ReloadNotifier()
         self.built = []
+        # No file yet, which is what main pairs with the built-in defaults.
+        self.loaded = clop_monitor.LoadedSettings(clop_monitor.MonitorSettings(), None)
 
     def build_notifier(self, sound):
         self.built.append(sound)
@@ -2660,16 +2709,32 @@ class SettingsReloadTests(unittest.TestCase):
 
     def load(self, value):
         self.write(value)
-        return load_settings(self.path)
+        self.loaded = clop_monitor.LoadedSettings(
+            load_settings(self.path), clop_monitor.read_settings_source(self.path)
+        )
+        return self.loaded.settings
 
     def reload(self, settings, client):
-        """The reload as main drives it, with its terminal output captured."""
+        """The reload as main drives it, with its terminal output captured.
+
+        ``settings`` is named at the call site for readability; the bytes it is paired with
+        are whatever this fixture last loaded or last reloaded, exactly as main pairs them.
+        """
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            reloaded, notifier = clop_monitor.reload_settings(
-                self.path, settings, client, self.notifier, self.build_notifier
+            self.loaded, notifier = clop_monitor.reload_settings(
+                self.path,
+                clop_monitor.LoadedSettings(settings, self.loaded.source),
+                client,
+                self.notifier,
+                self.build_notifier,
             )
-        return reloaded, notifier, stdout.getvalue()
+        return self.loaded.settings, notifier, stdout.getvalue()
+
+    @staticmethod
+    def _explode_on_parse(path):
+        del path
+        raise AssertionError("An untouched settings file must not be parsed")
 
     def test_an_unchanged_file_does_no_work_at_all(self):
         # The point of gating on change detection: a file nobody touched must not rebuild
@@ -2683,6 +2748,75 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(output, "")
         self.assertEqual(self.notifier.failures, [])
+
+    def test_an_unchanged_file_is_never_parsed(self):
+        # "No work" has to mean the parse too, not just the setup it gates.
+        settings = self.load({"alerts": {"news": False}})
+        client, _ = market_client({}, goods=())
+        with mock.patch.object(clop_monitor, "load_settings", self._explode_on_parse):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(output, "")
+
+    def test_an_untouched_file_is_not_re_validated_against_the_world(self):
+        # load_settings checks that wav_path still exists, which is a check against the world
+        # outside the file rather than against the file. Re-running it every poll turns a WAV
+        # on a USB stick, a network share or an on-demand cloud path into a blocking dialog
+        # every 60 seconds that nobody caused and that stops the game being read at all until
+        # somebody clicks OK. The bytes are the gate precisely because they cannot say
+        # "changed" about something outside the file.
+        wav = self.path.parent / "alert.wav"
+        wav.write_bytes(b"RIFF")
+        settings = self.load({"sound": {"wav_path": "alert.wav"}})
+        wav.unlink()
+        client, calls = market_client({}, goods=())
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(self.notifier.failures, [])
+        self.assertEqual(output, "")
+        self.assertEqual(calls, [])
+
+    def test_re_saving_the_same_bytes_is_not_an_edit(self):
+        settings = self.load({"alerts": {"news": False}})
+        self.write({"alerts": {"news": False}})
+        client, _ = market_client({}, goods=())
+        with mock.patch.object(clop_monitor, "load_settings", self._explode_on_parse):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(output, "")
+
+    def test_a_cosmetic_edit_is_parsed_once_and_then_left_alone(self):
+        # Reindenting changes the bytes but not the settings, so it is parsed and found to
+        # change nothing. The new bytes are then remembered, or that one cosmetic edit would
+        # be re-parsed on every poll for the rest of the run.
+        settings = self.load({"alerts": {"news": False}})
+        self.path.write_text(
+            json.dumps({"alerts": {"news": False}}, indent=4), encoding="utf-8"
+        )
+        client, _ = market_client({}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(output, "")
+        self.assertEqual(self.notifier.failures, [])
+        with mock.patch.object(clop_monitor, "load_settings", self._explode_on_parse):
+            self.reload(reloaded, client)
+
+    def test_a_file_that_cannot_be_read_warns_before_any_parse(self):
+        settings = self.load({"alerts": {"news": False}})
+
+        def unreadable(path):
+            del path
+            raise OSError("The process cannot access the file")
+
+        client, _ = market_client({}, goods=())
+        with mock.patch.object(clop_monitor.Path, "read_bytes", unreadable):
+            reloaded, notifier, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(output, "")
+        self.assertIn("cannot access", self.notifier.failures[0])
+        self.assertIn("still in force", self.notifier.failures[0])
 
     def test_a_changed_alert_category_is_applied_and_named(self):
         settings = self.load({"alerts": {"news": True}})
@@ -2781,7 +2915,7 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertIs(notifier, self.notifier)
         self.assertEqual(len(self.notifier.failures), 1)
         self.assertIn("still in force", self.notifier.failures[0])
-        self.assertIn("still polling", self.notifier.failures[0])
+        self.assertIn("go on polling", self.notifier.failures[0])
         self.assertEqual(output, "")
         self.assertEqual(calls, [])
 
@@ -2812,7 +2946,7 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertEqual(len(self.notifier.failures), 1)
         self.assertIn(str(self.path), self.notifier.failures[0])
         self.assertIn("still in force", self.notifier.failures[0])
-        self.assertIn("still polling", self.notifier.failures[0])
+        self.assertIn("go on polling", self.notifier.failures[0])
 
     def test_a_monitor_that_never_had_a_settings_file_is_not_warned_about_one(self):
         # Only the transition matters. A monitor started on the built-in defaults is running
@@ -2940,6 +3074,37 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertIsNone(client.initial_fourchan_post)
         self.assertIn("fourchan.thread_url", output)
 
+    def test_a_failing_thread_check_leaves_the_market_untouched(self):
+        # The all-or-nothing ordering, pinned rather than merely arranged: market_preflight
+        # assigns to the client the moment it succeeds, so a reload that changes both
+        # sections must not resolve the goods and then discover the thread is unusable.
+        # Without this, swapping the two blocks over is a partial apply that passes.
+        settings = self.load({})
+        self.write(
+            {
+                "market": {"goods": {"Oil": {"alliance": False}}},
+                "fourchan": {"thread_url": "https://boards.4chan.org/mlp/thread/2"},
+            }
+        )
+
+        class UnreachableThreadClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            def _latest_fourchan_post(self):
+                raise MonitorError("Could not reach a.4cdn.org")
+
+        client, calls = market_client({"buyermarketplace.php": MARKET_FORM}, goods=())
+        with mock.patch.object(clop_monitor, "ClopClient", UnreachableThreadClient):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(client.market_goods, ())
+        self.assertIsNone(client.alliance_id)
+        self.assertIsNone(client.fourchan_thread)
+        self.assertEqual(calls, [])
+        self.assertEqual(output, "")
+        self.assertIn("None of it was applied", self.notifier.failures[0])
+
     def test_a_newly_configured_archived_thread_is_a_rejected_reload(self):
         # A thread that is already archived when you name it is a typo in a text file, not
         # the game telling a running watch that its job is over.
@@ -2962,7 +3127,7 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertTrue(reloaded.alerts.news)
         self.assertIsNone(client.fourchan_thread)
         self.assertIn("archived", self.notifier.failures[0])
-        self.assertIn("still polling", self.notifier.failures[0])
+        self.assertIn("go on polling", self.notifier.failures[0])
         self.assertEqual(output, "")
 
 
@@ -3017,13 +3182,21 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return built
 
-    def _run(self, directory, settings_value, sleep, client=PollingClient):
-        """Drive main() against a scripted client, with ``sleep`` editing between polls."""
+    def _run(self, directory, settings_value, sleep, client=PollingClient, env=None):
+        """Drive main() against a scripted client, with ``sleep`` editing between polls.
+
+        ``sleep`` stands in for the poll boundary, which works because the loop calls it
+        exactly once per iteration. Adding a second sleep anywhere in that loop — a retry
+        backoff, say — would silently renumber the polls these tests count, so change the
+        counting here rather than trusting the numbers if that ever happens.
+        """
         path = Path(directory) / "settings.json"
         path.write_text(json.dumps(settings_value), encoding="utf-8")
+        environment = {"CLOP_PASSWORD": "secret"}
+        environment.update(env or {})
         with mock.patch.object(clop_monitor, "ClopClient", client), mock.patch.object(
             clop_monitor.time, "sleep", sleep
-        ), mock.patch.dict(clop_monitor.os.environ, {"CLOP_PASSWORD": "secret"}):
+        ), mock.patch.dict(clop_monitor.os.environ, environment):
             return path, main(
                 [
                     "--settings",
@@ -3088,7 +3261,7 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         failures = notifiers[1].failures
         self.assertEqual(len(failures), 2)
         for failure in failures:
-            self.assertIn("still polling", failure)
+            self.assertIn("go on polling", failure)
         # Polling never stopped: every iteration still read the game.
         self.assertEqual(len(notifiers[1].messages), 3)
 
@@ -3125,9 +3298,94 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         for failure in notifiers[1].failures:
             self.assertIn("still in force", failure)
 
-    def test_startup_and_a_reload_name_a_new_thread_baseline_the_same_way(self):
-        # Reload output has to be recognisably the same thing as startup output, so the two
-        # sentences are pinned against each other rather than each on its own.
+    def test_a_rebuilt_notifier_is_the_one_that_handles_the_next_alert(self):
+        # reload_settings returns the notifier rather than mutating one, so main has to bind
+        # what it returns. Dropping that half of the two-value return would report a sound
+        # edit as applied and silently keep alerting through the old notifier.
+        notifiers = self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            path = Path(directory) / "settings.json"
+
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) == 1:
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "cache": {"persist_to_file": False},
+                                "sound": {"wav_path": None, "loop_while_popup_open": True},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    raise KeyboardInterrupt
+
+            _, code = self._run(
+                directory,
+                {
+                    "cache": {"persist_to_file": False},
+                    "sound": {"wav_path": None, "loop_while_popup_open": False},
+                },
+                sleep,
+                env={"CLOP_WEBHOOK_URL": "https://example.invalid/hook"},
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 2)
+        # The bootstrap notifier, the real one, then the rebuilt one.
+        self.assertEqual(len(notifiers), 3)
+        started, rebuilt = notifiers[1], notifiers[2]
+        self.assertTrue(rebuilt.sound.loop_while_popup_open)
+        self.assertEqual(len(started.messages), 1)
+        self.assertEqual(len(rebuilt.messages), 1)
+        # A rebuild replaces the sound and nothing else: the webhook and the desktop setting
+        # are process-level and must survive it.
+        self.assertEqual(rebuilt.webhook_url, started.webhook_url)
+        self.assertEqual(rebuilt.webhook_url, "https://example.invalid/hook")
+        self.assertEqual(rebuilt.desktop, started.desktop)
+
+    def test_enabling_the_file_cache_mid_run_writes_without_reading(self):
+        # Pinning today's behaviour rather than endorsing it: load_snapshot runs once, before
+        # the loop, so switching cache.persist_to_file on mid-run starts writing the state
+        # file while the baseline in play stays the in-memory one.
+        self._record_notifiers()
+        polls = []
+        loads = []
+        real_load_snapshot = clop_monitor.load_snapshot
+
+        def counting_load_snapshot(path):
+            loads.append(path)
+            return real_load_snapshot(path)
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(
+            io.StringIO()
+        ), mock.patch.object(clop_monitor, "load_snapshot", counting_load_snapshot):
+            state = Path(directory) / "state.json"
+            path = Path(directory) / "settings.json"
+
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) == 1:
+                    self.assertFalse(state.exists())
+                    path.write_text(
+                        json.dumps({"cache": {"persist_to_file": True}}), encoding="utf-8"
+                    )
+                else:
+                    raise KeyboardInterrupt
+
+            _, code = self._run(directory, {"cache": {"persist_to_file": False}}, sleep)
+            state_written = state.exists()
+        self.assertEqual(code, 0)
+        self.assertTrue(state_written)
+        self.assertEqual(len(loads), 0)
+
+    def test_the_startup_thread_baseline_line_names_the_post(self):
+        # The literal that reload output is pinned against, so the two cannot drift apart
+        # into two differently worded sentences about the same decision.
         self._record_notifiers()
 
         class ThreadClient(PollingClient):
