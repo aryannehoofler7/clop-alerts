@@ -1336,5 +1336,81 @@ class MarketSettingsTests(unittest.TestCase):
         self.assertFalse(settings.alerts.market_orders)
 
 
+#: Every tradeable good in the game (resourcedefs.is_tradeable = 1), in the order the
+#: buyer's-marketplace selector lists them: alphabetical, with the DNA strains last.
+TRADEABLE_GOODS = [
+    "Apples",
+    "Cider",
+    "Coffee",
+    "Composites",
+    "Copper",
+    "Drugs",
+    "Gasoline",
+    "Gems",
+    "Machinery Parts",
+    "Oil",
+    "Pies",
+    "Plastics",
+    "Precision Parts",
+    "Toys",
+    "Tungsten",
+    "Vehicle Parts",
+    "DNA - Central Burrozil",
+    "DNA - Central Przewalskia",
+    "DNA - Central Saddle Arabia",
+    "DNA - Central Zebrica",
+    "DNA - North Burrozil",
+    "DNA - North Przewalskia",
+    "DNA - North Saddle Arabia",
+    "DNA - North Zebrica",
+    "DNA - South Burrozil",
+    "DNA - South Przewalskia",
+    "DNA - South Saddle Arabia",
+    "DNA - South Zebrica",
+]
+
+
+class ShippedMarketGoodsTests(unittest.TestCase):
+    def example(self):
+        return json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
+
+    def test_every_tradeable_good_ships_commented_out(self):
+        goods = self.example()["market"]["goods"]
+        self.assertEqual(list(goods), [f"# {name}" for name in TRADEABLE_GOODS])
+
+    def test_every_shipped_good_shows_all_four_knobs(self):
+        for key, good in self.example()["market"]["goods"].items():
+            with self.subTest(good=key):
+                self.assertEqual(
+                    sorted(good), ["alliance", "always", "friends", "never"]
+                )
+                self.assertTrue(good["friends"])
+                self.assertTrue(good["alliance"])
+                self.assertEqual(good["always"], [])
+                self.assertEqual(good["never"], [])
+
+    def test_shipped_as_is_the_example_watches_nothing(self):
+        settings = load_settings(Path("settings.example.json"))
+        self.assertEqual(settings.alerts.market_goods, ())
+        self.assertTrue(settings.alerts.market_orders)
+
+    def test_uncommenting_a_shipped_good_switches_it_on(self):
+        value = self.example()
+        value["market"]["goods"] = {
+            (key[2:] if key == "# Machinery Parts" else key): good
+            for key, good in value["market"]["goods"].items()
+        }
+        # The bundled WAV is reached by a path relative to the settings file, which a temp
+        # directory has no copy of; the sound is irrelevant here.
+        value["sound"]["wav_path"] = None
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            settings = load_settings(path)
+        self.assertEqual(
+            [good.name for good in settings.alerts.market_goods], ["Machinery Parts"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
