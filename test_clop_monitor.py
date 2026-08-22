@@ -1473,6 +1473,22 @@ class ReportLineParsingTests(unittest.TestCase):
             "participating in it.)",
         )
 
+    def test_an_inline_link_inside_a_line_does_not_break_it(self):
+        # The combat report links the attacker's nation mid-sentence (frequent.php:1310).
+        html = reports_page(
+            [
+                "Your Second Cavalry (size 10) were hit by\n"
+                '<a href="viewnation.php?nation_id=5">Sombra</a>&#39;s Shadow Guard (size 12)\n'
+                "for 40 damage (3 hits)"
+            ]
+        )
+        (message, _), = parse_report_rows(html)
+        self.assertEqual(
+            message,
+            "Your Second Cavalry (size 10) were hit by Sombra's Shadow Guard (size 12) "
+            "for 40 damage (3 hits)",
+        )
+
     def test_news_is_still_flattened_to_one_line(self):
         html = """
         <h3>News</h3>
