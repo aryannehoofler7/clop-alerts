@@ -169,6 +169,34 @@ A file that sets everything prints neither line. When a later version of the mon
 that one new name appears in the first line until you set it yourself. The defaults match the example
 except for `fourchan.thread_url`, which defaults to off because threads archive.
 
+**The file is re-read on every poll.** Save an edit and it takes effect on the next poll — within
+`--interval` seconds — without restarting anything. Switching a good on, silencing a report, muting a
+category and changing the alert sound are all live edits. Restarting would also throw away the
+in-memory news, report and thread baselines whenever `cache.persist_to_file` is off, which is reason
+enough not to have to. A reload that changed something prints one line naming the sections it
+changed:
+
+```text
+Settings reloaded: alerts, market.goods.
+```
+
+A reload that changes nothing prints nothing, and costs nothing beyond reading the file: no rebuilt
+sound, no preflight, no extra requests.
+
+**A reload is applied in full or not at all.** If the file cannot be read, cannot be parsed, fails
+validation, or names something that cannot be brought into service — a good the game does not have, a
+4chan thread that is already archived — the monitor raises a **CLOP monitor problem** dialog naming
+what is wrong, keeps every setting it already had, and keeps polling. It never applies the alert half
+of a file whose market half was refused, so "which settings are live" always has one answer: the last
+file that loaded cleanly, whole. The warning repeats on every poll for as long as the file stays
+broken, because a monitor running on settings you think you replaced is worth interrupting more than
+once. A broken file at *startup* is still fatal, because there are no previous settings to fall back
+on.
+
+**What still needs a restart:** the command-line arguments — `--interval`, `--state`, `--settings`,
+`--base-url` and the rest — are process arguments rather than settings, and the credentials in `.env`
+are read once. Changing any of those means stopping the monitor with `Ctrl+C` and starting it again.
+
 All five alert categories default to enabled. A disabled category is still read and, when file
 persistence is enabled, included in the saved snapshot; it does not produce a terminal message,
 popup, sound, or webhook call. `market_orders` is the one exception: disabling it stops the market
@@ -254,9 +282,16 @@ rate limit.
 Before prompting for CLOP credentials or starting the polling loop, the monitor checks the configured
 thread. If 4chan marks it as archived, startup fails with instructions to replace the URL with the
 new thread or set it to `null`; an archived configured thread is never silently treated as healthy.
-If the thread becomes archived while monitoring, the monitor stops with the same error. The
-successful startup response is reused as the initial thread snapshot, avoiding an immediate duplicate
-API request.
+The successful startup response is reused as the initial thread snapshot, avoiding an immediate
+duplicate API request.
+
+Changing `thread_url` while the monitor is running runs that same check again and adopts the new
+thread's current last post as the baseline, so a swap does not alert for a post that was already
+there. Setting it to `null` stops watching and issues no further requests. The two archived cases are
+deliberately different. A thread that archives **while you are watching it** stops the monitor, as it
+always has: that is the game telling the watch its job is over. A thread that is *already* archived
+when you name it mid-run is a refused reload instead — the monitor warns, keeps the thread it had,
+and carries on — because a typo in a text file should not end an overnight run.
 
 When there is no saved baseline, the first successful poll caches the current top news entry and top
 report rather than alerting for existing entries. On every poll, it alerts whenever the unread
@@ -409,18 +444,25 @@ bring the roster back.
 
 Setting `"market_orders": false` under `alerts` mutes the whole feature in one edit, without
 re-commenting the goods you had switched on. Muting stops the work rather than the alerts: no
-startup preflight, no roster, no market requests.
+preflight, no roster, no market requests. Muting while the monitor is running releases the goods the
+preflight had already resolved, exactly as deleting them would, so the requests stop on the next
+poll.
 
 #### What it reads, and what it checks at startup
 
 The roster comes from `viewalliance.php`, never from `myalliance.php`. Loading `myalliance.php`
 marks your alliance messages as read as a side effect, which would break the alliance-message alerts
-the monitor already does. Your own `alliance_id` is resolved once, at startup, and kept for the
-lifetime of the process: if you join or leave an alliance while the monitor is running, restart it.
+the monitor already does. Your own `alliance_id` is resolved by the market preflight and kept until
+something re-runs it. The preflight runs at startup and again whenever a reload changes the watched
+goods, so if you join or leave an alliance while the monitor is running, edit `market.goods` — switch
+a good on or off — and the next poll re-resolves it. Leaving the file alone leaves the id as startup
+resolved it.
 
 Also at startup, every watched good name is resolved against the game's own list of tradeable goods.
 **A name that is not a tradeable good stops the monitor and names the offending entry**, rather than
-leaving you watching nothing while everything looks fine. Names are matched case-insensitively, so
+leaving you watching nothing while everything looks fine. The same check runs on every reload that
+changes the goods, where a name that does not resolve is a refused reload rather than a stop: the
+monitor warns, keeps the previous settings whole, and carries on polling. Names are matched case-insensitively, so
 `machinery parts` resolves to Machinery Parts; the preflight line then reports the game's spelling.
 Expect to see one good under two spellings: with `"machinery PARTS"` in `settings.json`, startup
 prints `watching Machinery Parts` (the game's) while the alert reads `Buy orders for machinery PARTS`
@@ -444,17 +486,22 @@ Two kinds of failure, distinguished by what the dialog says:
   - **Exit 2:** `settings.json` exists but is unreadable or malformed, the environment file is
     unreadable, no credentials were supplied, or the configured 4chan thread is already archived at
     startup. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.)
+    All of these are startup-only: once the monitor is running, the same broken `settings.json` is a
+    refused reload rather than a stop, because there are previous settings to fall back on.
   - **Exit 1:** the state file `.state/clop-monitor.json` is unreadable or corrupt (delete it — the
     next run rebuilds it, at the cost of re-alerting on the newest news and report), **the login was
-    rejected**, the market preflight failed — a watched good that is not a tradeable good, or an
-    account whose active nation could not be identified — or the 4chan thread archived while the
+    rejected**, the startup market preflight failed — a watched good that is not a tradeable good, or
+    an account whose active nation could not be identified — or the 4chan thread archived while the
     monitor was running. The market preflight needs a logged-in session, so it runs after login and
-    exits 1 rather than 2.
+    exits 1 rather than 2. A preflight run by a *reload* is refused rather than fatal.
 - **The monitor is still running and retries in N seconds.** One check failed — the site was
   unreachable, a page could not be parsed, or the buyer's marketplace did not return the order table
   for a watched good — and polling resumes on the normal interval after you
   dismiss the dialog. A failure that persists alerts again on the next check; that repetition is
   deliberate, because a check that keeps failing is a monitor that is not working.
+- **The previous settings are still in force and the monitor is still polling.** A reload of
+  `settings.json` was refused — see [Settings](#settings). Nothing about the running monitor changed,
+  and it warns again on every poll until the file is fixed.
 
 With `--once`, a failed check reports the same way and exits 1 rather than 0.
 `--no-desktop-notifications` suppresses these dialogs exactly as it suppresses alert dialogs, leaving

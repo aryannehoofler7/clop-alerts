@@ -1,7 +1,7 @@
 # Hot-reloading settings.json — design
 
 **Date:** 2026-08-23
-**Status:** approved, not yet implemented
+**Status:** implemented (`settings_changes` and `reload_settings` in `clop_monitor.py`)
 
 Re-read `settings.json` on every poll so that changing it takes effect without restarting the
 monitor.
