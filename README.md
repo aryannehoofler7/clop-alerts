@@ -382,8 +382,11 @@ Watching costs requests. Each poll makes one GET of `buyermarketplace.php` to pi
 form token, then one POST per watched good — the order table exists only in response to a POST —
 plus one GET for the alliance roster, which is re-read every poll because members join and leave.
 Switching all 28 goods on is therefore about 30 requests every poll, which is worth knowing before
-you do it at the default 60-second interval. Nothing watched means no market requests at all, and
-the roster is skipped when no watched good sets `"alliance": true`.
+you do it at the default 60-second interval. Nothing watched means no market requests at all. The
+roster GET is skipped — leaving the cost at 1 + one POST per good — in two cases: when your nation is
+in no alliance, and when *every* watched good switches the alliance check off with
+`"alliance": false`. Since `alliance` defaults to `true`, one good left at the default is enough to
+bring the roster back.
 
 Setting `"market_orders": false` under `alerts` mutes the whole feature in one edit, without
 re-commenting the goods you had switched on. Muting stops the work rather than the alerts: no
@@ -400,6 +403,10 @@ Also at startup, every watched good name is resolved against the game's own list
 **A name that is not a tradeable good stops the monitor and names the offending entry**, rather than
 leaving you watching nothing while everything looks fine. Names are matched case-insensitively, so
 `machinery parts` resolves to Machinery Parts; the preflight line then reports the game's spelling.
+Expect to see one good under two spellings: with `"machinery PARTS"` in `settings.json`, startup
+prints `watching Machinery Parts` (the game's) while the alert reads `Buy orders for machinery PARTS`
+(yours). Both name the same good — the startup line confirms what the game matched, and the alert
+header echoes your settings file so you can find the entry that produced it.
 If the nation has no alliance, the preflight says so and carries on — the alliance check simply never
 matches.
 
@@ -412,14 +419,18 @@ cannot read the game is not monitoring it.
 
 Two kinds of failure, distinguished by what the dialog says:
 
-- **The monitor has stopped and is no longer polling.** It cannot continue: the configured 4chan
-  thread is archived (at startup or while running), the login was rejected, `settings.json` exists
-  but is unreadable or malformed, the environment file is unreadable, or no credentials were
-  supplied. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.)
-  The market preflight also stops it: a watched good that is not a tradeable good, or an account
-  whose active nation could not be identified. Exit code is 2 for a startup
-  failure and 1 for one that ends a running monitor. The market preflight needs a logged-in session,
-  so it runs after login and its failures exit **1** rather than 2.
+- **The monitor has stopped and is no longer polling.** It cannot continue. The exit code says how
+  far it got: **2** means it stopped before it ever logged in, **1** means it stopped from the login
+  onwards.
+  - **Exit 2:** `settings.json` exists but is unreadable or malformed, the environment file is
+    unreadable, no credentials were supplied, or the configured 4chan thread is already archived at
+    startup. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.)
+  - **Exit 1:** the state file `.state/clop-monitor.json` is unreadable or corrupt (delete it — the
+    next run rebuilds it, at the cost of re-alerting on the newest news and report), **the login was
+    rejected**, the market preflight failed — a watched good that is not a tradeable good, or an
+    account whose active nation could not be identified — or the 4chan thread archived while the
+    monitor was running. The market preflight needs a logged-in session, so it runs after login and
+    exits 1 rather than 2.
 - **The monitor is still running and retries in N seconds.** One check failed — the site was
   unreachable, a page could not be parsed, or the buyer's marketplace did not return the order table
   for a watched good — and polling resumes on the normal interval after you
