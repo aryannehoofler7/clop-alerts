@@ -439,7 +439,8 @@ class StateTests(unittest.TestCase):
         observed = Snapshot(0, 0, ("News", "2026-08-17 01:02:03"))
 
         class FakeClient:
-            def snapshot(self):
+            def snapshot(self, include_market=True):
+                del include_market
                 return observed
 
         class FailingNotifier:
@@ -2380,6 +2381,41 @@ class MarketDuringAnAlertTests(unittest.TestCase):
             state = Path(directory) / "state.json"
             check_and_notify(FakeClient(), None, FakeNotifier(), state, persist_state=False)
         self.assertEqual(calls, [True, False])
+
+
+class MutedMarketTests(unittest.TestCase):
+    """Muting the category stops the market work, it does not just discard the result."""
+
+    def preflight_goods(self, market_orders):
+        """The goods main() hands the preflight for a given alerts.market_orders value."""
+        return clop_monitor.goods_to_watch(
+            AlertCategorySettings(
+                market_orders=market_orders,
+                market_goods=(clop_monitor.WatchedGood("Machinery Parts"),),
+            )
+        )
+
+    def test_muting_the_category_watches_nothing(self):
+        self.assertEqual(self.preflight_goods(False), ())
+
+    def test_leaving_the_category_on_watches_the_configured_goods(self):
+        self.assertEqual(
+            [good.name for good in self.preflight_goods(True)], ["Machinery Parts"]
+        )
+
+    def test_a_muted_market_issues_no_requests_and_forgives_a_bad_good_name(self):
+        # A watch list left in place while the category is off must not cost a request, and
+        # must not turn a good-name typo into a fatal startup error for a switched-off
+        # feature.
+        client = ClopClient("https://4clop.org", "user", "password")
+
+        def fake_open(path, form=None):
+            raise AssertionError(f"A muted market must not request {path!r}")
+
+        client._open = fake_open
+        self.assertIsNone(client.market_preflight(self.preflight_goods(False)))
+        self.assertEqual(client.market_goods, ())
+        self.assertIsNone(client.alliance_id)
 
 
 if __name__ == "__main__":

@@ -1374,6 +1374,17 @@ def save_snapshot(path: Path, snapshot: Snapshot) -> None:
         raise MonitorError(f"Could not write state file {path}: {error}") from error
 
 
+def goods_to_watch(settings: AlertCategorySettings) -> Tuple[WatchedGood, ...]:
+    """The goods to actually fetch, which is nothing at all when the category is muted.
+
+    Muting has to stop the work rather than discard its result: a watch list left in place
+    would otherwise still resolve the alliance and POST once per good every poll for orders
+    nothing reads, and a good-name typo would still be a fatal startup error for a feature
+    that is switched off.
+    """
+    return settings.market_goods if settings.market_orders else ()
+
+
 def market_order_alerts(order: MarketOrder, good: WatchedGood) -> bool:
     """Whether one buy order raises an alert under this good's settings.
 
@@ -1760,7 +1771,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         previous = load_snapshot(args.state) if settings.cache.persist_to_file else None
         client.login()
-        market_message = client.market_preflight(settings.alerts.market_goods)
+        market_message = client.market_preflight(goods_to_watch(settings.alerts))
         if market_message is not None:
             print(market_message, flush=True)
         cache_status = (
