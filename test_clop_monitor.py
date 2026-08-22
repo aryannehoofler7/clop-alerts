@@ -1,8 +1,11 @@
+import ast
 import contextlib
 import dataclasses
+import inspect
 import io
 import json
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3105,6 +3108,36 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("None of it was applied", self.notifier.failures[0])
 
+    def test_a_failing_thread_check_leaves_an_emptied_watch_list_untouched(self):
+        # The sibling of the test above, for the other half of the market branch: emptying
+        # the watch list clears the client's resolved goods, and that clearing is an apply
+        # like any other, so it must not land before a step that can still refuse the reload.
+        settings = self.load({"market": {"goods": {"Oil": {"alliance": False}}}})
+        self.write(
+            {
+                "market": {"goods": {}},
+                "fourchan": {"thread_url": "https://boards.4chan.org/mlp/thread/2"},
+            }
+        )
+
+        class UnreachableThreadClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            def _latest_fourchan_post(self):
+                raise MonitorError("Could not reach a.4cdn.org")
+
+        client, calls = market_client({}, goods=(("Oil", 1),), alliance_id=7)
+        with mock.patch.object(clop_monitor, "ClopClient", UnreachableThreadClient):
+            reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(client.market_goods, (("Oil", 1),))
+        self.assertEqual(client.alliance_id, 7)
+        self.assertIsNone(client.fourchan_thread)
+        self.assertEqual(calls, [])
+        self.assertEqual(output, "")
+        self.assertIn("None of it was applied", self.notifier.failures[0])
+
     def test_a_newly_configured_archived_thread_is_a_rejected_reload(self):
         # A thread that is already archived when you name it is a typo in a text file, not
         # the game telling a running watch that its job is over.
@@ -3129,6 +3162,62 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertIn("archived", self.notifier.failures[0])
         self.assertIn("go on polling", self.notifier.failures[0])
         self.assertEqual(output, "")
+
+
+class ReloadApplyRegionTests(unittest.TestCase):
+    """Nothing that changes the client may sit in reload_settings' fallible block.
+
+    A behavioural test can only catch a mutation placed *before* whichever step raises; one
+    placed after it is invisible until somebody reorders the block, at which point it becomes
+    the partial apply the whole design forbids. Reading the function's own syntax tree pins
+    the rule rather than one arrangement of it: the try is for work that can fail, and every
+    apply lives below it.
+    """
+
+    def fallible_block(self):
+        """The try that brings a changed section into service."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(clop_monitor.reload_settings)))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and "market_preflight" in ast.dump(node):
+                return node
+        raise AssertionError("reload_settings has no block that runs the market preflight")
+
+    def test_the_fallible_block_assigns_nothing_to_the_client(self):
+        assigned = []
+        for node in ast.walk(self.fallible_block()):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            else:
+                continue
+            assigned.extend(
+                target.attr
+                for target in targets
+                if isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "client"
+            )
+        self.assertEqual(
+            assigned,
+            [],
+            "reload_settings assigns to the client inside the block that can fail. Move it "
+            "below the except, with the other applies: a reload refused after that "
+            "assignment has already half-applied itself.",
+        )
+
+    def test_the_only_client_call_that_can_fail_is_the_atomic_one(self):
+        # market_preflight may sit there because it assigns its two fields together at the
+        # end or not at all; a second fallible client call would have no such guarantee.
+        called = [
+            node.func.attr
+            for node in ast.walk(self.fallible_block())
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "client"
+        ]
+        self.assertEqual(called, ["market_preflight"])
 
 
 class PollingClient:
@@ -3346,6 +3435,45 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         self.assertEqual(rebuilt.webhook_url, started.webhook_url)
         self.assertEqual(rebuilt.webhook_url, "https://example.invalid/hook")
         self.assertEqual(rebuilt.desktop, started.desktop)
+
+    def test_an_edit_landing_during_the_startup_parse_is_not_missed(self):
+        # The bytes are read before the parse, so the bytes main remembers can only be older
+        # than or the same age as the settings they are paired with. Reversed, an edit landing
+        # in that window would be remembered as already loaded and would never take effect --
+        # silently skipping a real change, which is worse than the redundant re-parse this
+        # ordering costs instead. Nothing but this ordering prevents it.
+        notifiers = self._record_notifiers()
+        muted = {"alerts": {"user_messages": False}, "cache": {"persist_to_file": False}}
+        parsed = []
+        real_load_settings = clop_monitor.load_settings
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(stdout):
+            path = Path(directory) / "settings.json"
+
+            def edit_after_parsing(settings_path):
+                # The file changes the instant the startup parse has read it, which is the
+                # window the ordering exists for.
+                result = real_load_settings(settings_path)
+                if not parsed:
+                    parsed.append(True)
+                    path.write_text(json.dumps(muted), encoding="utf-8")
+                return result
+
+            def sleep(seconds):
+                del seconds
+                raise KeyboardInterrupt
+
+            with mock.patch.object(clop_monitor, "load_settings", edit_after_parsing):
+                _, code = self._run(
+                    directory,
+                    {"alerts": {"user_messages": True}, "cache": {"persist_to_file": False}},
+                    sleep,
+                )
+        self.assertEqual(code, 0)
+        # The edit was picked up before the first check, so the muted category never alerted.
+        self.assertIn("Settings reloaded: alerts.", stdout.getvalue())
+        self.assertEqual(notifiers[1].messages, [])
 
     def test_enabling_the_file_cache_mid_run_writes_without_reading(self):
         # Pinning today's behaviour rather than endorsing it: load_snapshot runs once, before
