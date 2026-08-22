@@ -72,8 +72,23 @@ is a monitoring outage caused by a sound file, and the README actively invites u
 
 Only the file's own bytes can say "nobody touched this" without consulting anything outside the
 file, which is exactly the property needed. The bytes are compared, never inspected, and they are
-adopted whenever a parse is accepted — including a cosmetic edit that reindents the file without
-changing a setting, which would otherwise be re-parsed on every remaining poll.
+adopted whenever the **reload** is accepted — including a cosmetic edit that reindents the file
+without changing a setting, which would otherwise be re-parsed on every remaining poll.
+
+Accepted, not merely parsed: a refused reload leaves the remembered bytes as they were. That is
+the mechanism behind "warns for as long as the cause lasts". A file that parses cleanly but cannot
+be brought into service — a `market.goods` typo naming a good the game does not have — is refused
+with its old bytes still held, so the next poll sees the same difference, parses again, fails
+again, and warns again, until either the file is corrected or whatever was unreachable comes back.
+Adopting the bytes of a refused reload would warn once and then go quiet, which is the outcome
+this design least wants: a monitor running on settings you think you replaced, saying nothing.
+
+The bytes are read before the file is parsed, which matters for the same reason in reverse. The
+remembered bytes can then only be older than or the same age as the settings they are paired with,
+so an edit landing in that window reads as a change on the next poll and costs one redundant parse.
+Parsing first would pair new bytes with old settings and the edit would be remembered as already
+loaded — silently skipped, permanently. Erring toward the wasted parse is the whole point of the
+order.
 
 | Section | Detected by | Work when it changes |
 |---|---|---|
@@ -135,6 +150,29 @@ it. That softens the existing "restart after joining or leaving an alliance" cav
 `market.goods` is now enough. Leaving the file alone still leaves the id as it was resolved at
 startup.
 
+## A known, bounded limitation: the exact-revert race
+
+The gate reads the file twice — once for the bytes, once for the parse — so there is a window
+between them. Read-before-parse closes every version of that window except one: a file that
+changes *and* changes back to byte-identical content inside it. The bytes then match what is
+remembered while the parse has already picked up the intervening content, so the settings in force
+are neither the old file nor the current one, and no later poll notices, because the bytes on disk
+match the remembered bytes exactly.
+
+It is recorded rather than fixed, deliberately:
+
+- Reaching it needs two writes inside the microseconds between the two reads, the second restoring
+  the first byte for byte. Review reproduced it only by forcing a write from inside a patched
+  parser; no editor save sequence produces it.
+- It self-clears. Any later edit changes the bytes, and the next poll reloads the file whole.
+- The clean fix is to parse the bytes already read instead of re-opening the file, which also
+  removes the second read. That means `load_settings` taking content rather than a path — and
+  `load_settings` is heavily tested and shared with the startup path, so the change is much larger
+  than the defect. Not worth taking on a working feature for a race this shape.
+
+If it ever does matter, that one-line reshaping is the fix, and it is the only one worth making:
+locking the file or comparing a hash instead changes nothing about the window.
+
 ## Testing
 
 `test_clop_monitor.py`, synthetic only, never contacting the hosted game:
@@ -172,8 +210,9 @@ startup.
   backup can put back an identical mtime over changed bytes, and a touch can change the mtime
   over identical bytes. Reading the bytes cannot be wrong about either.
 
-  This is not an argument against a cheap gate in front of the parse, and the implementation has
-  one — see below. It is an argument about *what* the gate compares.
+  This is not an argument against a cheap gate in front of the parse; the implementation has one,
+  described under "Change detection gates the setup" above. It is an argument about *what* the
+  gate compares.
 - **Applying the valid parts of a partially bad reload.** It would leave the live configuration as
   a mixture of two files with nothing naming which parts came from where.
 - **Making a failed reload fatal.** Consistent with how a bad settings file behaves at startup, but

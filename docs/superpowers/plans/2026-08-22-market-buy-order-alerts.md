@@ -1,5 +1,12 @@
 # Buyer's-Marketplace Order Alerts Implementation Plan
 
+> **Status (2026-08-23): completed build record, point-in-time.** This plan describes how the
+> feature was built and is kept for that history; it is not maintained as a description of how the
+> monitor behaves now. Where it conflicts with `docs/2026-08-22-market-buy-order-alerts-design.md`
+> or `docs/2026-08-23-hot-reload-settings-design.md`, those are correct and this is superseded.
+> Hot-reloading `settings.json` in particular changed several statements here about the preflight
+> running only at startup and about needing a restart to re-resolve the alliance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Alert every poll when somepony on your friends list, or in your alliance, has a pending buy order for a good you have switched on in `settings.json`.

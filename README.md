@@ -481,9 +481,12 @@ The roster comes from `viewalliance.php`, never from `myalliance.php`. Loading `
 marks your alliance messages as read as a side effect, which would break the alliance-message alerts
 the monitor already does. Your own `alliance_id` is resolved by the market preflight and kept until
 something re-runs it. The preflight runs at startup and again whenever a reload changes the watched
-goods, so if you join or leave an alliance while the monitor is running, edit `market.goods` — switch
-a good on or off — and the next poll re-resolves it and prints the same `Market preflight passed`
-line startup does, naming what it found. Leaving the file alone leaves the id as startup resolved it.
+goods, so if you join or leave an alliance while the monitor is running, **switch a good on** in
+`market.goods` and the next poll re-resolves it, printing the same `Market preflight passed` line
+startup does and naming what it found. Switching a good *off* is not the same move: if it was your
+last watched good there is nothing left to resolve, so the preflight is skipped, the alliance is
+simply forgotten, and nothing prints. Switch one on — the same one, if you like, after switching it
+off. Leaving the file alone leaves the id as startup resolved it.
 
 Also at startup, every watched good name is resolved against the game's own list of tradeable goods.
 **A name that is not a tradeable good stops the monitor and names the offending entry**, rather than
@@ -560,7 +563,8 @@ values; the tests reference a public 4chan thread URL, which is fine to share as
 **Stop the monitor first, with `Ctrl+C`, and start it again afterwards.** `settings.json` is
 re-read while the monitor runs, but the program itself is not: a running monitor goes on using the
 code it started with, so a `git pull` underneath one changes nothing until you restart it. This is
-the one place in this document where "no restart needed" does not apply.
+one of the two things a running monitor cannot pick up; the other is
+[what still needs a restart](#settings) — the command-line arguments and the `.env` credentials.
 
 Then run `git pull` in this folder. Nothing you own is tracked, so a pull never asks you to merge a
 configuration file and never overwrites one. Read the startup lines when you start it again: a new

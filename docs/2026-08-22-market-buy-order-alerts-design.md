@@ -191,7 +191,8 @@ re-resolves it. The roster itself is re-read every poll, because members join an
 the monitor runs.
 
 > **Amended 2026-08-23:** "cached for the process lifetime" as originally written. A reload that
-> changes `market.goods` now re-runs the preflight, which re-resolves `alliance_id` too.
+> leaves at least one good watched now re-runs the preflight, which re-resolves `alliance_id` too.
+> A reload that empties the watch list has nothing to resolve, so it clears `alliance_id` instead.
 
 When no roster is fetched — because no watched good sets `alliance: true` — `is_ally` falls back
 to the green colour, which is a correct positive and an incomplete negative. Nothing consults it
@@ -212,9 +213,10 @@ The roster fetch is skipped entirely when no watched good sets `alliance: true` 
 test, so there is no per-row conditional-fetch logic to reason about. Leaving or joining an
 alliance mid-run is not detected on its own.
 
-> **Amended 2026-08-23:** this said "restart the monitor". Editing `market.goods` now re-runs the
-> preflight and re-resolves the alliance on the next poll, so a restart is no longer the only way
-> — but it is still not detected on its own, which is the part that stands.
+> **Amended 2026-08-23:** this said "restart the monitor". Switching a good **on** in
+> `market.goods` now re-runs the preflight and re-resolves the alliance on the next poll, so a
+> restart is no longer the only way — but it is still not detected on its own, which is the part
+> that stands. Switching the last good off resolves nothing; it clears the alliance instead.
 
 A nation with no alliance resolves to an empty roster, so `alliance: true` matches nothing. That
 is a startup note, not an error.
