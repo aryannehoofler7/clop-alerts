@@ -457,17 +457,24 @@ def parse_latest_report(html: str) -> Optional[Tuple[str, str]]:
     return rows[0] if rows else None
 
 
-def report_is_ignored(message: str, patterns: Sequence[str]) -> bool:
-    """Whether a report matches an ignore pattern.
+def matches_any_pattern(text: str, patterns: Sequence[str]) -> bool:
+    """Whether the text matches any pattern.
 
-    A pattern matches anywhere in the message and ignores case; ``%`` stands for any run of
-    characters, so ``Build % completed successfully.`` covers whatever was built.
+    A pattern matches anywhere in the text and ignores case; ``%`` stands for any run of
+    characters, so ``Build % completed successfully.`` covers whatever was built. Report
+    ignore-patterns and market nation-name patterns share this rule so that the settings file
+    has one convention rather than two.
     """
     for pattern in patterns:
         expression = ".*".join(re.escape(part) for part in pattern.split("%"))
-        if re.search(expression, message, re.IGNORECASE):
+        if re.search(expression, text, re.IGNORECASE):
             return True
     return False
+
+
+def report_is_ignored(message: str, patterns: Sequence[str]) -> bool:
+    """Whether a report matches an ignore pattern."""
+    return matches_any_pattern(message, patterns)
 
 
 def new_reports_since(

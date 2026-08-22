@@ -1237,5 +1237,16 @@ class WatchedGoodTests(unittest.TestCase):
         self.assertEqual(settings.market_goods, ())
 
 
+class PatternMatchTests(unittest.TestCase):
+    def test_a_pattern_matches_anywhere_ignoring_case(self):
+        self.assertTrue(clop_monitor.matches_any_pattern("Luna Sueno", ["luna"]))
+
+    def test_a_wildcard_stands_for_any_run_of_characters(self):
+        self.assertTrue(clop_monitor.matches_any_pattern("Big Pony Land", ["Big % Land"]))
+
+    def test_no_patterns_match_nothing(self):
+        self.assertFalse(clop_monitor.matches_any_pattern("Luna Sueno", []))
+
+
 if __name__ == "__main__":
     unittest.main()
