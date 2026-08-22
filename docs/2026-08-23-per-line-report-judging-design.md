@@ -65,9 +65,10 @@ design exists to prevent. `Show Details` and `Hide Details` are likewise two `<d
 `<br/>` between them. So the split is at the page's block boundaries as well — `br`, `div`, `p` —
 which is the same claim as above, just stated in the markup the page actually uses.
 
-A newline in the report's *text* is deliberately not a break: three tick reports are heredocs whose
-sentence spans two source lines (`frequent.php:952`, `:985`, `:1310`), and they have to stay one
-line for a pattern to match them.
+A newline in the report's *text* is deliberately not a break. Seven of the tick's report strings
+span more than one source line: `frequent.php:952` (the revolt), `:985` and `:1014` (the two
+airstrikes) are two-line double-quoted strings, and `:1296`, `:1302`, `:1309` and `:1315` are
+three-line heredocs (the four combat lines). Each has to stay one line for a pattern to match it.
 
 ### What this changes for existing patterns
 

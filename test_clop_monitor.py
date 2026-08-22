@@ -43,14 +43,19 @@ def shipped_example():
     return json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
 
 
-def report_is_ignored(message, patterns):
-    """Whether the report raises no alert, which is now "no line of it survived"."""
+def report_raises_no_alert(message, patterns):
+    """Whether the report raises no alert, which is now "no line of it survived".
+
+    Named for what it asks rather than for the production function it replaced, which was
+    deleted when reports gained lines: a name that survives only in tests sends the next
+    reader looking for a symbol the monitor no longer has.
+    """
     return not surviving_report_lines(message, patterns)
 
 
 def shipped_report_patterns():
     """Every shipped reports.ignore pattern, as if the reader had switched them all on."""
-    return [entry[1:].strip() for entry in shipped_example()["reports"]["ignore"]]
+    return [entry.lstrip("#").strip() for entry in shipped_example()["reports"]["ignore"]]
 
 
 AUTHENTICATED_HEADER = """
@@ -689,7 +694,7 @@ class SettingsDefaultsTests(unittest.TestCase):
             )
             settings = load_settings(path)
         self.assertEqual(settings.alerts.report_ignore, ("Report #% filed",))
-        self.assertTrue(report_is_ignored("Report #42 filed", settings.alerts.report_ignore))
+        self.assertTrue(report_raises_no_alert("Report #42 filed", settings.alerts.report_ignore))
 
     def test_every_pattern_commented_out_ignores_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -953,35 +958,35 @@ class ReportIgnorePatternTests(unittest.TestCase):
     def test_each_example_pattern_ignores_its_own_report(self):
         for pattern, message in IGNORABLE_REPORTS:
             with self.subTest(pattern=pattern):
-                self.assertTrue(report_is_ignored(message, [pattern]))
+                self.assertTrue(report_raises_no_alert(message, [pattern]))
 
     def test_no_example_pattern_ignores_a_report_worth_seeing(self):
         patterns = [pattern for pattern, _ in IGNORABLE_REPORTS]
-        self.assertFalse(report_is_ignored(WORTH_ALERTING, patterns))
+        self.assertFalse(report_raises_no_alert(WORTH_ALERTING, patterns))
 
     def test_a_buy_pattern_does_not_ignore_a_sale(self):
         sale = "You sold 10 Copper to quaity kirenese merch and ice and made 9,000 bits."
-        self.assertFalse(report_is_ignored(sale, ["You bought % from % for % bits."]))
+        self.assertFalse(report_raises_no_alert(sale, ["You bought % from % for % bits."]))
 
     def test_matching_ignores_case(self):
-        self.assertTrue(report_is_ignored("BURN OIL consumed 5 barrels", ["burn oil"]))
+        self.assertTrue(report_raises_no_alert("BURN OIL consumed 5 barrels", ["burn oil"]))
 
     def test_a_wildcard_spans_any_text_including_none(self):
         self.assertTrue(
-            report_is_ignored(
+            report_raises_no_alert(
                 "Build Really Very Large Ovipositor Factory completed successfully.",
                 ["Build % completed successfully."],
             )
         )
         self.assertTrue(
-            report_is_ignored("Build  completed successfully.", ["Build % completed successfully."])
+            report_raises_no_alert("Build  completed successfully.", ["Build % completed successfully."])
         )
 
     def test_a_wildcard_may_start_or_end_a_pattern(self):
-        self.assertTrue(report_is_ignored("You made 9,000 bits.", ["% bits."]))
+        self.assertTrue(report_raises_no_alert("You made 9,000 bits.", ["% bits."]))
 
     def test_no_patterns_ignores_nothing(self):
-        self.assertFalse(report_is_ignored(WORTH_ALERTING, []))
+        self.assertFalse(report_raises_no_alert(WORTH_ALERTING, []))
 
     def test_shipped_patterns_are_present_but_all_commented_out(self):
         value = shipped_example()
@@ -1008,7 +1013,7 @@ class ReportIgnorePatternTests(unittest.TestCase):
             settings = load_settings(path)
         self.assertEqual(settings.alerts.report_ignore, ("Burn Oil completed successfully.",))
         self.assertTrue(
-            report_is_ignored("Burn Oil completed successfully.", settings.alerts.report_ignore)
+            report_raises_no_alert("Burn Oil completed successfully.", settings.alerts.report_ignore)
         )
 
 
@@ -1026,19 +1031,19 @@ class CompletionPatternTests(unittest.TestCase):
         for action in NON_BUILD_COMPLETIONS:
             with self.subTest(action=action):
                 self.assertTrue(
-                    report_is_ignored(self.report(action), ["% completed successfully."])
+                    report_raises_no_alert(self.report(action), ["% completed successfully."])
                 )
 
     def test_a_build_only_pattern_misses_every_one_of_them(self):
         for action in NON_BUILD_COMPLETIONS:
             with self.subTest(action=action):
                 self.assertFalse(
-                    report_is_ignored(self.report(action), ["Build % completed successfully."])
+                    report_raises_no_alert(self.report(action), ["Build % completed successfully."])
                 )
 
     def test_the_catch_all_still_covers_the_build_actions(self):
         self.assertTrue(
-            report_is_ignored(
+            report_raises_no_alert(
                 self.report("Build Advanced Factory"), ["% completed successfully."]
             )
         )
@@ -1050,7 +1055,7 @@ class CompletionPatternTests(unittest.TestCase):
             "You spent 20 Machinery Parts. You paid 50,000 bits. "
             "Build Advanced Factory completed successfully."
         )
-        self.assertTrue(report_is_ignored(whole, ["% completed successfully."]))
+        self.assertTrue(report_raises_no_alert(whole, ["% completed successfully."]))
 
     def test_the_catch_all_leaves_reports_worth_seeing_alone(self):
         for message in (
@@ -1061,7 +1066,7 @@ class CompletionPatternTests(unittest.TestCase):
             "automatically dismantled. A new Major Action is available to you.",
         ):
             with self.subTest(message=message[:40]):
-                self.assertFalse(report_is_ignored(message, ["% completed successfully."]))
+                self.assertFalse(report_raises_no_alert(message, ["% completed successfully."]))
 
 
 class ReportScanTests(unittest.TestCase):
@@ -1418,6 +1423,25 @@ class UpgradedMarkerTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertIn("Newer report", alerts[0])
 
+    def test_a_sibling_sharing_the_markers_timestamp_is_dropped_on_upgrade(self):
+        """The one report an upgrade can lose, pinned deliberately rather than by accident.
+
+        The timestamp fallback is a strict `>`, so a different report written in the same
+        second as the marker is treated as already seen. That is the safe direction — the
+        alternative replays the marked report itself on every upgrade — but it is a real,
+        one-off loss and it should not be discovered by surprise later.
+        """
+        alerts = build_alerts(
+            self.saved_marker(),
+            self.current(
+                [
+                    ("A different report, same second", "2026-08-17 08:00:00"),
+                    ("Marked report, reparsed", "2026-08-17 08:00:00"),
+                ]
+            ),
+        )
+        self.assertEqual(alerts, [])
+
 
 class ReportLineParsingTests(unittest.TestCase):
     """A report cell keeps the line structure the game wrote; a news cell does not."""
@@ -1456,8 +1480,9 @@ class ReportLineParsingTests(unittest.TestCase):
         self.assertIn("Too many Basic Oil Wells cause environmental damage! (-5 sat)", message.split("\n"))
 
     def test_a_literal_newline_inside_one_message_stays_one_line(self):
-        # Three tick reports are heredocs that span two source lines (frequent.php:952, :985,
-        # :1310), so the newline is inside the sentence rather than between two of them.
+        # Seven tick reports span more than one source line - frequent.php:952, :985 and
+        # :1014 as two-line double-quoted strings, :1296, :1302, :1309 and :1315 as three-line
+        # heredocs - so the newline is inside the sentence rather than between two of them.
         html = reports_page(
             [
                 "Your satisfaction is below the minimum - your ponies are revolting!\n"
@@ -1474,7 +1499,7 @@ class ReportLineParsingTests(unittest.TestCase):
         )
 
     def test_an_inline_link_inside_a_line_does_not_break_it(self):
-        # The combat report links the attacker's nation mid-sentence (frequent.php:1310).
+        # The combat report links the attacker's nation mid-sentence (frequent.php:1309).
         html = reports_page(
             [
                 "Your Second Cavalry (size 10) were hit by\n"
@@ -1494,6 +1519,25 @@ class ReportLineParsingTests(unittest.TestCase):
         <h3>News</h3>
         <table>
           <tr><td>War declared<br/>by Sombra</td><td>2026-08-17 08:02:33</td></tr>
+        </table>
+        """
+        self.assertEqual(
+            parse_latest_news(html), ("War declared by Sombra", "2026-08-17 08:02:33")
+        )
+
+    def test_a_block_tag_in_a_news_cell_now_separates_the_halves(self):
+        """The one input where news text is not what the old parser produced.
+
+        Before reports kept their lines, a block tag separated nothing and the two halves ran
+        together into one word. None of the game's ten INSERT INTO news sites writes a block
+        tag, so no real news line changed - but the behaviour is different and pinning it here
+        stops anyone claiming the two forms are identical.
+        """
+        html = """
+        <h3>News</h3>
+        <table>
+          <tr><td><div>War declared</div><div>by Sombra</div></td>
+              <td>2026-08-17 08:02:33</td></tr>
         </table>
         """
         self.assertEqual(

@@ -494,7 +494,9 @@ class LinkTextParser(HTMLParser):
 #: purpose, but the tick wraps its detail lines in ``<div>``s (cron/frequent.php:786-799) and
 #: puts no ``<br>`` between the last detail line and ``Change in Satisfaction:`` — only the
 #: ``</div>`` that closes the block. Treating the block elements as line ends too is what
-#: makes the split the page's own visible lines rather than a subset of them.
+#: makes the split the page's own visible lines rather than a subset of them. ``p`` is
+#: defensive: no report the game writes contains one, and it is here because a block element
+#: silently swallowed would be the failure this whole split exists to prevent.
 LINE_BREAK_TAGS = frozenset({"br", "div", "p"})
 
 
@@ -503,12 +505,17 @@ class NewsTableParser(HTMLParser):
 
     ``line_separator`` decides what a cell's line breaks become. News reads as one sentence
     and keeps the space it always had; reports are judged and shown a line at a time
-    (docs/2026-08-23-per-line-report-judging-design.md) and keep a newline. Both are built
-    from the same split, and joining with a space reproduces the old flattening exactly, so
-    the news text is unchanged by the report work.
+    (docs/2026-08-23-per-line-report-judging-design.md) and keep a newline.
 
-    Only these tags break a line: a newline in the cell's *text* does not, because three tick
-    reports are heredocs that span two source lines and their sentence has to survive as one.
+    The news text is unchanged in practice but not by identity: none of the game's ten
+    ``INSERT INTO news`` sites writes a block tag, so real news reads exactly as it always
+    did, while a cell that *did* contain one now yields a space where the old parser ran the
+    two halves together into a single word.
+
+    Only these tags break a line — a newline in the cell's *text* does not. Seven report
+    strings in the tick span two or three source lines (frequent.php:952, :985 and :1014 are
+    two-line double-quoted strings; :1296, :1302, :1309 and :1315 are three-line heredocs),
+    and each of their sentences has to survive as one line for a pattern to match it.
     """
 
     def __init__(self, line_separator: str = " ") -> None:

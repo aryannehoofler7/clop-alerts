@@ -253,6 +253,7 @@ so:
 "reports": {
   "ignore": [
     "% completed successfully.",
+    "You spent % %.",
     "You paid % bits.",
     "# You bought % from % for % bits.",
     "# Show Details",
@@ -261,8 +262,10 @@ so:
 }
 ```
 
-That file silences every finished action and the price you paid for it, and leaves the rest switched
-off. Leading spaces before the `#` are fine. The `#` only means "off" at the very start of a pattern,
+That file goes quiet for a finished action, and leaves the rest switched off. It takes all three
+switched-on patterns to do it, because a finished build is three lines and each needs its own: drop
+`You spent % %.` and the report still alerts, showing `You spent 20 Machinery Parts.` on its own.
+Leading spaces before the `#` are fine. The `#` only means "off" at the very start of a pattern,
 so `Report #% filed` is a normal pattern; the cost of the convention is that you cannot match a
 report whose text genuinely begins with `#`.
 
@@ -391,7 +394,8 @@ timestamp used only as a fallback when the remembered report has scrolled off th
 on each one that has a line left after the [ignore patterns](#ignoring-routine-reports) have taken
 theirs, showing those lines. There is no cap: coming back to forty reports produces forty entries in
 one dialog. The marker always advances to the newest report on the page whether or not anything was
-alerted, so a silenced report is examined once and never again. Report notifications include a link to `reports.php`. Delete the `.state` folder to
+alerted, so a silenced report is examined once and never again. Report notifications include a
+link to `reports.php`. Delete the `.state` folder to
 establish fresh news and report baselines.
 
 The hosted game keeps the alliance "last checked" timestamp inside each login session. When the

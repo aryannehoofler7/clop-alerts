@@ -261,7 +261,7 @@ reads as "only these nations, whoever they are".
 Because the two facts are resolved independently, a buyer who is both a friend and an ally
 satisfies either check, and turning one off does not hide them from the other.
 
-Nation-name patterns use the existing `report_is_ignored` matching rule, unchanged, so the
+Nation-name patterns use the existing `matches_any_pattern` matching rule, unchanged, so the
 settings file has one pattern convention rather than two.
 
 ### Fetching

@@ -106,8 +106,9 @@ for the common ones, all commented out.
   enemy forgets eventually; …`
 - `As you have more than 50,000 %, % was siphoned off.` / `As you have more than 1,000 %, % were
   siphoned off.`
-- Trades the player initiated: `You bought % % from % for % bits.`, `You dealt away % %.`,
-  `You received % %.`, `You accepted a deal with %.`, `You transferred % % to % for % bits.`
+- Trades the player initiated: `You dealt away % %.`, `You received % %.`,
+  `You accepted a deal with %.`, `You transferred % % to % for % bits.` — and
+  `You bought % % from % for % bits.`, but see *The marketplace sentences cut both ways* below
 - `You have created the military force %.`
 - All eighteen Major Action lines — `Government changed to %`, `Economy changed to %`,
   `Nation name changed from % to %`. Note several have **no trailing full stop**, and the game's own
@@ -133,9 +134,29 @@ Something happened *to* the player, or they are losing something.
 - `You lose % sat for having an empire of % nations.`
 - `Your % government lacks the % to function properly!` — the nation is starving
 - `Your deal with % was rejected.` / `was accepted.`, `You received % % as part of your deal.`,
-  `You sold % % to % and made % bits.`, `This nation received % % from %.` — **someone else acted
-  on you**, which is why these sit here rather than with the trades above
+  `This nation received % % from %.` — **someone else acted on you**, which is why these sit here
+  rather than with the trades above
+- `You sold % % to % and made % bits.` — but only on one of its two paths; see below
 - `You have completed the forbidden research, and the facility has been automatically dismantled.`
+
+### The marketplace sentences cut both ways
+
+`You bought …` and `You sold …` are each written to **both** sides of a trade, in identical words,
+so nothing in the text says which side you were:
+
+| Written at | `You bought % % from % for % bits.` goes to | `You sold % % to % and made % bits.` goes to |
+|---|---|---|
+| `backend_marketplace.php:215` / `:234` | the actor, who clicked buy | the **passive** seller whose listing was taken |
+| `backend_buyermarketplace.php:238` / `:257` | the **passive** buyer whose standing order was filled | the actor, who clicked sell |
+
+So neither sentence is purely Routine or purely Notable, and the split above is a judgement about
+which path matters more rather than a property of the text. The consequence for the monitor is
+concrete and worth stating plainly: **the shipped `You bought …` pattern silences your own purchases
+and also a stranger filling your standing buy order.** No `You sold …` pattern ships, because
+switching one on would equally silence somebody buying from your standing sell order.
+
+There is no way to separate them by pattern. Anyone who trades enough for the noise to matter can
+add a `You sold …` pattern themselves, knowing what it costs.
 
 ## `Change in Satisfaction:` — the trap that per-line judging removed
 
@@ -156,7 +177,8 @@ The tick still takes a pattern per routine line to go quiet, which is what the b
   unreachable — every call site passes a valid empire name.
 - Nation-death paths (`frequent.php:903`, `:1516`, `:1536`) write to `messages` and `news`, not
   `reports`.
-- Three tick reports contain a literal newline mid-sentence, from a heredoc spanning two source
-  lines (`frequent.php:952`, `:985`, `:1310`). The monitor splits a report at the page's own line
-  breaks and not at newlines in the text, so these stay one line and a pattern must read across as
-  one line.
+- **Seven** tick reports contain a literal newline mid-sentence, in two shapes: `frequent.php:952`
+  (the revolt), `:985` and `:1014` (the two airstrikes) are two-line double-quoted strings, and
+  `:1296`, `:1302`, `:1309` and `:1315` are three-line heredocs (the four combat lines). The
+  monitor splits a report at the page's own line breaks and not at newlines in the text, so these
+  stay one line and a pattern must read across as one line.
