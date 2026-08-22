@@ -2702,8 +2702,34 @@ class SettingsReloadTests(unittest.TestCase):
         reloaded, _, output = self.reload(settings, client)
         self.assertEqual(client.market_goods, (("Oil", 1),))
         self.assertEqual([path for path, _ in calls], ["buyermarketplace.php"])
-        self.assertEqual(output, "Settings reloaded: market.goods.\n")
+        self.assertEqual(
+            output,
+            "Settings reloaded: market.goods.\n"
+            "Market preflight passed; watching Oil (friends only).\n",
+        )
         self.assertEqual([good.name for good in reloaded.alerts.market_goods], ["Oil"])
+
+    def test_a_re_run_preflight_names_the_alliance_it_resolved(self):
+        # The README tells a user who joined or left an alliance to touch market.goods so the
+        # reload re-resolves it. The resolved alliance is the entire point of that
+        # instruction, so the reload has to show it the way startup does.
+        settings = self.load({})
+        self.write({"market": {"goods": {"Oil": {}}}})
+        client, _ = market_client(
+            {
+                "buyermarketplace.php": MARKET_FORM,
+                "index.php": MULTI_NATION_HEADER,
+                "viewnation.php?nation_id=12": NATION_PAGE,
+            },
+            goods=(),
+        )
+        _, _, output = self.reload(settings, client)
+        self.assertEqual(client.alliance_id, 7)
+        self.assertEqual(
+            output,
+            "Settings reloaded: market.goods.\n"
+            "Market preflight passed; watching Oil; alliance is The Best Alliance (#7).\n",
+        )
 
     def test_an_unchanged_watch_list_does_not_re_run_the_preflight(self):
         goods = {"Oil": {"alliance": False}}
@@ -2758,6 +2784,67 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertIn("still polling", self.notifier.failures[0])
         self.assertEqual(output, "")
         self.assertEqual(calls, [])
+
+    def test_a_deleted_file_warns_and_keeps_the_previous_settings(self):
+        # An absent file loads cleanly as the built-in defaults, so without this the deletion
+        # would silently switch every muted category back on, drop the watched goods, and
+        # start writing the state file the user had turned off — under a confirmation line
+        # that reads as though the edit took.
+        settings = self.load(
+            {
+                "alerts": {"news": False},
+                "cache": {"persist_to_file": False},
+                "market": {"goods": {"Oil": {"alliance": False}}},
+            }
+        )
+        self.path.unlink()
+        client, calls = market_client({}, goods=(("Oil", 1),))
+        reloaded, notifier, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertFalse(reloaded.alerts.news)
+        self.assertFalse(reloaded.cache.persist_to_file)
+        self.assertEqual([good.name for good in reloaded.alerts.market_goods], ["Oil"])
+        self.assertEqual(client.market_goods, (("Oil", 1),))
+        self.assertIs(notifier, self.notifier)
+        self.assertEqual(self.built, [])
+        self.assertEqual(calls, [])
+        self.assertEqual(output, "")
+        self.assertEqual(len(self.notifier.failures), 1)
+        self.assertIn(str(self.path), self.notifier.failures[0])
+        self.assertIn("still in force", self.notifier.failures[0])
+        self.assertIn("still polling", self.notifier.failures[0])
+
+    def test_a_monitor_that_never_had_a_settings_file_is_not_warned_about_one(self):
+        # Only the transition matters. A monitor started on the built-in defaults is running
+        # exactly as intended and must not be interrupted every poll for it.
+        settings = load_settings(self.path)
+        self.assertFalse(settings.file_found)
+        client, calls = market_client({}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertIs(reloaded, settings)
+        self.assertEqual(self.notifier.failures, [])
+        self.assertEqual(output, "")
+        self.assertEqual(calls, [])
+
+    def test_a_settings_file_that_appears_later_is_an_ordinary_reload(self):
+        settings = load_settings(self.path)
+        self.write({"alerts": {"news": False}})
+        client, _ = market_client({}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertFalse(reloaded.alerts.news)
+        self.assertEqual(self.notifier.failures, [])
+        self.assertEqual(output, "Settings reloaded: alerts.\n")
+
+    def test_an_empty_object_is_how_you_ask_for_the_defaults(self):
+        # The refusal above cannot block the legitimate case: writing {} reverts everything
+        # to the built-in defaults and is applied like any other edit.
+        settings = self.load({"alerts": {"news": False}})
+        self.write({})
+        client, _ = market_client({}, goods=())
+        reloaded, _, output = self.reload(settings, client)
+        self.assertTrue(reloaded.alerts.news)
+        self.assertEqual(self.notifier.failures, [])
+        self.assertEqual(output, "Settings reloaded: alerts.\n")
 
     def test_a_malformed_file_warns_and_keeps_the_previous_settings(self):
         settings = self.load({"alerts": {"news": False}})
@@ -2823,7 +2910,13 @@ class SettingsReloadTests(unittest.TestCase):
         self.assertEqual(client.fourchan_thread, reloaded.fourchan_thread)
         self.assertEqual(client.fourchan_thread.thread_id, 2)
         self.assertIs(client.initial_fourchan_post, baseline)
-        self.assertEqual(output, "Settings reloaded: fourchan.thread_url.\n")
+        # Adopting post #99 silently decides that everything up to #99 will never alert, so
+        # the reload names the baseline in the same words startup does.
+        self.assertEqual(
+            output,
+            "Settings reloaded: fourchan.thread_url.\n"
+            "4chan thread preflight passed; latest post is #99.\n",
+        )
 
         # The baseline is adopted rather than alerted on: the poll after the swap compares a
         # post from the new thread against a marker from the old one.
@@ -2998,6 +3091,70 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
             self.assertIn("still polling", failure)
         # Polling never stopped: every iteration still read the game.
         self.assertEqual(len(notifiers[1].messages), 3)
+
+    def test_a_deleted_file_warns_and_reverts_nothing(self):
+        # The state file is the visible half of the harm: a silent revert would flip
+        # cache.persist_to_file back on and start writing a file the user had turned off.
+        notifiers = self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            state = Path(directory) / "state.json"
+            path = Path(directory) / "settings.json"
+
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) == 1:
+                    path.unlink()
+                elif len(polls) == 3:
+                    raise KeyboardInterrupt
+
+            _, code = self._run(
+                directory,
+                {"alerts": {"user_messages": False}, "cache": {"persist_to_file": False}},
+                sleep,
+            )
+            state_written = state.exists()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 3)
+        self.assertFalse(state_written)
+        # Polling continued, and the muted category stayed muted rather than reverting.
+        self.assertEqual(notifiers[1].messages, [])
+        self.assertEqual(len(notifiers[1].failures), 2)
+        for failure in notifiers[1].failures:
+            self.assertIn("still in force", failure)
+
+    def test_startup_and_a_reload_name_a_new_thread_baseline_the_same_way(self):
+        # Reload output has to be recognisably the same thing as startup output, so the two
+        # sentences are pinned against each other rather than each on its own.
+        self._record_notifiers()
+
+        class ThreadClient(PollingClient):
+            def _latest_fourchan_post(self):
+                return FourChanPost(
+                    "https://boards.4chan.org/mlp/thread/1", 99, 1, "Anonymous", "hi"
+                )
+
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(stdout):
+
+            def sleep(seconds):
+                del seconds
+                raise KeyboardInterrupt
+
+            self._run(
+                directory,
+                {
+                    "cache": {"persist_to_file": False},
+                    "fourchan": {"thread_url": "https://boards.4chan.org/mlp/thread/1"},
+                },
+                sleep,
+                client=ThreadClient,
+            )
+        self.assertIn(
+            "4chan thread preflight passed; latest post is #99.", stdout.getvalue()
+        )
 
     def test_a_thread_that_archives_while_watched_still_stops_the_monitor(self):
         notifiers = self._record_notifiers()

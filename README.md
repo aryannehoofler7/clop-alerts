@@ -173,15 +173,22 @@ except for `fourchan.thread_url`, which defaults to off because threads archive.
 `--interval` seconds — without restarting anything. Switching a good on, silencing a report, muting a
 category and changing the alert sound are all live edits. Restarting would also throw away the
 in-memory news, report and thread baselines whenever `cache.persist_to_file` is off, which is reason
-enough not to have to. A reload that changed something prints one line naming the sections it
-changed:
+enough not to have to. A reload that changed something names the sections it changed, then repeats
+whatever a re-run preflight resolved, in the same words startup uses:
 
 ```text
 Settings reloaded: alerts, market.goods.
+Market preflight passed; watching Machinery Parts; alliance is Communist Eradication Front (#12).
 ```
 
-A reload that changes nothing prints nothing, and costs nothing beyond reading the file: no rebuilt
-sound, no preflight, no extra requests.
+Those extra lines appear only when that section changed, so a reload says as much as the edit
+deserves and no more. A reload that changes nothing prints nothing, and costs nothing beyond reading
+the file: no rebuilt sound, no preflight, no extra requests.
+
+An edit to a section that is currently muted is not a change, because the live settings do not depend
+on it: with `"market_orders": false`, editing `market.goods` prints nothing and the monitor keeps the
+goods it had. Nothing is lost — switching the mute back off loads the whole current file, new goods
+included — but expect the silence rather than a confirmation.
 
 **A reload is applied in full or not at all.** If the file cannot be read, cannot be parsed, fails
 validation, or names something that cannot be brought into service — a good the game does not have, a
@@ -192,6 +199,14 @@ file that loaded cleanly, whole. The warning repeats on every poll for as long a
 broken, because a monitor running on settings you think you replaced is worth interrupting more than
 once. A broken file at *startup* is still fatal, because there are no previous settings to fall back
 on.
+
+**Deleting the file while the monitor runs is refused the same way.** An absent `settings.json` means
+"use the built-in defaults" at startup, but mid-run the same reading would silently switch every muted
+category back on, drop your watched goods, turn the 4chan thread off, and start writing the state file
+you had disabled. A file that disappears under a running monitor is much more likely a rename to
+`settings.json.bak` while you experiment than a request to revert everything, so the monitor warns and
+carries on with the settings it had. To go back to the defaults on purpose, put an empty object `{}`
+in the file rather than deleting it; that is an ordinary edit and is applied like any other.
 
 **What still needs a restart:** the command-line arguments — `--interval`, `--state`, `--settings`,
 `--base-url` and the rest — are process arguments rather than settings, and the credentials in `.env`
@@ -287,7 +302,9 @@ duplicate API request.
 
 Changing `thread_url` while the monitor is running runs that same check again and adopts the new
 thread's current last post as the baseline, so a swap does not alert for a post that was already
-there. Setting it to `null` stops watching and issues no further requests. The two archived cases are
+there. It prints that post's number in the same words startup does, because adopting post #N is also
+a decision that posts up to #N will never alert. Setting `thread_url` to `null` stops watching and
+issues no further requests. The two archived cases are
 deliberately different. A thread that archives **while you are watching it** stops the monitor, as it
 always has: that is the game telling the watch its job is over. A thread that is *already* archived
 when you name it mid-run is a refused reload instead — the monitor warns, keeps the thread it had,
@@ -455,8 +472,8 @@ marks your alliance messages as read as a side effect, which would break the all
 the monitor already does. Your own `alliance_id` is resolved by the market preflight and kept until
 something re-runs it. The preflight runs at startup and again whenever a reload changes the watched
 goods, so if you join or leave an alliance while the monitor is running, edit `market.goods` — switch
-a good on or off — and the next poll re-resolves it. Leaving the file alone leaves the id as startup
-resolved it.
+a good on or off — and the next poll re-resolves it and prints the same `Market preflight passed`
+line startup does, naming what it found. Leaving the file alone leaves the id as startup resolved it.
 
 Also at startup, every watched good name is resolved against the game's own list of tradeable goods.
 **A name that is not a tradeable good stops the monitor and names the offending entry**, rather than
@@ -487,7 +504,9 @@ Two kinds of failure, distinguished by what the dialog says:
     unreadable, no credentials were supplied, or the configured 4chan thread is already archived at
     startup. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.)
     All of these are startup-only: once the monitor is running, the same broken `settings.json` is a
-    refused reload rather than a stop, because there are previous settings to fall back on.
+    refused reload rather than a stop, because there are previous settings to fall back on. The
+    absent file flips the other way for the same reason — harmless at startup, a refused reload
+    once there are settings it would silently revert.
   - **Exit 1:** the state file `.state/clop-monitor.json` is unreadable or corrupt (delete it — the
     next run rebuilds it, at the cost of re-alerting on the newest news and report), **the login was
     rejected**, the startup market preflight failed — a watched good that is not a tradeable good, or

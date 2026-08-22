@@ -41,11 +41,19 @@ settings are still in force. It re-warns on each poll while the file stays broke
 existing deliberate repetition for a poll that keeps failing: a monitor running on settings you
 think you replaced is worth interrupting more than once.
 
-### A successful reload is a terminal line
+### A successful reload is terminal output, not a dialog
 
-A reload that changes something prints one line naming what changed. It is a confirmation, not a
-warning, so it does not raise a dialog — popups stay reserved for things that are wrong. A reload
-that changes nothing prints nothing.
+A reload that changes something names the sections it changed. Where a section's setup actually ran,
+what it resolved follows, in the words startup already uses: `market_preflight`'s line naming the
+goods and the alliance it found, then the newly adopted 4chan baseline post. Those two are decisions
+the reader can see nowhere else — the resolved alliance is the entire point of re-running the
+preflight after joining or leaving one, and adopting post #N silently decides that every post up to
+#N will never alert — and each appears at most once per deliberate edit. Sharing the exact startup
+strings is deliberate: reload output should be recognisably the same thing as startup output rather
+than a second set of sentences that drifts away from it.
+
+A reload that changes nothing prints nothing. None of this raises a dialog: it is a confirmation
+rather than a warning, and popups stay reserved for things that are wrong.
 
 ### Change detection gates the setup
 
@@ -80,6 +88,25 @@ an overnight run.
 `current.fourchan_post.thread_url == previous.fourchan_post.thread_url`, so a changed thread cannot
 produce a bogus "new post" alert from the old thread's marker.
 
+### A file that disappears is a refused reload
+
+An absent settings file loads cleanly as the built-in defaults, which is what lets a clone that has
+never been configured run at all. Mid-run the same read is a silent revert: every muted category back
+on, the watched goods gone, the 4chan thread off, and `cache.persist_to_file` flipping back to true
+so the monitor starts writing a state file the user had deliberately disabled — all of it under a
+confirmation line reading as though the edit took.
+
+So `file_found` going true → false is refused like any other bad reload: warn through the dialog
+naming the missing path, keep the previous settings whole, keep polling. A file vanishing under a
+running monitor is far more likely a rename to `settings.json.bak` while experimenting, or a reload
+landing inside a non-atomic editor save, than a deliberate request for the defaults. Refusing it
+cannot break the deliberate case either, because writing `{}` still asks for the defaults and is
+applied like any other edit.
+
+`file_found` stays out of the general comparison, where it does not belong: it describes the file
+rather than what the monitor is doing, and comparing it would make a user who writes an explicit
+value where one had been defaulting look like a change. Only the transition is special.
+
 ### What is not reloaded
 
 `--interval`, `--state`, `--settings`, `--base-url` and the other command-line arguments are process
@@ -108,7 +135,11 @@ startup.
   in force rather than half-applying;
 - a swapped 4chan thread re-runs the preflight and establishes a baseline without alerting;
 - a newly configured but already-archived thread is a rejected reload, not a fatal stop;
-- a thread that archives while being watched is still fatal.
+- a thread that archives while being watched is still fatal;
+- a re-run preflight names the goods and the alliance it resolved, and a swapped thread names the
+  post it baselined, in the same words startup uses;
+- a deleted file warns, keeps the previous settings whole, and keeps polling, while a monitor that
+  never had a settings file is not warned about one and a file that appears later reloads normally.
 
 ## Rejected
 

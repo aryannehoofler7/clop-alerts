@@ -942,6 +942,16 @@ class FourChanPost:
         }
 
 
+def fourchan_preflight_message(post: FourChanPost) -> str:
+    """What startup and a mid-run thread swap both say about a newly adopted baseline.
+
+    Adopting post #N silently decides that every post up to #N will never alert, so the
+    number is worth stating either way. Shared between the two paths so that reload output is
+    recognisably the same thing as startup output rather than a second sentence that drifts.
+    """
+    return f"4chan thread preflight passed; latest post is #{post.number}."
+
+
 @dataclass(frozen=True)
 class Snapshot:
     user_messages: int
@@ -1721,6 +1731,22 @@ def reload_settings(
         )
         return settings, notifier
 
+    # An absent file loads cleanly as the built-in defaults, which is right at startup and
+    # wrong here: a file that vanishes under a running monitor would switch every muted
+    # category back on, drop the watched goods, and start writing the state file that
+    # cache.persist_to_file had turned off — all under a confirmation line reading as though
+    # the edit took. Mid-run that is far more likely a rename to settings.json.bak, or a
+    # reload landing inside a non-atomic editor save, than a deliberate "revert everything",
+    # and refusing it costs the deliberate case nothing: writing {} still asks for defaults.
+    if settings.file_found and not reloaded.file_found:
+        notifier.notify_failure(
+            f"The settings file has disappeared: there is no file at {path}\n\n"
+            "The previous settings are still in force and the monitor is still polling. "
+            "To go back to the built-in defaults on purpose, put an empty JSON object ({}) "
+            "in the file instead of deleting it."
+        )
+        return settings, notifier
+
     changes = settings_changes(settings, reloaded)
     # An untouched file costs this read and nothing else: no preflight, no request, no
     # rebuilt notifier, no output.
@@ -1733,6 +1759,7 @@ def reload_settings(
     thread_changed = "fourchan.thread_url" in changes
     goods = goods_to_watch(reloaded.alerts)
     fourchan_post: Optional[FourChanPost] = None
+    market_message: Optional[str] = None
     try:
         if thread_changed and reloaded.fourchan_thread is not None:
             fourchan_post = ClopClient(
@@ -1740,12 +1767,11 @@ def reload_settings(
             )._latest_fourchan_post()
         if "market.goods" in changes:
             if goods:
-                client.market_preflight(goods)
+                market_message = client.market_preflight(goods)
             else:
-                # market_preflight returns early with nothing to resolve, leaving these
-                # fields as they were. That is right for a startup that never set them, but
-                # a reload that emptied the watch list has to clear them or the monitor keeps
-                # POSTing once a poll for goods nobody is watching any more.
+                # market_preflight returns early with nothing to resolve, so it leaves these
+                # fields as it found them; a reload that emptied the watch list has to clear
+                # them or the monitor keeps POSTing once a poll for goods nobody watches.
                 client.market_goods = ()
                 client.alliance_id = None
     except MonitorError as error:
@@ -1766,9 +1792,15 @@ def reload_settings(
         client.initial_fourchan_post = fourchan_post
     if reloaded.sound != settings.sound:
         notifier = build_notifier(reloaded.sound)
-    # A confirmation rather than a warning, so it stays a terminal line: popups are reserved
-    # for things that are wrong.
+    # A confirmation rather than a warning, so it stays terminal output: popups are reserved
+    # for things that are wrong. What a preflight resolved follows in the words startup uses,
+    # because the alliance it found and the post it baselined are decisions the reader cannot
+    # see anywhere else, and they only appear on a reload that changed that section.
     print("Settings reloaded: " + ", ".join(changes) + ".", flush=True)
+    if market_message is not None:
+        print(market_message, flush=True)
+    if fourchan_post is not None:
+        print(fourchan_preflight_message(fourchan_post), flush=True)
     return reloaded, notifier
 
 
@@ -1862,10 +1894,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except MonitorError as error:
             return report_fatal(notifier, str(error), 2)
         assert initial_fourchan_post is not None
-        print(
-            f"4chan thread preflight passed; latest post is #{initial_fourchan_post.number}.",
-            flush=True,
-        )
+        print(fourchan_preflight_message(initial_fourchan_post), flush=True)
 
     username = (
         args.username
