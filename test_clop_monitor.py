@@ -1582,5 +1582,85 @@ class RelationLabelTests(unittest.TestCase):
         self.assertEqual(self.label(is_enemy=True), "enemy")
 
 
+MARKET_FORM = """
+<form action="buyermarketplace.php" method="post" class="form-inline">
+  <input type="hidden" name="token_buyermarketplace" value="abc123"/>
+  <input type="hidden" name="mode" value=""/>
+  <select name="resource_id" class="form-control">
+    <option value=""></option>
+    <option value="3">Apples</option>
+    <option value="10" selected >Machinery Parts (Have 5)</option>
+    <option value="1">Oil</option>
+  </select>
+</form>
+"""
+
+MULTI_NATION_HEADER = """
+<li><a><form action="" method="post"><select name="switchnation_id">
+<option value="11">First Nation</option>
+<option value="12" selected >Second Nation</option>
+</select></form></a></li>
+"""
+
+EMPIRE_OVERVIEW = """
+<table><tr>
+<td><form action="overview.php" method="post">
+<button name="switchnation_id" type="submit" value="12">Only Nation</button></form></td>
+</tr></table>
+"""
+
+NATION_PAGE = """
+<center><h4>Alliance:
+<a href="viewalliance.php?alliance_id=7">The Best Alliance</a></h4></center>
+"""
+
+ALLIANCE_PAGE = """
+<table>
+<tr><td><a href="viewuser.php?user_id=1">somepony</a></td>
+<td><a href="viewnation.php?nation_id=12">Mine (<img src="x.png"/>Zebrica)</a>
+<a href="viewnation.php?nation_id=13">Also Mine (<img src="x.png"/>Zebrica)</a></td></tr>
+<tr><td><a href="viewuser.php?user_id=2">otherpony</a></td>
+<td><a href="viewnation.php?nation_id=42">Theirs (<img src="x.png"/>Burrozil)</a></td></tr>
+</table>
+"""
+
+
+class MarketFormParsingTests(unittest.TestCase):
+    def test_the_csrf_token_is_read_from_the_hidden_field(self):
+        self.assertEqual(
+            clop_monitor.parse_hidden_field(MARKET_FORM, "token_buyermarketplace"), "abc123"
+        )
+
+    def test_an_absent_hidden_field_is_none(self):
+        self.assertIsNone(clop_monitor.parse_hidden_field(MARKET_FORM, "token_absent"))
+
+    def test_good_names_map_to_resource_ids_without_the_have_suffix(self):
+        self.assertEqual(
+            clop_monitor.parse_good_ids(MARKET_FORM),
+            {"Apples": 3, "Machinery Parts": 10, "Oil": 1},
+        )
+
+    def test_the_current_nation_comes_from_the_selected_header_option(self):
+        self.assertEqual(clop_monitor.parse_current_nation_id(MULTI_NATION_HEADER), 12)
+
+    def test_a_header_without_a_switcher_has_no_nation_id(self):
+        self.assertIsNone(clop_monitor.parse_current_nation_id(AUTHENTICATED_HEADER))
+
+    def test_the_empire_overview_lists_every_nation_button(self):
+        self.assertEqual(clop_monitor.parse_empire_nation_ids(EMPIRE_OVERVIEW), [12])
+
+    def test_a_nation_page_yields_its_alliance_id(self):
+        self.assertEqual(clop_monitor.parse_alliance_id(NATION_PAGE), 7)
+
+    def test_a_nation_page_without_an_alliance_link_yields_none(self):
+        self.assertIsNone(clop_monitor.parse_alliance_id("<h4>Alliance: none</h4>"))
+
+    def test_the_alliance_page_yields_every_member_nation(self):
+        self.assertEqual(
+            clop_monitor.parse_alliance_nation_ids(ALLIANCE_PAGE),
+            frozenset({12, 13, 42}),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

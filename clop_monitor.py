@@ -630,6 +630,147 @@ def parse_market_orders(
     return orders
 
 
+class HiddenFieldParser(HTMLParser):
+    """The value of the first input with a given name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.name = name.lower()
+        self.value: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        if tag.lower() != "input" or self.value is not None:
+            return
+        attributes = dict(attrs)
+        if (attributes.get("name") or "").lower() == self.name:
+            self.value = attributes.get("value") or ""
+
+
+def parse_hidden_field(html: str, name: str) -> Optional[str]:
+    parser = HiddenFieldParser(name)
+    parser.feed(html)
+    return parser.value
+
+
+class SelectOptionParser(HTMLParser):
+    """The options of one named select, each with its value, text, and selected flag."""
+
+    def __init__(self, select_name: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.select_name = select_name.lower()
+        self.options: List[Tuple[str, str, bool]] = []
+        self._active = False
+        self._value: Optional[str] = None
+        self._selected = False
+        self._parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        attributes = dict(attrs)
+        if tag == "select":
+            self._active = (attributes.get("name") or "").lower() == self.select_name
+        elif tag == "option" and self._active:
+            self._value = attributes.get("value") or ""
+            self._selected = "selected" in attributes
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._value is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "option" and self._value is not None:
+            self.options.append((self._value, normalize_text(self._parts), self._selected))
+            self._value = None
+        elif tag == "select":
+            self._active = False
+
+
+def parse_select_options(html: str, select_name: str) -> List[Tuple[str, str, bool]]:
+    parser = SelectOptionParser(select_name)
+    parser.feed(html)
+    return parser.options
+
+
+def parse_good_ids(html: str) -> Dict[str, int]:
+    """Good name to resource_id, from the buyer's-marketplace selector.
+
+    The option text carries a "(Have N)" suffix for a good you hold some of, because
+    backend_buyermarketplace.php builds the option label that way; it is stripped so the
+    settings can name goods the way the game does.
+    """
+    goods: Dict[str, int] = {}
+    for value, text, _ in parse_select_options(html, "resource_id"):
+        name = HAVE_SUFFIX_RE.sub("", text).strip()
+        if value.isdigit() and name:
+            goods[name] = int(value)
+    return goods
+
+
+def parse_current_nation_id(html: str) -> Optional[int]:
+    """The active nation, from the header's nation switcher.
+
+    header.php renders that switcher only for an account with more than one nation, so a
+    single-nation account yields None and the id has to come from the empire overview.
+    """
+    for value, _, selected in parse_select_options(html, "switchnation_id"):
+        if selected and value.isdigit():
+            return int(value)
+    return None
+
+
+class ButtonValueParser(HTMLParser):
+    """The values of every button with a given name."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.name = name.lower()
+        self.values: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        if tag.lower() != "button":
+            return
+        attributes = dict(attrs)
+        if (attributes.get("name") or "").lower() == self.name:
+            self.values.append(attributes.get("value") or "")
+
+
+def parse_empire_nation_ids(html: str) -> List[int]:
+    """Every nation on the account, from the empire overview's switch buttons."""
+    parser = ButtonValueParser("switchnation_id")
+    parser.feed(html)
+    return [int(value) for value in parser.values if value.isdigit()]
+
+
+def parse_alliance_id(html: str) -> Optional[int]:
+    """The alliance linked from a nation page, or None when there is no such link."""
+    parser = LinkTextParser()
+    parser.feed(html)
+    for href, _ in parser.links:
+        if _path_from_href(href) != "viewalliance.php":
+            continue
+        values = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query).get("alliance_id")
+        if values and values[0].isdigit():
+            return int(values[0])
+    return None
+
+
+def parse_alliance_nation_ids(html: str) -> FrozenSet[int]:
+    """Every member nation on an alliance page.
+
+    viewalliance.php links a nation only from its member table, so every viewnation link on
+    the page is a member of that alliance.
+    """
+    parser = LinkTextParser()
+    parser.feed(html)
+    return frozenset(
+        nation_id
+        for href, _ in parser.links
+        if (nation_id := nation_id_from_href(href)) is not None
+    )
+
+
 class FourChanCommentParser(HTMLParser):
     """Turn a 4chan API comment fragment into compact plain text."""
 
