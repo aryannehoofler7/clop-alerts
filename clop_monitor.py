@@ -166,6 +166,10 @@ def parse_fourchan_thread_url(url: str) -> FourChanThreadSettings:
     return FourChanThreadSettings(page_url, api_url, board, thread_id)
 
 
+#: The only settings a market good may carry; anything else is a typo the loader rejects.
+MARKET_GOOD_KNOBS = frozenset({"friends", "alliance", "always", "never"})
+
+
 def market_boolean_setting(section: Dict[str, object], good: str, name: str) -> bool:
     result = section.get(name, True)
     if not isinstance(result, bool):
@@ -314,6 +318,7 @@ def load_settings(path: Path) -> MonitorSettings:
             raise MonitorError(
                 "Setting market.goods must be a JSON object keyed by good name"
             )
+        watched_names: Dict[str, str] = {}
         for raw_name, raw_good in raw_goods.items():
             name = raw_name.strip()
             # JSON has no comments, so a leading # switches a good off where you can still
@@ -325,6 +330,22 @@ def load_settings(path: Path) -> MonitorSettings:
             if not isinstance(raw_good, dict):
                 raise MonitorError(
                     f"Settings for market good {name!r} must be a JSON object"
+                )
+            # Two spellings of one good would mean two marketplace lookups and two alerts a
+            # poll, from a file that looks fine; say which keys clash rather than pick one.
+            clash = watched_names.get(name.casefold())
+            if clash is not None:
+                raise MonitorError(
+                    f"Market goods {clash!r} and {name!r} differ only by capitalisation; "
+                    "keep whichever one you want and delete the other"
+                )
+            watched_names[name.casefold()] = name
+            unknown = sorted(set(raw_good) - MARKET_GOOD_KNOBS)
+            if unknown:
+                raise MonitorError(
+                    f"Market good {name!r} has unknown settings "
+                    f"{', '.join(unknown)}; valid settings are "
+                    f"{', '.join(sorted(MARKET_GOOD_KNOBS))}"
                 )
             market_goods.append(
                 WatchedGood(

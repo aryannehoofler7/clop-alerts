@@ -1319,6 +1319,45 @@ class MarketSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(MonitorError, "market.goods"):
             self.load({"goods": ["Oil"]})
 
+    def test_a_whitespace_only_good_key_is_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "market.goods"):
+            self.load({"goods": {"   ": {}}})
+
+    def test_a_non_object_market_section_is_rejected(self):
+        for market in [None, ["Oil"], "Oil"]:
+            with self.subTest(market=market):
+                with self.assertRaisesRegex(MonitorError, "market"):
+                    self.load(market)
+
+    def test_a_commented_out_never_name_is_dropped(self):
+        settings = self.load({"goods": {"Oil": {"never": ["# Sombra", "Luna Sueno"]}}})
+        self.assertEqual(settings.alerts.market_goods[0].never, ("Luna Sueno",))
+
+    def test_name_overrides_that_are_entirely_commented_out_are_empty(self):
+        settings = self.load(
+            {"goods": {"Oil": {"always": ["# Luna Sueno"], "never": ["# Sombra"]}}}
+        )
+        self.assertEqual(settings.alerts.market_goods[0].always, ())
+        self.assertEqual(settings.alerts.market_goods[0].never, ())
+
+    def test_a_misspelled_knob_is_rejected_rather_than_silently_ignored(self):
+        # Ignoring it would silently mean friends=True, the opposite of what was written,
+        # with nothing in the file to show why the alerts keep coming.
+        with self.assertRaisesRegex(MonitorError, "freinds"):
+            self.load({"goods": {"Oil": {"freinds": False}}})
+
+    def test_an_unknown_knob_is_rejected_by_naming_the_valid_ones(self):
+        with self.assertRaisesRegex(MonitorError, "alliance, always, friends, never"):
+            self.load({"goods": {"Oil": {"freinds": False}}})
+
+    def test_two_good_keys_differing_only_by_case_are_rejected(self):
+        with self.assertRaisesRegex(MonitorError, "'Oil'.*'oil'"):
+            self.load({"goods": {"Oil": {}, "oil": {}}})
+
+    def test_a_commented_out_good_does_not_collide_with_the_watched_one(self):
+        settings = self.load({"goods": {"# Oil": {}, "Oil": {}}})
+        self.assertEqual([good.name for good in settings.alerts.market_goods], ["Oil"])
+
     def test_an_absent_market_section_is_reported_as_a_default(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
