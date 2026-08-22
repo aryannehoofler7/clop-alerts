@@ -9,6 +9,8 @@ This is a small, read-only monitor for the hosted game at `https://4clop.org`. I
   older rows, the random banner, server clock, and countdown;
 - reads every report on the page and judges each one that is newer than the last it saw, caching
   only the newest as its marker;
+- watches the buyer's marketplace for each good you switch on, and alerts while any friend or
+  alliance member has a pending buy order for it;
 - saves the last observed counts, newest news entry, newest report, and configured 4chan post in
   `.state/clop-monitor.json`;
 - alerts in the terminal, opens a persistent Windows dialog, and can optionally call a webhook.
@@ -115,7 +117,8 @@ choose alert categories and sound behaviour:
     "user_messages": true,
     "alliance_messages": true,
     "news": true,
-    "reports": true
+    "reports": true,
+    "market_orders": true
   },
   "sound": {
     "wav_path": "sounds/twilight-clock-is-ticking.wav",
@@ -134,12 +137,23 @@ choose alert categories and sound behaviour:
       "# Build % completed successfully."
     ]
   },
+  "market": {
+    "goods": {
+      "# Machinery Parts": {"friends": true, "alliance": true, "always": [], "never": []},
+      "# Oil":             {"friends": true, "alliance": true, "always": [], "never": []},
+      "# Pies":            {"friends": true, "alliance": true, "always": [], "never": []}
+    }
+  },
   "fourchan": {
     "thread_url": "https://boards.4chan.org/mlp/thread/43454282/clop-financial-crisis-edition",
     "_thread_url_help": "Set thread_url to null or remove the fourchan section to disable thread monitoring."
   }
 }
 ```
+
+The `market` section is abbreviated above: the real `settings.example.json` lists all 28 tradeable
+goods, every one of them commented out. See
+[Watching the buyer's marketplace](#watching-the-buyers-marketplace).
 
 **The file is optional and every key in it is optional.** `settings.json` is git-ignored: only the
 example above is tracked, so an update can never overwrite your copy and you never have to merge one.
@@ -155,9 +169,11 @@ A file that sets everything prints neither line. When a later version of the mon
 that one new name appears in the first line until you set it yourself. The defaults match the example
 except for `fourchan.thread_url`, which defaults to off because threads archive.
 
-All four alert categories default to enabled. A disabled category is still read and, when file
+All five alert categories default to enabled. A disabled category is still read and, when file
 persistence is enabled, included in the saved snapshot; it does not produce a terminal message,
-popup, sound, or webhook call.
+popup, sound, or webhook call. `market_orders` is the one exception: disabling it stops the market
+work rather than discarding its result, because that work costs a request per watched good on every
+poll.
 
 ### Ignoring routine reports
 
@@ -272,6 +288,121 @@ the dialog and this pause.
 
 The monitor automatically logs in again if the hosted session expires. Stop it with `Ctrl+C`.
 
+### Watching the buyer's marketplace
+
+A friend or alliance member who posts a buy order for a good you are sitting on is an opportunity
+that ends the moment someone else fills it, and nothing in the game tells you about it. The
+`market` section watches the buyer's marketplace for the goods you choose and alerts while such an
+order is pending.
+
+All 28 tradeable goods — the 16 goods and the 12 DNA strains — ship in the settings example, and
+**every one of them ships commented out**, so the monitor watches nothing until you say so. This is
+the same convention as [`reports.ignore`](#ignoring-routine-reports): a key starting with `#` is
+switched off, and you switch a good on by deleting those two characters from its key.
+
+```json
+"market": {
+  "goods": {
+    "Machinery Parts":   {"friends": true, "alliance": true, "always": [], "never": []},
+    "# Oil":             {"friends": true, "alliance": true, "always": [], "never": []}
+  }
+}
+```
+
+That file watches Machinery Parts and leaves Oil switched off. At startup the monitor names what it
+resolved:
+
+```text
+Market preflight passed; watching Machinery Parts; alliance is Communist Eradication Front (#12).
+```
+
+and every poll that finds matching orders produces one block of text per good, along these lines:
+
+```text
+Buy orders for Machinery Parts:
+  Green Mountain Republic (alliance) wants 5 at 1,000 bits each
+  Fish Bucket (alliance) wants 35 at 1,000 bits each
+https://4clop.org/buyermarketplace.php
+```
+
+Each buyer is labelled with every relation that is true of them, so a buyer who is both reads
+`(friend, alliance)`, an enemy reads `(enemy)`, and a buyer with no relation to you at all — which
+only ever appears through an `always` pattern, below — reads `(no relation)`.
+
+#### Who counts as worth alerting on
+
+`friends` alerts on a buyer on your friends list, whom the game paints blue. `alliance` alerts on a
+buyer in your alliance, whom the game paints green. Both default to `true`.
+
+**They are two separate, independent checks, and a buyer who is both satisfies either one.**
+Switching `friends` off does not hide an ally you have also friended. That independence is the
+reason the monitor looks up your alliance's member list instead of simply reading the game's
+colours: the game paints only one colour per buyer and tests friendship before alliance, so a buyer
+who is both a friend and an ally renders blue and nothing else. Reading the colour alone would have
+meant that `"friends": false, "alliance": true` silently skipped that buyer — precisely the buyer
+that setting exists to catch. So the monitor reads the roster separately and decides alliance
+membership by nation, which is exact whatever colour the row happens to be.
+
+`always` and `never` are lists of nation-name patterns that override both checks. They are matched
+by exactly the same rule as report ignore patterns: matching **ignores case**, a pattern matches
+**anywhere** in the name, `%` stands for **any run of characters**, everything else is literal, and
+an entry starting with `#` is switched off.
+
+`never` beats `always`, and `always` beats both relation checks. So a nation named in `always`
+alerts even when it is your enemy, and both checks switched off with a populated `always` reads as
+"only these nations, whoever they are":
+
+```json
+"Oil": {"friends": false, "alliance": false, "always": ["Luna Sueno", "Fish %"], "never": []}
+```
+
+Two consequences of that matching rule are worth saying out loud, because they are harmless in
+report text and surprising in a nation name:
+
+- `"always": ["%"]` matches every name, so it alerts on **every** buyer of that good, strangers and
+  enemies included. `never` still wins over it.
+- Patterns match a substring, not a whole name, so `"never": ["Luna"]` also silences a nation called
+  `Lunar Empire`.
+
+A knob the monitor does not recognise — `friend` for `friends`, say — stops it at startup rather
+than being quietly ignored, since a misspelled knob would otherwise fall back to its default and do
+the opposite of what you wrote. Two goods whose keys differ only in capitalisation are refused the
+same way.
+
+#### When it alerts, and what it costs
+
+Unlike news and reports, **a market alert repeats on every poll for as long as the order is
+pending**. A standing buy order is a current fact rather than an event, and one you were told about
+once yesterday is one you have forgotten; this is the same reasoning as the unread-message counts,
+which also alert every poll while they are nonzero. Nothing about market orders is written to
+`.state/`, so deleting that folder changes nothing here, and a restart re-alerts on whatever is
+still pending.
+
+Watching costs requests. Each poll makes one GET of `buyermarketplace.php` to pick up its rotating
+form token, then one POST per watched good — the order table exists only in response to a POST —
+plus one GET for the alliance roster, which is re-read every poll because members join and leave.
+Switching all 28 goods on is therefore about 30 requests every poll, which is worth knowing before
+you do it at the default 60-second interval. Nothing watched means no market requests at all, and
+the roster is skipped when no watched good sets `"alliance": true`.
+
+Setting `"market_orders": false` under `alerts` mutes the whole feature in one edit, without
+re-commenting the goods you had switched on. Muting stops the work rather than the alerts: no
+startup preflight, no roster, no market requests.
+
+#### What it reads, and what it checks at startup
+
+The roster comes from `viewalliance.php`, never from `myalliance.php`. Loading `myalliance.php`
+marks your alliance messages as read as a side effect, which would break the alliance-message alerts
+the monitor already does. Your own `alliance_id` is resolved once, at startup, and kept for the
+lifetime of the process: if you join or leave an alliance while the monitor is running, restart it.
+
+Also at startup, every watched good name is resolved against the game's own list of tradeable goods.
+**A name that is not a tradeable good stops the monitor and names the offending entry**, rather than
+leaving you watching nothing while everything looks fine. Names are matched case-insensitively, so
+`machinery parts` resolves to Machinery Parts; the preflight line then reports the game's spelling.
+If the nation has no alliance, the preflight says so and carries on — the alliance check simply never
+matches.
+
 ## Failures
 
 A failure is never terminal-only. Anything that goes wrong raises the same blocking dialog as an
@@ -284,10 +415,14 @@ Two kinds of failure, distinguished by what the dialog says:
 - **The monitor has stopped and is no longer polling.** It cannot continue: the configured 4chan
   thread is archived (at startup or while running), the login was rejected, `settings.json` exists
   but is unreadable or malformed, the environment file is unreadable, or no credentials were
-  supplied. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.) Exit code is 2 for a startup
-  failure and 1 for one that ends a running monitor.
+  supplied. (An *absent* `settings.json` is not a failure; the monitor uses its built-in defaults.)
+  The market preflight also stops it: a watched good that is not a tradeable good, or an account
+  whose active nation could not be identified. Exit code is 2 for a startup
+  failure and 1 for one that ends a running monitor. The market preflight needs a logged-in session,
+  so it runs after login and its failures exit **1** rather than 2.
 - **The monitor is still running and retries in N seconds.** One check failed — the site was
-  unreachable, or a page could not be parsed — and polling resumes on the normal interval after you
+  unreachable, a page could not be parsed, or the buyer's marketplace did not return the order table
+  for a watched good — and polling resumes on the normal interval after you
   dismiss the dialog. A failure that persists alerts again on the next check; that repetition is
   deliberate, because a check that keeps failing is a monitor that is not working.
 
