@@ -24,7 +24,7 @@ from clop_monitor import (
     check_and_notify,
     main,
     parse_report_rows,
-    report_is_ignored,
+    surviving_report_lines,
     settings_startup_message,
     load_settings,
     load_env_file,
@@ -41,6 +41,11 @@ from clop_monitor import (
 def shipped_example():
     """The tracked settings.example.json, parsed."""
     return json.loads(Path("settings.example.json").read_text(encoding="utf-8-sig"))
+
+
+def report_is_ignored(message, patterns):
+    """Whether the report raises no alert, which is now "no line of it survived"."""
+    return not surviving_report_lines(message, patterns)
 
 
 AUTHENTICATED_HEADER = """
@@ -1077,6 +1082,149 @@ class ReportRowParsingTests(unittest.TestCase):
                 ("Older report", "2026-08-16 04:05:06"),
             ],
         )
+
+
+class PerLineReportJudgingTests(unittest.TestCase):
+    """reports.ignore judges each line of a report, and the alert shows the survivors."""
+
+    @staticmethod
+    def alerts(message, patterns, posted="2026-08-17 08:01:00"):
+        previous = Snapshot(
+            0,
+            0,
+            None,
+            latest_report=("Older", "2026-08-17 08:00:00"),
+            reports_checked=True,
+            report_rows=(("Older", "2026-08-17 08:00:00"),),
+        )
+        current = Snapshot(
+            0,
+            0,
+            None,
+            latest_report=(message, posted),
+            reports_checked=True,
+            report_rows=((message, posted), ("Older", "2026-08-17 08:00:00")),
+        )
+        return build_alerts(
+            previous, current, AlertCategorySettings(report_ignore=tuple(patterns))
+        )
+
+    def test_a_report_whose_every_line_matches_is_silent(self):
+        message = (
+            "You spent 20 Machinery Parts.\n"
+            "You paid 50,000 bits.\n"
+            "Build Advanced Factory completed successfully."
+        )
+        self.assertEqual(
+            self.alerts(
+                message,
+                ["You spent % %.", "You paid % bits.", "% completed successfully."],
+            ),
+            [],
+        )
+
+    def test_only_the_surviving_line_is_alerted(self):
+        message = (
+            "You gained 5 Oil from your 1 Basic Oil Well.\n"
+            "You couldn't pay the upkeep for your First Cavalry and it's gone!\n"
+            "Change in Satisfaction: -2"
+        )
+        alerts = self.alerts(message, ["You gained % %.", "Change in Satisfaction:"])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn(
+            "New CLOP report (2026-08-17 08:01:00): "
+            "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+            alerts[0],
+        )
+        self.assertNotIn("You gained 5 Oil", alerts[0])
+        self.assertNotIn("Change in Satisfaction", alerts[0])
+
+    def test_several_survivors_are_alerted_one_per_line(self):
+        message = "Routine.\nFirst warning!\nRoutine.\nSecond warning!"
+        alerts = self.alerts(message, ["Routine."])
+        self.assertIn("First warning!\nSecond warning!", alerts[0])
+
+    def test_no_patterns_alerts_the_whole_report(self):
+        alerts = self.alerts("Line one.\nLine two.", [])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Line one.\nLine two.", alerts[0])
+
+    def test_a_pattern_cannot_reach_across_a_line_break(self):
+        # Whole-report matching would have found this, because the report was one string.
+        self.assertEqual(
+            len(self.alerts("You paid\n50,000 bits.", ["You paid 50,000 bits."])), 1
+        )
+
+    def test_the_length_cap_applies_to_the_survivors(self):
+        message = "\n".join(["Routine."] * 200 + ["Warning!"])
+        alerts = self.alerts(message, ["Routine."])
+        self.assertIn(": Warning!\n", alerts[0])
+        self.assertNotIn("...", alerts[0])
+
+
+class UpgradedMarkerTests(unittest.TestCase):
+    """A marker saved before reports kept their lines must not replay the reports it marks.
+
+    The saved message is the old flattened form, so it is no longer on the page under that
+    text and the identity match cannot find it. Nothing was migrated, so this is the whole
+    upgrade path and it is checked rather than assumed: getting it wrong means a burst of
+    stale alerts the first time an upgraded monitor polls.
+    """
+
+    FLATTENED = "Show Details Hide Details You gained 5 Oil from your 1 Basic Oil Well. Change in Satisfaction: -2"
+
+    def saved_marker(self):
+        """The marker as an older version wrote it, read back through the state file."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "user_messages": 0,
+                        "alliance_messages": 0,
+                        "latest_news": None,
+                        "latest_report": {
+                            "message": self.FLATTENED,
+                            "posted": "2026-08-17 08:00:00",
+                        },
+                        "reports_checked": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return load_snapshot(path)
+
+    def current(self, rows):
+        return Snapshot(
+            0,
+            0,
+            None,
+            latest_report=rows[0],
+            reports_checked=True,
+            report_rows=tuple(rows),
+        )
+
+    def test_the_report_the_old_marker_names_does_not_alert_again(self):
+        multiline = self.FLATTENED.replace(" Hide", "\nHide").replace(
+            "Details You", "Details\nYou"
+        ).replace(" Change", "\nChange")
+        alerts = build_alerts(
+            self.saved_marker(), self.current([(multiline, "2026-08-17 08:00:00")])
+        )
+        self.assertEqual(alerts, [])
+
+    def test_a_report_written_after_the_old_marker_still_alerts(self):
+        alerts = build_alerts(
+            self.saved_marker(),
+            self.current(
+                [
+                    ("Newer report", "2026-08-17 08:02:00"),
+                    ("Marked report, reparsed", "2026-08-17 08:00:00"),
+                ]
+            ),
+        )
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("Newer report", alerts[0])
 
 
 class ReportLineParsingTests(unittest.TestCase):

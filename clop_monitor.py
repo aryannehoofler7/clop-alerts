@@ -960,14 +960,20 @@ def matches_any_pattern(text: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def report_is_ignored(message: str, patterns: Sequence[str]) -> bool:
-    """Whether a report matches an ignore pattern.
+def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
+    """The lines of a report that no ignore pattern silences, in page order.
+
+    Each line is judged on its own because the game packs a whole tick into one report row:
+    routine production and a force that starved to death arrive together, so a pattern
+    matched against the row is all-or-nothing for both. Nothing surviving means the report
+    raises no alert, which is what a matching pattern always meant; anything surviving is
+    what the alert shows, so the one line that matters is not buried in the other forty.
 
     This is deliberately a domain-named entry point over the shared matching rule rather
     than a rename left half-finished: the reports call site is about reports, and the market
     call site is about nation names, so neither should read as the other.
     """
-    return matches_any_pattern(message, patterns)
+    return [line for line in message.split("\n") if not matches_any_pattern(line, patterns)]
 
 
 def new_reports_since(
@@ -1502,9 +1508,11 @@ def build_alerts(
             (current.latest_report,) if current.latest_report is not None else ()
         )
         for message, posted in new_reports_since(previous.latest_report, rows):
-            if report_is_ignored(message, settings.report_ignore):
+            surviving = surviving_report_lines(message, settings.report_ignore)
+            if not surviving:
                 continue
-            preview = message if len(message) <= 800 else message[:797] + "..."
+            body = "\n".join(surviving)
+            preview = body if len(body) <= 800 else body[:797] + "..."
             alerts.append(
                 f"New CLOP report ({posted}): {preview}\n"
                 "https://4clop.org/reports.php"
