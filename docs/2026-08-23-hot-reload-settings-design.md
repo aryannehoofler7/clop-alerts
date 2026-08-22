@@ -8,10 +8,10 @@ monitor.
 
 ## The problem
 
-`load_settings` runs once in `main` before the polling loop, so every setting is fixed for the
+`load_settings` ran once in `main` before the polling loop, so every setting was fixed for the
 life of the process. Switching a good on, silencing a report, muting a category, or changing the
-alert sound all require stopping and restarting the monitor — and restarting also throws away the
-in-memory news, report and thread baselines when `cache.persist_to_file` is off.
+alert sound all required stopping and restarting the monitor — and restarting also threw away the
+in-memory news, report and thread baselines when `cache.persist_to_file` was off.
 
 ## Design
 
@@ -57,8 +57,23 @@ rather than a warning, and popups stay reserved for things that are wrong.
 
 ### Change detection gates the setup
 
-Only a section that actually changed redoes its setup. An unchanged file therefore costs a file
-read and nothing else — no extra requests, no rebuilt objects.
+Two gates in sequence. The file's raw bytes decide whether to parse at all; the parsed dataclasses
+then decide which sections to set up. An unchanged file therefore costs one read and nothing else
+— no parse, no extra requests, no rebuilt objects.
+
+**Why the bytes, and not just the dataclasses.** `load_settings` does not only parse: it validates
+against the world outside the file, and `wav_path` must name a file that still exists. Parsing an
+untouched file every 60 seconds turns that startup-time check into a per-poll one, so a WAV on a
+USB stick, a network share, or a cloud folder that evicts local copies raises the blocking dialog
+on every poll — with nobody having edited anything, blaming `settings.json`, and, because the
+reload runs before the check, leaving the game unread until somebody clicks OK. Unattended, that
+is a monitoring outage caused by a sound file, and the README actively invites users to point
+`wav_path` at their own.
+
+Only the file's own bytes can say "nobody touched this" without consulting anything outside the
+file, which is exactly the property needed. The bytes are compared, never inspected, and they are
+adopted whenever a parse is accepted — including a cosmetic edit that reindents the file without
+changing a setting, which would otherwise be re-parsed on every remaining poll.
 
 | Section | Detected by | Work when it changes |
 |---|---|---|
@@ -139,13 +154,26 @@ startup.
 - a re-run preflight names the goods and the alliance it resolved, and a swapped thread names the
   post it baselined, in the same words startup uses;
 - a deleted file warns, keeps the previous settings whole, and keeps polling, while a monitor that
-  never had a settings file is not warned about one and a file that appears later reloads normally.
+  never had a settings file is not warned about one and a file that appears later reloads normally;
+- an untouched file is never parsed at all, so a `wav_path` that has since become unreachable
+  raises nothing, and a cosmetic edit is parsed once and then left alone;
+- a reload changing both `market.goods` and `fourchan.thread_url` where the thread check fails
+  leaves the resolved goods and the alliance untouched — the ordering invariant, pinned rather
+  than merely arranged;
+- the notifier a sound edit rebuilds is the one that handles the next alert, and it keeps the
+  webhook and desktop settings that are not part of `sound`;
+- every field of `MonitorSettings` is either compared by `settings_changes` or listed as
+  deliberately not compared, so a field added later cannot silently stop being reloadable.
 
 ## Rejected
 
-- **Watching the file's mtime instead of parsing it.** Cheaper, but it misses an edit that
-  restores an identical mtime and it adds a second notion of "changed" alongside the structural
-  comparison the dataclasses already give for free.
+- **Watching the file's mtime instead of reading it.** mtime is a proxy for the file's content
+  rather than the content itself, and it can lie in both directions: an editor or a restored
+  backup can put back an identical mtime over changed bytes, and a touch can change the mtime
+  over identical bytes. Reading the bytes cannot be wrong about either.
+
+  This is not an argument against a cheap gate in front of the parse, and the implementation has
+  one — see below. It is an argument about *what* the gate compares.
 - **Applying the valid parts of a partially bad reload.** It would leave the live configuration as
   a mixture of two files with nothing naming which parts came from where.
 - **Making a failed reload fatal.** Consistent with how a bad settings file behaves at startup, but

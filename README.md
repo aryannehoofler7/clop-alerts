@@ -193,12 +193,22 @@ included — but expect the silence rather than a confirmation.
 **A reload is applied in full or not at all.** If the file cannot be read, cannot be parsed, fails
 validation, or names something that cannot be brought into service — a good the game does not have, a
 4chan thread that is already archived — the monitor raises a **CLOP monitor problem** dialog naming
-what is wrong, keeps every setting it already had, and keeps polling. It never applies the alert half
-of a file whose market half was refused, so "which settings are live" always has one answer: the last
-file that loaded cleanly, whole. The warning repeats on every poll for as long as the file stays
-broken, because a monitor running on settings you think you replaced is worth interrupting more than
-once. A broken file at *startup* is still fatal, because there are no previous settings to fall back
-on.
+what is wrong, keeps every setting it already had, and goes on polling. It never applies the alert
+half of a file whose market half was refused, so "which settings are live" always has one answer: the
+last file that loaded cleanly, whole. A broken file at *startup* is still fatal, because there are no
+previous settings to fall back on.
+
+A refusal repeats for as long as its cause lasts, which is not always something you have to fix. A
+typo in the file keeps being refused on every poll until you correct it, and that repetition is
+deliberate: a monitor running on settings you think you replaced is worth interrupting more than
+once. But bringing a changed section into service means talking to the game or to 4chan, so a
+refusal can equally be the network being briefly unreachable — nothing is wrong with your file and
+the next poll applies it by itself. The dialog names the cause, so read it before you go looking for
+a mistake you did not make.
+
+One case looks alarming and is not: if a dialog appears the instant you save, and the next poll is
+happy, you caught the monitor reading a file your editor was still writing. Wait one poll before
+worrying about it.
 
 **Deleting the file while the monitor runs is refused the same way.** An absent `settings.json` means
 "use the built-in defaults" at startup, but mid-run the same reading would silently switch every muted
@@ -518,9 +528,11 @@ Two kinds of failure, distinguished by what the dialog says:
   for a watched good — and polling resumes on the normal interval after you
   dismiss the dialog. A failure that persists alerts again on the next check; that repetition is
   deliberate, because a check that keeps failing is a monitor that is not working.
-- **The previous settings are still in force and the monitor is still polling.** A reload of
-  `settings.json` was refused — see [Settings](#settings). Nothing about the running monitor changed,
-  and it warns again on every poll until the file is fixed.
+- **The previous settings are still in force and the monitor will go on polling.** A reload of
+  `settings.json` was refused — see [Settings](#settings). Nothing about the running monitor
+  changed. It warns again on every poll for as long as the cause lasts, which may be a mistake in
+  the file waiting for you to fix it, or may be a network hiccup that clears by itself on the next
+  poll; the dialog names which.
 
 With `--once`, a failed check reports the same way and exits 1 rather than 0.
 `--no-desktop-notifications` suppresses these dialogs exactly as it suppresses alert dialogs, leaving
@@ -545,9 +557,16 @@ values; the tests reference a public 4chan thread URL, which is fine to share as
 
 ## Updating
 
-Run `git pull` in this folder. Nothing you own is tracked, so a pull never asks you to merge a
-configuration file and never overwrites one. Re-read the startup lines afterwards: a new
-`Settings: using defaults for ...` name means the update added a setting you may want to set.
+**Stop the monitor first, with `Ctrl+C`, and start it again afterwards.** `settings.json` is
+re-read while the monitor runs, but the program itself is not: a running monitor goes on using the
+code it started with, so a `git pull` underneath one changes nothing until you restart it. This is
+the one place in this document where "no restart needed" does not apply.
+
+Then run `git pull` in this folder. Nothing you own is tracked, so a pull never asks you to merge a
+configuration file and never overwrites one. Read the startup lines when you start it again: a new
+`Settings: using defaults for ...` name means the update added a setting you may want to set. That
+line is printed only at startup — a reload never prints it — which is another reason to do the pull
+and the restart together rather than leaving it for later.
 
 ## Tests
 

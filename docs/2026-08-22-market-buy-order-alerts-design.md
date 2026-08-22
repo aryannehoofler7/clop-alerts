@@ -2,6 +2,11 @@
 
 **Date:** 2026-08-22
 **Status:** implemented, reviewed, and verified against the live game on 2026-08-23
+**Amended 2026-08-23:** hot-reloading `settings.json` (see
+`2026-08-23-hot-reload-settings-design.md`) made the startup preflight no longer the only
+preflight, which changed four statements in this document. Each is marked **Amended** in place
+rather than rewritten away, so that what this design originally decided stays readable. Nothing
+else here changed.
 
 Live verification (2026-08-23): a scan of all 28 tradeable goods found 2 alliance buy orders for
 Machinery Parts and correctly classified 26 enemy and 6 alliance buyers, flagging none of the ~23
@@ -181,9 +186,12 @@ facts rather than one colour:
   by the buyer also being a friend or an enemy.
 
 The roster comes from one GET of `viewalliance.php?alliance_id=<mine>` per poll, with
-`alliance_id` resolved once at startup through the read-only hops described above and cached
-for the process lifetime. The roster itself is re-read every poll, because members join and
-leave while the monitor runs.
+`alliance_id` resolved through the read-only hops described above and cached until something
+re-resolves it. The roster itself is re-read every poll, because members join and leave while
+the monitor runs.
+
+> **Amended 2026-08-23:** "cached for the process lifetime" as originally written. A reload that
+> changes `market.goods` now re-runs the preflight, which re-resolves `alliance_id` too.
 
 When no roster is fetched — because no watched good sets `alliance: true` — `is_ally` falls back
 to the green colour, which is a correct positive and an incomplete negative. Nothing consults it
@@ -202,7 +210,11 @@ thing entirely: it never fetches at all, and its empty roster is legitimate.
 
 The roster fetch is skipped entirely when no watched good sets `alliance: true` — a settings-level
 test, so there is no per-row conditional-fetch logic to reason about. Leaving or joining an
-alliance mid-run is not detected; restart the monitor.
+alliance mid-run is not detected on its own.
+
+> **Amended 2026-08-23:** this said "restart the monitor". Editing `market.goods` now re-runs the
+> preflight and re-resolves the alliance on the next poll, so a restart is no longer the only way
+> — but it is still not detected on its own, which is the part that stands.
 
 A nation with no alliance resolves to an empty roster, so `alliance: true` matches nothing. That
 is a startup note, not an error.
@@ -259,8 +271,13 @@ Skipped entirely when no good is uncommented: zero extra requests, exactly as an
 
 1. GET `buyermarketplace.php` and read the `<select>` to resolve every watched good name to its
    `resource_id`. A name that does not resolve is a fatal startup error that names the offending
-   entry — a typo must not silently watch nothing. Resolving once at startup means the game
-   gaining or losing a good later cannot kill a monitor that is already running.
+   entry — a typo must not silently watch nothing. Resolving at startup rather than per poll means
+   the game gaining or losing a good later cannot kill a monitor that is already running.
+
+   > **Amended 2026-08-23:** the preflight also runs when a reload changes the watched goods, where
+   > an unresolvable name is a refused reload rather than a fatal error. The startup path here is
+   > unchanged.
+
 2. If any watched good sets `alliance: true`, resolve the own-nation and own-alliance ids as
    above and report the alliance found, or that there is none.
 
@@ -343,6 +360,9 @@ A market page, roster page, or nation page that cannot be read raises `MonitorEr
 the existing per-poll failure dialog — "still running, retries in N seconds". A bad `market`
 section, like any other bad settings, and an unresolvable good name are fatal startup errors.
 Neither path is new.
+
+> **Amended 2026-08-23:** still fatal at startup. Reached through a reload instead, both are
+> refused reloads that warn and leave the previous settings in force.
 
 Three cases are worth naming because each would otherwise be a *silent* under-report rather than
 a visible failure, which is the outcome this design most wants to avoid:
