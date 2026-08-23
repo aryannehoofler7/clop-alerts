@@ -705,14 +705,28 @@ deployment; the repo holds only its public `/exec` URL. If the deployment is eve
 doc `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md` contains the Apps Script
 source and the redeploy steps — paste it back onto the sheet and replace `EXEC_URL` in `sheets.py`.
 
-## Building reconciliation
+## Sheet sync
 
 When `CLOP_NATION` is set, the monitor runs one extra step **first each poll, before the regular
-alerting**: it reads your nation's building counts from `overview.php` and corrects your nation tab
-to match. It updates only the cells that are wrong — the **have** count in column B and, in the
-`DISABLED:` region lower down, the **disabled** count — and then pops up a dialog listing the
-corrections it made (e.g. `Basic Mine have 8 -> 10`). Buildings you no longer own are set back to 0.
-Nothing on the game is changed; this only reads overview and writes the sheet.
+alerting**: it fetches `overview.php` once and uses that single page to update two parts of your
+nation tab — your **building counts** and your **stockpiles**. Nothing on the game is ever changed;
+this only reads overview and writes the sheet.
+
+Sheet sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the tab
+is missing or unreachable. The monitor's message/news/report alerting is never affected either way.
+
+Before it writes anything, the monitor checks that the page it just fetched really is a complete,
+normal overview page. **If it is not, nothing at all is written** and you get a dialog. This matters
+more than it sounds: a broken page with empty tables looks exactly like a nation that owns nothing
+and holds nothing, so writing from one would wipe your tab and mark it freshly checked.
+[When a sheet sync dialog appears](#when-a-sheet-sync-dialog-appears) explains each message.
+
+### Building counts
+
+The monitor reads your building counts from `overview.php` and corrects your nation tab to match. It
+updates only the cells that are wrong — the **have** count in column B and, in the `DISABLED:` region
+lower down, the **disabled** count — and then pops up a dialog listing the corrections it made (e.g.
+`Basic Mine have 8 -> 10`). Buildings you no longer own are set back to 0.
 
 The building names on `overview.php` differ from the sheet's column A (the game calls it
 `Basic Copper Mine`, the sheet says `Basic Mine`), and one sheet row can stand for several game
@@ -732,15 +746,89 @@ It logs in, verifies the mapping against your sheet read-only, and reports pass/
 code. If it ever flags a building it can't place, update `building_map.py` (or the sheet) so the
 names line up again.
 
-Building sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the
-tab is missing or unreachable — the monitor's message/news/report alerting is never affected either
-way.
+### Stockpile snapshot
+
+In the same step, the monitor records how much of six goods you are holding. It writes **`R11:R16`**
+— the `HAVE` column, beside the `apple` / `oil` / `coffee` / `mpart` / `vpart` / `gems` labels in
+column Q — and stamps **`W10`** with the date and time the numbers were read.
+
+A few things worth knowing before you read those cells:
+
+- **`W10` is the game's own clock**, copied across exactly as the game prints it at the top of the
+  page, with no timezone conversion. Whatever time the game is showing you is the time you will see
+  in the sheet. Nothing has to agree about timezones for it to be meaningful. It is stored as **text,
+  not as a date** — if you click the cell you will see a leading apostrophe (`'2026-08-23 07:12:30`)
+  in the formula bar, which is Google Sheets' marker for "leave this alone". That is deliberate and
+  not a fault: stored as a date, Sheets would quietly reinterpret the game's clock as being in the
+  *spreadsheet's* timezone and be wrong by that offset without ever looking wrong. If you want to
+  calculate with it, convert it explicitly in your own formula, in a different cell.
+- **`W10` means *last checked*, not *last changed*.** It is rewritten every single poll, even when
+  none of your quantities moved. So an old `W10` does not mean "nothing has happened" — it means
+  **the snapshot has stopped running**, and the numbers beside it should not be trusted. That is the
+  whole point of the cell: it is your dead-man's switch.
+- **A routine update is silent.** No dialog, no sound, nothing in the way. At a 60-second poll a
+  popup saying "stockpiles updated" would never stop firing. Only problems interrupt you.
+- **A good you hold none of is written back as `0`**, not left alone. The game only lists goods you
+  actually have, so an absent good means zero, and the sheet is made to say so.
+- **`NEED`, `BUY` and `TICKS` are never touched.** Those columns are yours — your formulas and your
+  inputs. The monitor only ever writes `R11:R16` and `W10`, and never reads what your columns say.
+- **All six rows are rewritten every time**, rather than only the ones that changed. Comparing first
+  would be cheaper, but a cell showing `#REF!` reads back as `0`, which for a good you hold none of
+  looks identical to the correct answer — so the broken cell would survive under a fresh timestamp.
+  Overwriting removes that hiding place.
+
+Because the six rows are found **by position** (row 11 is apples, row 12 is oil, and so on), the
+monitor checks the labels in `Q11:Q16` before it writes. If someone has reordered, renamed, or
+cleared one of them, nothing is written — not even `W10`, which is then deliberately left to go
+stale so the sheet visibly stops claiming to be current. You can run that same check yourself,
+read-only, alongside the building one:
+
+```powershell
+python .\stockpiles.py
+```
+
+It logs in, prints the server time, and shows what the game reports next to what the sheet currently
+holds for each of the six rows, then reports pass/fail with an exit code. **It never writes.**
+
+### When a sheet sync dialog appears
+
+Every one of these is the blocking **CLOP monitor problem** dialog described under
+[Failures](#failures). The monitor keeps polling in every case below — none of them stops it.
+
+The first column is the phrase to look for in the dialog, not the whole text.
+
+| The dialog says | What it means | What to do |
+|---|---|---|
+| **`overview.php has no Resources panel`** (or `no Buildings panel`) | The game handed back something that is not an overview page at all — an error page, a maintenance page, or a redirect. **This is almost certainly the site, not this tool.** | Open the site in a browser. If it is unhappy too, work through `docs/OUTAGES.md`. **Nothing was written to the sheet.** |
+| **`overview.php stopped part-way`** | The page was cut off before it finished sending. Usually the host struggling, not the tool. | Check the site in a browser. If the page looks perfectly complete there and this keeps firing, the check is strict about the page *ending* with `</html>` — something is printing extra output after the footer, and that needs fixing in the game code. **Nothing was written.** |
+| **`overview.php lists no resources and no buildings at all`** | The game's own database query failed. The page renders fine but both tables come back empty, which is why this is caught rather than believed. Also fires legitimately for a **brand-new nation before its first tick**, which really does have nothing. | If the nation is new, wait for the first tick and it clears itself. Otherwise it is a game-side fault: see `docs/OUTAGES.md`. **Nothing was written.** |
+| **`Stockpile snapshot skipped — the sheet's STOCK labels have moved`** | Someone edited column Q, so the monitor no longer knows which row is which. The dialog names each cell that is wrong. | Put the labels in `Q11:Q16` back to `apple, oil, coffee, mpart, vpart, gems`, in that order, then run `python .\stockpiles.py` to confirm. **Nothing was written, and `W10` will go stale on purpose** until it is fixed. |
+| **`Building sync skipped`** | The sheet layout or the building mapping looks wrong, so no building cells were changed. | Run `python .\buildings.py`, then fix the sheet or `building_map.py` as it tells you. The stockpile snapshot still runs — the two guard different parts of the sheet. |
+| **`Sheet sync failed during ...`** | A network or Google Sheets problem, rather than anything wrong with your data. The message names which half it was in. | Usually nothing — it clears by itself. If it persists, check your internet connection and that the sheet still opens in a browser. |
+
+Two details that will otherwise confuse you:
+
+- The first three messages arrive wrapped as **`Sheet sync failed during reading overview.php: ...`**.
+  That prefix is just where the monitor was up to; the sentence after the colon is the real message,
+  and it is the one to match against the table.
+- **A persistent problem raises its dialog again on every poll**, up to two of them, one per half.
+  There is deliberately no "don't show this again": in this monitor every warning is a popup, and a
+  warning you can dismiss permanently is one you will miss when it matters. While you sort it out,
+  either fix the cause or stop the monitor with `Ctrl+C` — do not just keep clicking OK, because you
+  will stop reading it.
+
+One known gap, not yet fixed: if an HTTP response is cut off *mid-transfer* (as opposed to the game
+sending a short page, which the checks above catch), the monitor exits with a Python traceback in the
+terminal and **no dialog**. If the monitor is ever simply gone with no popup, that is the thing to
+suspect — look at the terminal for `IncompleteRead`. It is written up under "Known issues, not fixed
+here" in `docs/superpowers/specs/2026-08-23-stockpile-snapshot-design.md`.
 
 ## Tests
 
-The parser tests use synthetic HTML and never contact the hosted game. The Sheets and building tests
-(`test_sheets.py`, `test_buildings.py`) stub the network, so they never contact Google or the game.
-All of them run under one command:
+The parser tests use synthetic HTML and never contact the hosted game. The Sheets, overview, building
+and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_buildings.py`,
+`test_stockpiles.py`) stub the network, so they never contact Google or the game. All **388** of them
+run under one command:
 
 ```powershell
 python -m unittest -v

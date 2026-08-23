@@ -43,7 +43,7 @@ Two things are easy to get wrong and are the reason for several steps below:
 
 | File | Responsibility |
 |---|---|
-| `overview.py` | Parse one named panel out of an `overview.php` page. Knows about HTML and panel headings; knows nothing about buildings, stockpiles, or the sheet. |
+| `overview.py` | Two jobs, both about the page rather than what is on it: parse one named panel out of an `overview.php` page, and decide (`require_valid_overview`) whether the page is a complete, normal render worth trusting at all. **The trust policy grew into this file after the plan was written, and belongs here.** It is stated purely in this module's own vocabulary — panels, headings, whether the page finished — and both `buildings.py` and `stockpiles.py` need it while neither may depend on the other (see the note below this table), so the only other homes are a copy in each (which will drift apart) or a fourth module holding one function. Its failure messages do name the sheet, because their job is to tell a reader that nothing was written to it; that is a deliberate exception, not a leak of sheet knowledge into the parser. If you are considering splitting this file, split the parser out and leave the policy — not the reverse. |
 | `stockpiles.py` | The six-good stockpile snapshot: the label→resource mapping, reading quantities and the server time off overview, checking the sheet's labels, writing `R11:R16` + `W10`. |
 | `test_stockpiles.py` | Offline tests for `stockpiles.py`. |
 

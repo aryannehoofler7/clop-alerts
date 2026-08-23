@@ -47,6 +47,15 @@ Key facts:
 written to `W10` **verbatim** — no parsing, no timezone conversion, no reformatting. Whatever
 timezone the game server runs in, the sheet then shows the same wall-clock the game itself shows.
 
+It is stored as **text**, via `stockpiles.as_sheet_text`, which prefixes Sheets' own force-text
+marker (a leading apostrophe, consumed on storage, so the cell still displays exactly what the game
+printed). Left as a bare string, Sheets would recognise `2026-08-23 07:12:30` as a datetime and store
+a date value — silently reinterpreting the game's clock as being in the *spreadsheet's* timezone.
+That is the one failure mode verbatim copying exists to avoid, and it is invisible: a staleness
+formula built on the mis-tagged date would be wrong by the offset while looking perfectly reasonable.
+Storing text keeps the ambiguity where it belongs — with whoever writes a formula against it, who
+must then convert explicitly.
+
 **The sheet** (`LePone(Z)`) has a stock block at rows 10–16:
 
 | | Q | R | S | T | U |
@@ -94,6 +103,10 @@ it; neither depends on the other.
 This is the only change to existing parsing behaviour, and it is a rename plus a constructor
 argument — `buildings.parse_overview_buildings` keeps its signature and its results.
 
+`overview.py` also owns `panel_present`, `OverviewError`, and `require_valid_overview` — the policy
+deciding whether a fetched page can be trusted at all. See [Is this page real?](#is-this-page-real)
+for why that policy lives here rather than in either caller.
+
 ### `stockpiles.py` (new)
 
 - `STOCK_ROWS: list[tuple[str, str]]`, `STOCK_FIRST_ROW = 11`, `TIMESTAMP_CELL = "W10"` — the table
@@ -129,6 +142,70 @@ is the signal that the recorded numbers are no longer being refreshed.
 
 This mirrors `buildings.sanity_check`: a sheet the tool is unsure of is left completely untouched.
 
+### Is this page real?
+
+Drift safety guards the sheet end. This guards the game end, and it protects against a single
+mistake: **reading a broken page as a nation that owns nothing and holds nothing.** That mistake is
+the worst outcome this tool can produce, because it does not look like a failure. It zeroes the tab
+and then stamps `W10` freshly verified — hiding the exact condition the staleness marker exists to
+expose. `require_valid_overview` in `overview.py` refuses the page instead. It is called immediately
+after the fetch, before anything is parsed and long before anything is written, so its messages can
+say flatly that nothing was written.
+
+The policy lives in `overview.py`, not in `buildings.py` or `stockpiles.py`, for two reasons. It is
+expressed entirely in this module's vocabulary — panels, headings, whether the page finished — and
+both callers need it while [neither may depend on the other](#modules). A copy in each would drift.
+
+Four checks, each closing one way a broken page could pass for an empty nation.
+
+**Both panel headings are present.** `overview.php` emits `<div class="panel-heading">Resources</div>`
+and its Buildings counterpart from unconditional heredocs: no branch in the PHP can omit them, so
+they appear even for a nation with nothing at all. That makes the distinction sharp and load-bearing:
+
+| Heading | Table | Means |
+|---|---|---|
+| present | rows | normal |
+| present | empty | a genuinely empty panel — a new nation owns no buildings |
+| **missing** | — | **this is not an overview page** |
+
+A missing heading is therefore proof of a broken render — a PHP fatal after `header.php` already
+flushed, a maintenance page, a redirect somewhere else — not evidence about the nation. This is why
+`panel_present` exists separately from `parse_panel` returning no rows; collapsing the two would
+throw away the only signal that separates the second row of that table from the third.
+
+The headings are checked in page order, so the first complaint tells you how far the response
+actually got. That order is also doing structural work. Resources precedes Buildings on the page, so
+a present Buildings heading proves the response ran past the Resources panel's closing `</table>` —
+the Resources panel is complete, not merely started. One check, two facts.
+
+**The page finished.** `footer.php` ends every page with `</html>`. Without it the response was cut
+off, and the cut that the heading check cannot catch is one landing *after* the Buildings heading:
+both headings present, every building row missing. Those would be read as buildings sold and written
+to the sheet as a routine correction.
+
+The test is deliberately **ends-with**, not *contains*. A `</html>` inside a comment, an attribute,
+or an error message quoting some HTML would let a truncated page claim it finished, and the check has
+to fail closed to be worth having.
+
+**Not both panels empty.** `backend_overview.php` fills buildings and resources from a *single*
+query. On PHP 5.4 a failed query makes `mysqli_fetch_array` warn rather than fatal, so the page
+renders whole, `</html>` and both headings included, with both tables empty. Either panel may
+legitimately be empty on its own — hence the check is on both at once, which is that one shared query
+having died. The check names the two panels literally rather than looping `REQUIRED_PANELS`,
+because the reasoning is about those two specifically sharing a query; a third required panel added
+later must not silently join the conjunction and weaken it.
+
+#### Two accepted costs
+
+Both are consequences of failing closed, and both are worth paying:
+
+- **A brand-new nation is blocked until its first tick.** Before the tick it has no `resources` rows
+  and owns no buildings, so its page really is doubly empty and indistinguishable from a dead query.
+  The snapshot refuses it and pops up. The first tick clears it permanently.
+- **Anything appended after `footer.php` fails the completeness check**, even on a perfectly healthy
+  page — a PHP notice from a shutdown handler, a debug line, something a proxy injects. If the page
+  looks complete in a browser and this keeps firing, that trailing output is what to look for.
+
 ### Always overwrite, never diff
 
 `R11:R16` is written on every run whether or not the values changed, and so is `W10`. Both are
@@ -158,6 +235,22 @@ fetched once per poll, not twice. Its existing guarantees carry over unchanged, 
 logged-out check (a logged-out overview would look like a nation holding nothing and would zero the
 stock rows).
 
+**All parsing happens before any writing.** The step validates the page, reads the server time, and
+parses the resources first; only then does it reconcile buildings and snapshot stockpiles. This is
+ordering as a safety property, not tidiness. Every way the page can turn out to be untrustworthy
+raises before the first cell is touched, so "nothing was written" is something the failure messages
+can state as fact rather than hedge. Interleaving the two — parse buildings, write buildings, parse
+resources, discover the resources are unreadable — would leave the tab half-updated under a
+timestamp that no longer describes it.
+
+**The two syncs are independent for layout problems only.** A STOCK label mismatch skips the
+stockpile snapshot and leaves the building reconcile to run, and vice versa: they guard different
+regions of the sheet, and one region being wrong says nothing about the other.
+
+A transport or sheet failure in either aborts **both**, deliberately. It means the shared connection
+is down — the same `GoogleSheet`, the same network — so attempting the other half would fail the same
+way and produce a second dialog about one outage.
+
 Popup policy:
 
 - Label mismatch, a missing server time, or any transport/sheet failure → `notify_failure`, i.e. a
@@ -185,6 +278,36 @@ any label problems, with a matching exit code. It performs **no writes** — the
   about `parse_overview_buildings`, not the parser class).
 - Live: run once against `LePone(Z)` — expect `R11:R16` to become `226, 40, 29, 0, 0, 6` from the
   observed overview, and `W10` to hold the server time from that same page load.
+
+## Known issues, not fixed here
+
+**A truncated HTTP response kills the monitor with no dialog.** Found while reviewing this work;
+pre-existing, out of scope for this change, and recorded so it is not lost.
+
+`ClopClient._open` (`clop_monitor.py`, ~line 1150) reads the body inside a `try` that catches
+`urllib.error.HTTPError` and `urllib.error.URLError`, converting both to `MonitorError`. A response
+whose body is genuinely cut short mid-transfer — a `Content-Length` the server never delivers — makes
+`response.read()` raise `http.client.IncompleteRead`, which subclasses `HTTPException` and is neither
+of those. So it is not converted, and nothing downstream catches it either: not
+`sync_sheet_step`'s `except (MonitorError, OverviewError, SheetError, BuildingError,
+StockpileError)`, not the poll loop's `except MonitorError`, not `main`'s. It reaches the top and
+terminates the monitor with a traceback on stderr and **no dialog at all**.
+
+That breaks two rules this project holds:
+
+- `sync_sheet_step`'s own docstring — "sheet sync must never take the monitor down".
+- Every warning must be a popup. A monitor that has silently exited is the one failure a user cannot
+  notice, because its symptom is the absence of alerts.
+
+Note that this is *not* what the `</html>` completeness check above catches. That check handles a
+response that arrives intact but was cut short server-side (PHP died mid-page, the connection closed
+cleanly); `IncompleteRead` is the transport itself failing to deliver a body it promised, and the
+string never reaches `require_valid_overview`.
+
+The fix is small — add `http.client.IncompleteRead` (or `http.client.HTTPException`) to `_open`'s
+handlers and raise `MonitorError` from it, which routes it into the existing dialog path — but it
+touches the shared client used by every poll, not just the sheet sync, so it belongs in its own
+change with its own test.
 
 ## Out of scope
 
