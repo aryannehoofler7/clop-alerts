@@ -139,6 +139,21 @@ def check_labels(sheet: GoogleSheet, nation: str) -> List[str]:
     return problems
 
 
+def as_sheet_text(value: str) -> str:
+    """Mark ``value`` so the sheet stores it as text rather than parsing it.
+
+    Left to itself, Sheets reads ``2026-08-23 07:12:30`` as a date and stores a date value -- which
+    silently reinterprets the game's clock as being in the *spreadsheet's* timezone. The whole point
+    of copying the server's stamp across verbatim is that we do not know or assume which timezone
+    the game runs in, so a staleness formula built on a mis-tagged date would be wrong by that
+    offset without ever looking wrong.
+
+    A leading apostrophe is Sheets' own force-text marker. It is consumed when the value is stored,
+    so the cell shows exactly what the game printed.
+    """
+    return "'" + value
+
+
 def snapshot(
     sheet: GoogleSheet,
     nation: str,
@@ -163,7 +178,7 @@ def snapshot(
     """
     wanted = desired_stock(resources)
     sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
-    sheet.write_cell(nation, TIMESTAMP_CELL, server_time)
+    sheet.write_cell(nation, TIMESTAMP_CELL, as_sheet_text(server_time))
     return [(label, value) for (label, _), value in zip(STOCK_ROWS, wanted)]
 
 

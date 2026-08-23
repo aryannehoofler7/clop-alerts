@@ -4,6 +4,7 @@
 import unittest
 
 from stockpiles import (
+    as_sheet_text,
     STOCK_FIRST_ROW,
     STOCK_ROWS,
     TIMESTAMP_CELL,
@@ -223,7 +224,9 @@ class SnapshotTests(unittest.TestCase):
             sheet.blocks,
             [(VALUE_RANGE, [[1226], [0], [29], [0], [0], [6]])],
         )
-        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "2026-08-23 03:23:44")])
+        # Apostrophe-prefixed: Sheets consumes it and stores the stamp as text rather than
+        # parsing it into a date in the spreadsheet's timezone. See as_sheet_text.
+        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "'2026-08-23 03:23:44")])
         self.assertEqual(
             written,
             [("apple", 1226), ("oil", 0), ("coffee", 29),
@@ -251,6 +254,24 @@ class SnapshotTests(unittest.TestCase):
         sheet.write_cell = lambda tab, a1, value: order.append("stamp")
         snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
         self.assertEqual(order, ["values", "stamp"])
+
+
+class AsSheetTextTests(unittest.TestCase):
+    """The stamp must reach the sheet as text, not as a date.
+
+    Verified against the live sheet: written bare, ``2026-08-23 07:12:30`` came back as
+    ``2026-08-23T07:12:30.000Z`` -- Sheets had parsed it into a date value, reinterpreting the
+    game's clock in the spreadsheet's timezone. That is exactly the assumption this feature
+    refuses to make anywhere else, so it must not make it here either.
+    """
+
+    def test_prefixes_with_the_force_text_marker(self):
+        self.assertEqual(as_sheet_text("2026-08-23 07:12:30"), "'2026-08-23 07:12:30")
+
+    def test_snapshot_uses_it(self):
+        sheet = FakeSheet()
+        snapshot(sheet, "T", {}, "2026-08-23 07:12:30")
+        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "'2026-08-23 07:12:30")])
 
 
 class MappingIntegrityTests(unittest.TestCase):

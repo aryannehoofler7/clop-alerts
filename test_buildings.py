@@ -351,7 +351,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(
             sheet.blocks, [("R11:R16", [[1226], [0], [0], [0], [0], [6]])]
         )
-        self.assertIn(("W10", "2026-08-23 03:23:44"), sheet.writes)
+        self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
         # A routine snapshot is a scheduled refresh, not an event: no popup for it.
         self.assertEqual(notifier.failures, [])
         self.assertEqual(notifier.alerts, [])
@@ -519,7 +519,7 @@ class SyncSheetStepTests(unittest.TestCase):
         sync_sheet_step(FakeClient(no_buildings), sheet, "T", notifier)
         self.assertEqual(notifier.failures, [])
         self.assertEqual(sheet.blocks, [("R11:R16", [[7], [0], [0], [0], [0], [0]])])
-        self.assertIn(("W10", "2026-08-23 03:23:44"), sheet.writes)
+        self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
 
 
 if __name__ == "__main__":
