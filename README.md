@@ -11,6 +11,10 @@ This is a small, read-only monitor for the hosted game at `https://4clop.org`. I
   only the newest as its marker;
 - watches the buyer's marketplace for each good you switch on, and alerts while any friend or
   alliance member has a pending buy order for it;
+- keeps the shared planning sheet up to date from one `overview.php` read: your building counts and
+  your six `STOCK` goods on your own nation tab, and your whole column on the alliance-wide
+  `Dashboard` tab — all 31 goods plus satisfaction, both faction relationships, GDP, funds and a
+  last-updated stamp;
 - saves the last observed counts, newest news entry, newest report, and configured 4chan post in
   `.state/clop-monitor.json`;
 - alerts in the terminal, opens a persistent Windows dialog, and can optionally call a webhook.
@@ -724,9 +728,13 @@ source and the redeploy steps — paste it back onto the sheet and replace `EXEC
 ## Sheet sync
 
 When `CLOP_NATION` is set, the monitor runs one extra step **first each poll, before the regular
-alerting**: it fetches `overview.php` once and uses that single page to update two parts of your
-nation tab — your **building counts** and your **stockpiles**. Nothing on the game is ever changed;
-this only reads overview and writes the sheet.
+alerting**: it fetches `overview.php` once and uses that single page to update three parts of the
+sheet — your **building counts** and your **stockpiles** on your own nation tab, and your **column
+on the alliance-wide `Dashboard` tab**. Nothing on the game is ever changed; this only reads
+overview and writes the sheet.
+
+The three are independent. If one is skipped because that part of the sheet has been rearranged, the
+other two still run, and the dialog says which.
 
 Sheet sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the tab
 is missing or unreachable. The monitor's message/news/report alerting is never affected either way.
@@ -787,24 +795,50 @@ A few things worth knowing before you read those cells:
 - **A good you hold none of is written back as `0`**, not left alone. The game only lists goods you
   actually have, so an absent good means zero, and the sheet is made to say so.
 - **`NEED`, `BUY` and `TICKS` are never touched.** Those columns are yours — your formulas and your
-  inputs. The monitor only ever writes `R11:R16` and `W10`, and never reads what your columns say.
+  inputs. The monitor only ever writes the `HAVE` column and the timestamp, and never reads what
+  your columns say.
 - **All six rows are rewritten every time**, rather than only the ones that changed. Comparing first
   would be cheaper, but a cell showing `#REF!` reads back as `0`, which for a good you hold none of
   looks identical to the correct answer — so the broken cell would survive under a fresh timestamp.
   Overwriting removes that hiding place.
 
-Because the six rows are found **by position** (row 11 is apples, row 12 is oil, and so on), the
-monitor checks the labels in `Q11:Q16` before it writes. If someone has reordered, renamed, or
-cleared one of them, nothing is written — not even `W10`, which is then deliberately left to go
-stale so the sheet visibly stops claiming to be current. You can run that same check yourself,
-read-only, alongside the building one:
+**Nothing is addressed by a fixed row or column.** The monitor finds the `STOCK` header in column Q,
+then finds `HAVE` in that same header row, then reads the labels beneath it. So you can insert rows
+above the block, or move the `HAVE` column, and the snapshot follows it. What it cannot survive is a
+label being **renamed, deleted or duplicated** — then it does not know which row is which, and
+nothing is written, not even the timestamp, which is deliberately left to go stale so the sheet
+visibly stops claiming to be current.
+
+### The `Dashboard` tab
+
+The shared `Dashboard` is the alliance-wide view: one column per nation, `TOTAL` in column B. Its
+`A1` says `READ ONLY` — that is aimed at **people**, not at this tool. Do not fill it in by hand.
+
+Off the same page read, the monitor writes your own column: **all 31 goods** in the game (not just
+the six), plus six status rows taken from overview's Nation panel — `Active` (a last-updated
+timestamp), `Sat`, `NLR` and `SE` (each as `current (per tick)`, exactly as the game shows them),
+and `GDP` and `Bits` as plain numbers so the `TOTAL` column can add them up.
+
+Your column is found by matching your `CLOP_NATION` against the names in row 1, and each row by
+looking its label up in column A — so, again, no fixed addresses. **If your nation is not named in
+row 1, nothing on the Dashboard is written** and the dialog prints what row 1 actually contains, so
+you can see whether your tab is spelled differently. Your own nation tab still updates.
+
+Only your column is ever written. Nobody else's numbers, and never the `TOTAL` column.
+
+`docs/2026-08-23-dashboard-goods-map.md` is the full row-by-row map of that tab.
+
+### Checking it yourself
 
 ```powershell
 python .\stockpiles.py
 ```
 
-It logs in, prints the server time, and shows what the game reports next to what the sheet currently
-holds for each of the six rows, then reports pass/fail with an exit code. **It never writes.**
+Logs in, prints the server time, then shows **where each lookup resolved to** — the `STOCK` header
+row, the `HAVE` column, the timestamp cell, your Dashboard column — followed by what the game
+reports beside what the sheet currently holds, and every cell a real run would write. It reports
+pass/fail with an exit code. **It never writes.** This is the thing to run when a dialog tells you
+the sheet layout is wrong.
 
 ### When a sheet sync dialog appears
 
@@ -818,8 +852,11 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`overview.php has no Resources panel`** (or `no Buildings panel`) | The game handed back something that is not an overview page at all — an error page, a maintenance page, or a redirect. **This is almost certainly the site, not this tool.** | Open the site in a browser. If it is unhappy too, work through `docs/OUTAGES.md`. **Nothing was written to the sheet.** |
 | **`overview.php stopped part-way`** | The page was cut off before it finished sending. Usually the host struggling, not the tool. | Check the site in a browser. If the page looks perfectly complete there and this keeps firing, the check is strict about the page *ending* with `</html>` — something is printing extra output after the footer, and that needs fixing in the game code. **Nothing was written.** |
 | **`overview.php lists no resources and no buildings at all`** | The game's own database query failed. The page renders fine but both tables come back empty, which is why this is caught rather than believed. Also fires legitimately for a **brand-new nation before its first tick**, which really does have nothing. | If the nation is new, wait for the first tick and it clears itself. Otherwise it is a game-side fault: see `docs/OUTAGES.md`. **Nothing was written.** |
-| **`Stockpile snapshot skipped`** (`- the sheet's STOCK labels have moved`) | Someone edited column Q, so the monitor no longer knows which row is which. The dialog names each cell that is wrong. | Put the labels in `Q11:Q16` back to `apple, oil, coffee, mpart, vpart, gems`, in that order, then run `python .\stockpiles.py` to confirm. **Nothing was written, and `W10` will go stale on purpose** until it is fixed. |
-| **`Building sync skipped`** | The sheet layout or the building mapping looks wrong, so no building cells were changed. | Run `python .\buildings.py`, then fix the sheet or `building_map.py` as it tells you. The stockpile snapshot still runs — the two guard different parts of the sheet. |
+| **`Stockpile snapshot: part of the sheet was not written`** | One of the two regions could not be located. The rest of the dialog names every problem found. | Run `python .\stockpiles.py` — it shows where each lookup resolved to, which is usually enough to spot what moved. Fix the sheet, then rerun it to confirm. **The affected region was not written, and its timestamp will go stale on purpose** until it is. |
+| **`stock label '...' is missing from the run`** | A label under the `STOCK` header was renamed, deleted, or pasted twice, so the monitor cannot tell which row is which. Reordering them is fine; losing one is not. | Put `apple, oil, coffee, mpart, vpart, gems` back under the `STOCK` header — any order — then run `python .\stockpiles.py`. **Nothing on your nation tab was written, including the timestamp.** The Dashboard still updated. |
+| **`no column in row 1 ... is named`** | Your nation is not in the `Dashboard`'s header row. The dialog prints what row 1 actually holds. | Check `CLOP_NATION` in `.env` against the names in that list — it is case-, spacing- and punctuation-sensitive. If your column is genuinely missing from the shared sheet, ask whoever owns it to add one. **Nothing on the Dashboard was written.** Your own nation tab still updated. |
+| **`W10 should be empty or hold a ... stamp`** | The timestamp cell holds something that is not a timestamp. It is the one cell found partly by convention, so it refuses to overwrite anything it does not recognise. | Look at that cell. If someone has started using it for something else, the block needs moving or `TIMESTAMP_COLUMN` in `stockpiles.py` needs changing. **Nothing on your nation tab was written.** |
+| **`Building sync skipped`** | The sheet layout or the building mapping looks wrong, so no building cells were changed. | Run `python .\buildings.py`, then fix the sheet or `building_map.py` as it tells you. The stockpile snapshot still runs — the three guard different parts of the sheet. |
 | **`no 'Server time:' stamp on the page`** | The page arrived without the clock the monitor stamps into `W10`. Every normal CLOP page carries one, logged in or not, so this means the page is not a normal one. | Same as the first row: check the site in a browser, then `docs/OUTAGES.md`. If the site is fine and this keeps firing, the game's page layout has changed and `stockpiles.py` needs updating. **Nothing was written.** |
 | **`resource '...' has an unreadable quantity`** | The game printed a quantity that is not a plain number. It is refused rather than guessed at, because guessing would write a wrong number — most likely a `0`, meaning "you have none of this". | Look at that resource on `overview.php` in a browser. If the game has started formatting quantities differently, `stockpiles.py` needs updating to match. **Nothing was written.** |
 | **`not logged in when reading overview.php`** | The session dropped and logging back in did not take. | Check `CLOP_USERNAME` and `CLOP_PASSWORD` in `.env`, and that you can sign in through a browser. **Nothing was written.** |
@@ -843,10 +880,10 @@ above catch — used to end the monitor with a Python traceback and no dialog at
 
 ## Tests
 
-The parser tests use synthetic HTML and never contact the hosted game. The Sheets, overview, building
-and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_buildings.py`,
-`test_stockpiles.py`) stub the network, so they never contact Google or the game. All **398** of them
-run under one command:
+The parser tests use synthetic HTML and never contact the hosted game. The Sheets, overview, goods,
+nation, building and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_goods.py`,
+`test_nation.py`, `test_buildings.py`, `test_stockpiles.py`) stub the network, so they never contact
+Google or the game. All **466** of them run under one command:
 
 ```powershell
 python -m unittest -v

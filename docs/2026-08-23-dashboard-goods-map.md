@@ -11,8 +11,23 @@ Row 1 is the header — `A` = row label, `B` = `TOTAL`, and `C` onward one colum
 (`LePone(Z)`, `quaity(P)`, `Pure Apple Acres(B)`, `Republic(B)`, `Solarium(Z)`, `GLA(S)`,
 `Fish Bucket(S)`, `Vladihoofstock(Z)`, `Buenos Mares(B)`, and an `#N/A` spare in `L`).
 
-Rows 2–8 are nation status (`Active`, `Sat`, `NLR`, `SE`, `GDP`, `Bits`). The **goods block is
-`A10:A42`**. Rows 6, 9, 21 and 28 are blank spacers, and nothing follows row 42.
+Rows 2–8 are nation status, and `stockpiles.py` writes them from the overview "Nation" panel:
+
+| Cell | Label | Source on overview.php | Written as |
+|---|---|---|---|
+| A2 | `Active` | the page header's `Server time:` stamp | text, e.g. `2026-08-23 12:09:44` |
+| A3 | `Sat` | `Satisfaction` | `-61 (-2)` — current, per tick in parentheses |
+| A4 | `NLR` | `Relationship with New Lunar Republic` | `1500 (Ascending)` |
+| A5 | `SE` | `Relationship with Solar Empire` | `-120 (3)` |
+| A7 | `GDP` | `GDP` | a number, so column B's `TOTAL` sums it |
+| A8 | `Bits` | `Funds` | a number |
+
+`Active` holds a last-updated timestamp despite its label. The per-tick figure is the literal string
+the game printed when it is not a number: `Ascending` under Alicorn Elite and Transponyism, `Fixed`
+under Solar Vassal and Lunar Client.
+
+The **goods block is `A10:A42`**. Rows 6, 9, 21 and 28 are blank spacers, and nothing follows
+row 42.
 
 ## The mapping
 
@@ -75,6 +90,25 @@ The DNA rows reverse the game's word order (`DNA - <direction> <region>` becomes
 `DNA - <region> - <direction>`) and abbreviate two regions: `Burro` = Burrozil, `Prze` =
 Przewalskia, with `Saddle` = Saddle Arabia and `Zebrica` unabbreviated. The sheet groups them
 region-first then direction, which is *not* the order `overview.php` renders them in (see below).
+
+## How the script writes this tab
+
+`stockpiles.py` writes the nation's own column on every sync, off the same `overview.php` fetch that
+updates the nation tab. Nothing is hardcoded: the column comes from matching `CLOP_NATION` against
+row 1, and each row comes from looking its label up in column A. The located rows are grouped into
+contiguous runs and written one block each — five writes on today's layout (`2:5`, `7:8`, `10:20`,
+`22:27`, `29:42`) — so the spacer rows are never touched and an inserted row simply shifts the
+answer.
+
+If the nation's name is not in row 1, or a label is missing or duplicated in column A, **nothing on
+this tab is written** and a blocking dialog names every problem. The nation tab still updates; the
+two regions fail independently.
+
+Writes are unconditional rather than diffed: an unreadable cell normalises to `0`, so it would
+compare equal to a good the nation holds none of and the garbage would survive.
+
+Run `python stockpiles.py` for a read-only report of where the lookups currently resolve to and what
+a real run would write.
 
 ## Relationship to the other two orderings
 
