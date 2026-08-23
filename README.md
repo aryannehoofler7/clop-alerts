@@ -656,19 +656,40 @@ Ranges use A1 notation. `write` accepts a scalar, a flat row, or a 2-D block and
 shape the range expects. Any failure — network, a non-JSON reply, or a server-side error such as an
 unknown tab — raises `sheets.SheetError`.
 
+### Your nation tab
+
+Your nation has its own tab in the sheet, and the module reads its name from **`CLOP_NATION`** in
+`.env` (resolved with the same rules as the credentials: a value in the process environment wins,
+then the `.env` file). Set it to the tab name exactly — it is case-, spacing-, and
+punctuation-sensitive:
+
+```dotenv
+CLOP_NATION=LePone(Z)
+```
+
+`sheets.startup_check()` resolves that name and confirms the tab exists before any work begins,
+raising `SheetError` if `CLOP_NATION` is unset, names no such tab, or the sheet is unreachable. Run
+the module directly to perform that check (read-only) and read your `R11`:
+
+```powershell
+python .\sheets.py
+```
+
+It prints the tab it found and exits 0 on success, or prints the reason and exits 1 if the check
+fails. In your own code:
+
+```python
+from sheets import startup_check
+sheet, nation = startup_check()          # errors here if the nation tab is missing
+sheet.read_cell(nation, "R11")
+```
+
 Writes to Google Sheets always need a Google identity *somewhere* (API keys are read-only). This
 project keeps that identity out of the repo by routing through a small Apps Script web app bound to
 the sheet, deployed as *execute as owner / accessible to anyone*. The Google login lives inside that
 deployment; the repo holds only its public `/exec` URL. If the deployment is ever lost, the design
 doc `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md` contains the Apps Script
 source and the redeploy steps — paste it back onto the sheet and replace `EXEC_URL` in `sheets.py`.
-
-Run the module directly to perform a live round-trip against `LePone(Z)!R11` (read, write `42`, read
-back, restore) as a smoke test:
-
-```powershell
-python .\sheets.py
-```
 
 ## Tests
 

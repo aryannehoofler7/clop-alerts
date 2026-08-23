@@ -23,9 +23,16 @@ Everything here is Python standard library only, matching the rest of this proje
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, List, Sequence
+
+# Reuse the monitor's KEY=VALUE .env reader and default path so the nation name is resolved with the
+# exact same rules as the credentials (process environment wins, then the .env file). Importing it
+# has no side effects -- clop_monitor only runs anything under its own __main__ guard.
+from clop_monitor import DEFAULT_ENV_PATH, load_env_file
 
 
 #: Public Apps Script web-app endpoint bound to the shared sheet. Committed on purpose: the sheet
@@ -41,11 +48,30 @@ SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 DEFAULT_TIMEOUT = 30.0
 
+#: Environment variable naming the sheet tab for your nation (its value is the exact tab name, e.g.
+#: ``LePone(Z)``). Set it in ``.env`` alongside CLOP_USERNAME / CLOP_PASSWORD.
+NATION_ENV = "CLOP_NATION"
+
 Grid = List[List[Any]]
 
 
 class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
+
+
+def nation_from_env(env_path: Path = DEFAULT_ENV_PATH) -> str:
+    """Return the configured nation tab name, or raise ``SheetError`` if it is not set.
+
+    Resolution matches the credentials: a value already in the process environment wins, otherwise
+    the ``.env`` file is consulted.
+    """
+    value = os.environ.get(NATION_ENV) or load_env_file(env_path).get(NATION_ENV)
+    if not value:
+        raise SheetError(
+            f"{NATION_ENV} is not set. Add it to .env as {NATION_ENV}=<your nation> "
+            "(e.g. LePone(Z)); its value is the exact name of your nation's tab in the sheet."
+        )
+    return value
 
 
 def _as_grid(values: Any) -> Grid:
@@ -90,6 +116,30 @@ class GoogleSheet:
     def write_cell(self, tab: str, a1: str, value: Any) -> Any:
         """Write one value to a single cell and return the stored result."""
         return self._first(self.write(tab, a1, value))
+
+    def tab_exists(self, tab: str) -> bool:
+        """Return whether ``tab`` is a tab in the sheet.
+
+        Probes with a trivial read of ``A1``: a success means the tab is there. The endpoint reports
+        a missing tab as ``no such tab: <name>`` (its documented protocol error), which we map to
+        ``False``; any other failure -- a network drop, a dead endpoint -- propagates as ``SheetError``
+        so a mere outage is never mistaken for a missing tab.
+        """
+        try:
+            self.read(tab, "A1")
+        except SheetError as exc:
+            if "no such tab" in str(exc).lower():
+                return False
+            raise
+        return True
+
+    def require_tab(self, tab: str) -> None:
+        """Raise ``SheetError`` unless ``tab`` exists in the sheet."""
+        if not self.tab_exists(tab):
+            raise SheetError(
+                f"nation tab {tab!r} does not exist in the shared sheet. Check {NATION_ENV} names a "
+                "tab exactly -- it is case-, spacing-, and punctuation-sensitive."
+            )
 
     # -- internals -------------------------------------------------------------------------
 
@@ -139,11 +189,29 @@ class GoogleSheet:
         return body.get("values", [])
 
 
+def startup_check(
+    exec_url: str = EXEC_URL, env_path: Path = DEFAULT_ENV_PATH
+) -> "tuple[GoogleSheet, str]":
+    """Resolve the configured nation and confirm its tab exists before any work begins.
+
+    Raises ``SheetError`` if ``CLOP_NATION`` is unset, its tab is missing, or the sheet is
+    unreachable. Returns the connected ``GoogleSheet`` and the nation name on success.
+    """
+    nation = nation_from_env(env_path)
+    sheet = GoogleSheet(exec_url)
+    sheet.require_tab(nation)
+    return sheet, nation
+
+
 if __name__ == "__main__":
-    # Live round-trip against the real sheet: read R11, flip it, read back, restore.
-    sheet = GoogleSheet()
-    before = sheet.read_cell("LePone(Z)", "R11")
-    print(f"R11 before: {before!r}")
-    print(f"R11 after write 42: {sheet.write_cell('LePone(Z)', 'R11', 42)!r}")
-    print(f"R11 re-read: {sheet.read_cell('LePone(Z)', 'R11')!r}")
-    print(f"R11 restored: {sheet.write_cell('LePone(Z)', 'R11', before)!r}")
+    import sys
+
+    # Startup check: resolve CLOP_NATION and verify its tab exists, then read one cell to prove the
+    # round trip. Read-only -- it never edits the sheet.
+    try:
+        sheet, nation = startup_check()
+    except SheetError as error:
+        print(f"Startup check failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Nation tab {nation!r} found.")
+    print(f"{nation}!R11 = {sheet.read_cell(nation, 'R11')!r}")

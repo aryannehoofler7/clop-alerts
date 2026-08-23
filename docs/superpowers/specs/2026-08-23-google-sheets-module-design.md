@@ -71,6 +71,20 @@ class GoogleSheet:
 Config home: `EXEC_URL` and `SHEET_ID` are **committed constants** in `sheets.py`. The sheet is
 shared and the tool is shared, so the endpoint is public by design — no token, nothing git-ignored.
 
+## Nation tab and startup check
+
+Each nation has its own tab, named after the nation (ours is `LePone(Z)`). The tab name is
+configuration, not a constant: it comes from **`CLOP_NATION`** in `.env`, resolved by the monitor's
+existing `load_env_file` so the rules match the credentials (process environment wins, then `.env`).
+
+`nation_from_env()` returns that name or raises `SheetError` if it is unset. `GoogleSheet.tab_exists`
+probes with a trivial `A1` read: success means the tab is present; the endpoint's documented
+`no such tab: <name>` protocol error maps to `False`; any other failure (network, dead endpoint)
+propagates so an outage is never misread as a missing tab. `require_tab` raises for a missing tab.
+`startup_check()` composes these — resolve nation, confirm its tab exists — and is what callers run
+first; it raises before any real work if the configuration or the sheet is wrong. Running
+`python sheets.py` performs this check read-only and reports pass/fail via exit code.
+
 ## Data flow
 
 `GoogleSheet.read/write` → `urllib` POST JSON → `/exec` → Apps Script `doPost` →

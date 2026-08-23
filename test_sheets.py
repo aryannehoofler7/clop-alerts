@@ -3,13 +3,23 @@
 
 import io
 import json
+import os
+import tempfile
 import unittest
 import urllib.error
 from contextlib import contextmanager
+from pathlib import Path
 from unittest import mock
 
 import sheets
-from sheets import GoogleSheet, SheetError, _as_grid
+from sheets import (
+    NATION_ENV,
+    GoogleSheet,
+    SheetError,
+    _as_grid,
+    nation_from_env,
+    startup_check,
+)
 
 
 class FakeResponse(io.BytesIO):
@@ -156,6 +166,87 @@ class ErrorHandlingTests(unittest.TestCase):
             with self.assertRaises(SheetError) as ctx:
                 GoogleSheet().read("T", "A1")
         self.assertIn("could not reach", str(ctx.exception))
+
+
+def no_such_tab(name="Nope"):
+    return FakeResponse(json.dumps({"ok": False, "error": f"no such tab: {name}"}).encode())
+
+
+@contextmanager
+def env_file(contents):
+    """Yield a Path to a temporary .env file with the given contents."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / ".env"
+        path.write_text(contents, encoding="utf-8")
+        yield path
+
+
+class NationFromEnvTests(unittest.TestCase):
+    def test_process_env_wins_over_file(self):
+        with mock.patch.dict(os.environ, {NATION_ENV: "FromEnv"}):
+            with env_file(f"{NATION_ENV}=FromFile\n") as path:
+                self.assertEqual(nation_from_env(path), "FromEnv")
+
+    def test_falls_back_to_env_file(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with env_file(f"{NATION_ENV}=LePone(Z)\n") as path:
+                self.assertEqual(nation_from_env(path), "LePone(Z)")
+
+    def test_unset_raises_naming_the_variable(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with env_file("CLOP_USERNAME=x\n") as path:
+                with self.assertRaises(SheetError) as ctx:
+                    nation_from_env(path)
+        self.assertIn(NATION_ENV, str(ctx.exception))
+
+
+class TabExistsTests(unittest.TestCase):
+    def test_true_when_read_succeeds(self):
+        with stub_urlopen(lambda req: ok([[""]])):
+            self.assertTrue(GoogleSheet().tab_exists("LePone(Z)"))
+
+    def test_false_when_endpoint_reports_no_such_tab(self):
+        with stub_urlopen(lambda req: no_such_tab("Ghost")):
+            self.assertFalse(GoogleSheet().tab_exists("Ghost"))
+
+    def test_network_error_propagates_not_treated_as_missing(self):
+        def boom(req):
+            raise urllib.error.URLError("name resolution failed")
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError):
+                GoogleSheet().tab_exists("LePone(Z)")
+
+    def test_require_tab_raises_for_missing(self):
+        with stub_urlopen(lambda req: no_such_tab("Ghost")):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet().require_tab("Ghost")
+        self.assertIn("Ghost", str(ctx.exception))
+        self.assertIn(NATION_ENV, str(ctx.exception))
+
+    def test_require_tab_passes_for_present(self):
+        with stub_urlopen(lambda req: ok([[""]])):
+            GoogleSheet().require_tab("LePone(Z)")  # does not raise
+
+
+class StartupCheckTests(unittest.TestCase):
+    def test_returns_sheet_and_nation_when_tab_present(self):
+        with mock.patch.dict(os.environ, {NATION_ENV: "LePone(Z)"}):
+            with stub_urlopen(lambda req: ok([[""]])):
+                sheet, nation = startup_check(env_path=Path("does-not-exist"))
+        self.assertIsInstance(sheet, GoogleSheet)
+        self.assertEqual(nation, "LePone(Z)")
+
+    def test_raises_when_nation_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SheetError):
+                startup_check(env_path=Path("does-not-exist"))
+
+    def test_raises_when_tab_missing(self):
+        with mock.patch.dict(os.environ, {NATION_ENV: "Ghost"}):
+            with stub_urlopen(lambda req: no_such_tab("Ghost")):
+                with self.assertRaises(SheetError):
+                    startup_check(env_path=Path("does-not-exist"))
 
 
 if __name__ == "__main__":
