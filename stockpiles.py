@@ -105,6 +105,32 @@ def parse_server_time(html: str) -> str:
     match = _SERVER_TIME_RE.search(html)
     if not match:
         raise StockpileError(
-            "no 'Server time:' stamp on the page -- is this a logged-in CLOP page?"
+            "no 'Server time:' stamp on the page -- this is not a normal CLOP page "
+            "(an error or maintenance page, or a truncated response?)"
         )
     return match.group(1)
+
+
+def check_labels(sheet: GoogleSheet, nation: str) -> List[str]:
+    """Confirm ``Q11:Q16`` still names the six goods, in order.
+
+    Returns the list of problems; empty means the block is safe to write. A non-empty list names
+    each offending cell and must stop **all** writing, ``W10`` included -- the rows are addressed by
+    position, so a moved label means this module no longer knows which row is which.
+
+    Every problem is reported, not just the first, so one popup shows a person everything they need
+    to put right.
+
+    Only the labels are read. The current ``R`` values are deliberately not consulted: they are
+    overwritten unconditionally, so there is nothing to compare them against.
+    """
+    grid = sheet.read(nation, LABEL_RANGE)
+    problems: List[str] = []
+    for index, (label, _) in enumerate(STOCK_ROWS):
+        row = grid[index] if index < len(grid) else []
+        found = str(row[0] if len(row) > 0 else "").strip()
+        if found.lower() != label:
+            problems.append(
+                f"Q{STOCK_FIRST_ROW + index} should read {label!r} but reads {found!r}"
+            )
+    return problems

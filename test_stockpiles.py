@@ -7,6 +7,7 @@ from stockpiles import (
     STOCK_FIRST_ROW,
     STOCK_ROWS,
     StockpileError,
+    check_labels,
     desired_stock,
     parse_overview_resources,
     parse_server_time,
@@ -48,6 +49,29 @@ OVERVIEW_HTML = """
 """
 
 
+EXPECTED_LABELS = ["apple", "oil", "coffee", "mpart", "vpart", "gems"]
+
+
+class FakeSheet:
+    """Stand-in for GoogleSheet: serves the Q label column and records every write."""
+
+    def __init__(self, labels=None):
+        self.labels = list(labels) if labels is not None else list(EXPECTED_LABELS)
+        self.blocks = []   # (a1, values) from write()
+        self.cells = []    # (a1, value) from write_cell()
+
+    def read(self, tab, a1):
+        return [[label] for label in self.labels]
+
+    def write(self, tab, a1, values):
+        self.blocks.append((a1, values))
+        return values
+
+    def write_cell(self, tab, a1, value):
+        self.cells.append((a1, value))
+        return value
+
+
 class ParseResourcesTests(unittest.TestCase):
     def test_only_resources_panel_parsed(self):
         result = parse_overview_resources(OVERVIEW_HTML)
@@ -77,6 +101,15 @@ class ParseResourcesTests(unittest.TestCase):
         # A nation can legitimately hold nothing; an absent panel is not a malformed page.
         self.assertEqual(parse_overview_resources("<html></html>"), {})
 
+    def test_negative_quantity_accepted(self):
+        html = """
+<div class="panel-heading">Resources</div>
+<table class="table"><tbody>
+  <tr><td style="text-align: right;">Apples</td><td><span>-5</span></td></tr>
+</tbody></table>
+"""
+        self.assertEqual(parse_overview_resources(html), {"Apples": -5})
+
 
 class DesiredStockTests(unittest.TestCase):
     def test_row_order_matches_the_sheet(self):
@@ -105,8 +138,48 @@ class ServerTimeTests(unittest.TestCase):
         self.assertEqual(parse_server_time(html), "2026-01-02 09:05:00")
 
     def test_missing_stamp_raises(self):
-        with self.assertRaises(StockpileError):
+        with self.assertRaises(StockpileError) as caught:
             parse_server_time("<html><body>Please log in.</body></html>")
+        self.assertIn("Server time", str(caught.exception))
+
+
+class CheckLabelsTests(unittest.TestCase):
+    def test_expected_labels_have_no_problems(self):
+        self.assertEqual(check_labels(FakeSheet(), "T"), [])
+
+    def test_labels_are_case_and_space_insensitive(self):
+        problems = check_labels(FakeSheet(labels=[" Apple ", "OIL", "coffee",
+                                                  "mpart", "vpart", "gems"]), "T")
+        self.assertEqual(problems, [])
+
+    def test_reordered_labels_flagged_with_their_cell(self):
+        problems = check_labels(FakeSheet(labels=["oil", "apple", "coffee",
+                                                  "mpart", "vpart", "gems"]), "T")
+        self.assertEqual(len(problems), 2)
+        self.assertIn("Q11", problems[0])
+        self.assertIn("'apple'", problems[0])
+        self.assertIn("'oil'", problems[0])
+
+    def test_renamed_label_flagged(self):
+        problems = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
+                                                  "mpart", "vpart", "diamonds"]), "T")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Q16", problems[0])
+
+    def test_short_grid_flagged_rather_than_crashing(self):
+        problems = check_labels(FakeSheet(labels=["apple", "oil"]), "T")
+        self.assertEqual(len(problems), 4)     # rows 13-16 read as blank
+
+    def test_reads_only_the_label_column(self):
+        # The R values are deliberately not read: they are overwritten regardless.
+        class RecordingSheet(FakeSheet):
+            def read(self, tab, a1):
+                self.read_range = a1
+                return super().read(tab, a1)
+
+        sheet = RecordingSheet()
+        check_labels(sheet, "T")
+        self.assertEqual(sheet.read_range, "Q11:Q16")
 
 
 class MappingIntegrityTests(unittest.TestCase):
