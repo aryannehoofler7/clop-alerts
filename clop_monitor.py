@@ -1714,21 +1714,33 @@ class Notifier:
             print(f"Webhook notification failed: {error}", file=sys.stderr, flush=True)
 
 
-def reconcile_buildings_step(
+def sync_sheet_step(
     client: ClopClient, sheet: object, nation: str, notifier: Notifier
 ) -> None:
-    """Reconcile the nation's building counts against the sheet, ahead of the regular alerting.
+    """Sync the nation's tab from overview.php, ahead of the regular alerting.
 
-    This is its own step that fires first each poll. It corrects any wrong have/disabled count and
-    pops up the corrections it made. It is best-effort: every failure is reported through the same
-    blocking dialog and then swallowed, because building sync must never take the monitor down.
+    Two syncs off one page fetch, in this order:
 
-    Two safeguards keep it from writing bad data: a dropped session is re-logged-in first (a
-    logged-out overview would look like a nation that owns nothing and zero the sheet), and a sheet
-    whose layout fails the sanity check is left completely untouched.
+    1. **Buildings** -- reconcile the have/disabled counts and pop up any corrections made.
+    2. **Stockpiles** -- snapshot the six goods into R11:R16 and stamp W10 with the server time.
+
+    They guard different regions of the sheet and are independent: one being skipped for a layout
+    problem does not skip the other. The whole step is best-effort -- every failure is reported
+    through the same blocking dialog and then swallowed, because sheet sync must never take the
+    monitor down.
+
+    A dropped session is re-logged-in before anything is trusted: a logged-out overview would look
+    like a nation that owns nothing and holds nothing, and would zero the sheet.
     """
     from buildings import BuildingError, parse_overview_buildings, reconcile, sanity_check
     from sheets import SheetError
+    from stockpiles import (
+        StockpileError,
+        check_labels,
+        parse_overview_resources,
+        parse_server_time,
+        snapshot,
+    )
 
     try:
         overview_html = client._open("overview.php")
@@ -1737,26 +1749,40 @@ def reconcile_buildings_step(
             overview_html = client._open("overview.php")
             if not is_logged_in(overview_html):
                 raise MonitorError("not logged in when reading overview.php")
+
         overview = parse_overview_buildings(overview_html)
         problems = sanity_check(sheet, nation, overview)
         if problems:
             notifier.notify_failure(
                 "Building sync skipped — the sheet layout or building mapping looks wrong, so no "
-                "cells were changed:\n\n"
+                "building cells were changed:\n\n"
                 + "\n".join(f"- {problem}" for problem in problems)
                 + "\n\nRun 'python buildings.py' to recheck once the sheet is fixed."
             )
-            return
-        corrections = reconcile(sheet, nation, overview)
-        if corrections:
-            notifier.notify(
-                "Building counts corrected on the sheet:\n\n"
-                + "\n".join(f"- {correction.describe()}" for correction in corrections)
+        else:
+            corrections = reconcile(sheet, nation, overview)
+            if corrections:
+                notifier.notify(
+                    "Building counts corrected on the sheet:\n\n"
+                    + "\n".join(f"- {correction.describe()}" for correction in corrections)
+                )
+
+        # The stockpile snapshot is a scheduled refresh rather than an event, so a successful write
+        # is deliberately silent -- at a 60s poll a popup for it would never stop firing.
+        server_time = parse_server_time(overview_html)
+        stock_problems = check_labels(sheet, nation)
+        if stock_problems:
+            notifier.notify_failure(
+                "Stockpile snapshot skipped — the sheet's STOCK labels have moved, so nothing was "
+                "written (R11:R16 and the W10 timestamp are untouched, and W10 will now go "
+                "stale):\n\n"
+                + "\n".join(f"- {problem}" for problem in stock_problems)
+                + "\n\nRun 'python stockpiles.py' to recheck once the sheet is fixed."
             )
-    except (MonitorError, SheetError, BuildingError) as error:
-        notifier.notify_failure(
-            f"Building reconciliation failed: {error}\n\nThe monitor continues polling."
-        )
+        else:
+            snapshot(sheet, nation, parse_overview_resources(overview_html), server_time)
+    except (MonitorError, SheetError, BuildingError, StockpileError) as error:
+        notifier.notify_failure(f"Sheet sync failed: {error}\n\nThe monitor continues polling.")
 
 
 def check_and_notify(
@@ -2088,9 +2114,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             flush=True,
         )
 
-        # Building reconciliation is on whenever CLOP_NATION names a tab in the shared sheet.
-        # Unset -> the monitor runs exactly as before; a missing/unreachable tab -> warn and stay
-        # off rather than fail every poll.
+        # Sheet sync (buildings + stockpiles) is on whenever CLOP_NATION names a tab in the shared
+        # sheet. Unset -> the monitor runs exactly as before; a missing/unreachable tab -> warn and
+        # stay off rather than fail every poll.
         from sheets import GoogleSheet, SheetError, nation_from_env
 
         building_sheet: Optional[GoogleSheet] = None
@@ -2098,17 +2124,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             building_nation = nation_from_env(args.env_file.resolve())
         except SheetError:
-            print("Building sync off (CLOP_NATION not set).", flush=True)
+            print("Sheet sync off (CLOP_NATION not set).", flush=True)
         else:
             building_sheet = GoogleSheet()
             try:
                 building_sheet.require_tab(building_nation)
                 print(
-                    f"Building sync on: reconciling {building_nation!r} each poll before alerting.",
+                    f"Sheet sync on: reconciling buildings and snapshotting stockpiles for "
+                    f"{building_nation!r} each poll before alerting.",
                     flush=True,
                 )
             except SheetError as error:
-                notifier.notify_failure(f"Building sync is off: {error}")
+                notifier.notify_failure(f"Sheet sync is off: {error}")
                 building_sheet = None
 
         loaded = LoadedSettings(settings, settings_source)
@@ -2121,12 +2148,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             settings = loaded.settings
             poll_failed = False
             try:
-                # Building reconciliation is its own process that fires first, before the regular
+                # Sheet sync is its own process that fires first, before the regular
                 # message/news/report alerting. It handles and reports its own failures.
                 if building_sheet is not None and building_nation is not None:
-                    reconcile_buildings_step(
-                        client, building_sheet, building_nation, notifier
-                    )
+                    sync_sheet_step(client, building_sheet, building_nation, notifier)
                 current, _ = check_and_notify(
                     client,
                     previous,

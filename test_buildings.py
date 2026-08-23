@@ -64,25 +64,41 @@ def sheet_column_a():
 
 
 class FakeSheet:
-    """Stand-in for GoogleSheet: serves a fixed A/B grid, records writes."""
+    """Stand-in for GoogleSheet: serves a fixed A/B grid and the Q stock labels, records writes."""
 
-    def __init__(self, column_a, column_b):
+    def __init__(self, column_a, column_b, stock_labels=None):
         self._a = list(column_a)
         self._b = list(column_b)
-        self.writes = []
+        self._labels = list(stock_labels) if stock_labels is not None else [
+            "apple", "oil", "coffee", "mpart", "vpart", "gems"
+        ]
+        self.writes = []   # (a1, value) from write_cell
+        self.blocks = []   # (a1, values) from write
 
     def read(self, tab, a1):
+        if a1.startswith("Q"):
+            return [[label] for label in self._labels]
         n = max(len(self._a), len(self._b))
         return [[self._a[i] if i < len(self._a) else "",
                  self._b[i] if i < len(self._b) else ""] for i in range(n)]
 
+    def write(self, tab, a1, values):
+        self.blocks.append((a1, values))
+        return values
+
     def write_cell(self, tab, a1, value):
         self.writes.append((a1, value))
-        row = int(a1[1:]) - 1
-        while row >= len(self._b):
-            self._b.append("")
-        self._b[row] = value
+        if a1.startswith("B"):
+            row = int(a1[1:]) - 1
+            while row >= len(self._b):
+                self._b.append("")
+            self._b[row] = value
         return value
+
+
+def building_writes(sheet):
+    """The column-B writes only -- the stockpile snapshot also writes W10."""
+    return [(a1, value) for a1, value in sheet.writes if a1.startswith("B")]
 
 
 class ParserTests(unittest.TestCase):
@@ -251,7 +267,10 @@ class MappingIntegrityTests(unittest.TestCase):
         self.assertEqual(energy, {"Solar Collector", "Tidal Generator"})
 
 
-LOGGED_IN_OVERVIEW = '<a href="logout.php">Logout</a>' + OVERVIEW_HTML
+LOGGED_IN_OVERVIEW = (
+    '<a href="logout.php">Logout</a><li><a>Server time: 2026-08-23 03:23:44</a></li>'
+    + OVERVIEW_HTML
+)
 LOGGED_OUT_OVERVIEW = '<a href="login.php">Login</a>' + OVERVIEW_HTML
 
 
@@ -295,42 +314,79 @@ class FakeNotifier:
         return False
 
 
-class ReconcileStepTests(unittest.TestCase):
+class SyncSheetStepTests(unittest.TestCase):
     def test_corrections_alert_and_write(self):
-        from clop_monitor import reconcile_buildings_step
+        from clop_monitor import sync_sheet_step
 
         col_a, names = full_column_a()
         col_b = [""] * 130
         col_b[8 + names.index("Basic Mine")] = 8   # overview says 10 (1 disabled)
         sheet = FakeSheet(col_a, col_b)
         notifier = FakeNotifier()
-        reconcile_buildings_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         self.assertEqual(len(notifier.alerts), 1)
         self.assertIn("Basic Mine have 8 -> 10", notifier.alerts[0])
         self.assertEqual(notifier.failures, [])
-        self.assertTrue(sheet.writes)
+        self.assertTrue(building_writes(sheet))
 
-    def test_sanity_failure_warns_and_writes_nothing(self):
-        from clop_monitor import reconcile_buildings_step
+    def test_stockpile_snapshot_is_stamped_but_never_popped_up(self):
+        from clop_monitor import sync_sheet_step
+
+        # A sheet where the buildings already match, so nothing but the snapshot can speak up.
+        # OVERVIEW_HTML owns Bakery 2, Basic Copper Mine 10 (1 disabled), Gem Mine 1; every other
+        # building is 0 on both sides ('' normalises to 0).
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Bakery")] = 2
+        col_b[8 + names.index("Basic Mine")] = 10
+        col_b[8 + names.index("Gem Mine")] = 1
+        col_b[57 + names.index("Basic Mine")] = 1     # its disabled row
+        sheet = FakeSheet(col_a, col_b)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertIn(("W10", "2026-08-23 03:23:44"), sheet.writes)
+        # A routine snapshot is a scheduled refresh, not an event: no popup for it.
+        self.assertEqual(notifier.failures, [])
+        self.assertEqual(notifier.alerts, [])
+
+    def test_bad_stock_labels_warn_and_write_no_stock_cells(self):
+        from clop_monitor import sync_sheet_step
+
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130,
+                          stock_labels=["oil", "apple", "coffee", "mpart", "vpart", "gems"])
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("Stockpile snapshot skipped", notifier.failures[0])
+        self.assertEqual(sheet.blocks, [])                              # no R block
+        self.assertNotIn("W10", [a1 for a1, _ in sheet.writes])         # and no stamp
+
+    def test_sanity_failure_warns_and_writes_no_building_cells(self):
+        from clop_monitor import sync_sheet_step
 
         sheet = FakeSheet(sheet_column_a(), [""] * 130)  # most buildings missing -> sanity fails
         notifier = FakeNotifier()
-        reconcile_buildings_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         self.assertEqual(notifier.alerts, [])
         self.assertEqual(len(notifier.failures), 1)
         self.assertIn("Building sync skipped", notifier.failures[0])
-        self.assertEqual(sheet.writes, [])
+        self.assertEqual(building_writes(sheet), [])
+        # The stock block is a different region of the sheet, so it is still snapshotted.
+        self.assertTrue(sheet.blocks)
+        self.assertIn("W10", [a1 for a1, _ in sheet.writes])
 
     def test_logged_out_overview_writes_nothing(self):
-        from clop_monitor import reconcile_buildings_step
+        from clop_monitor import sync_sheet_step
 
         col_a, _ = full_column_a()
         sheet = FakeSheet(col_a, [""] * 130)
         notifier = FakeNotifier()
         client = FakeClient(LOGGED_OUT_OVERVIEW)
-        reconcile_buildings_step(client, sheet, "T", notifier)
+        sync_sheet_step(client, sheet, "T", notifier)
         self.assertTrue(client.logins >= 1)          # it tried to re-login
         self.assertEqual(sheet.writes, [])           # but never wrote
+        self.assertEqual(sheet.blocks, [])
         self.assertEqual(len(notifier.failures), 1)
 
 

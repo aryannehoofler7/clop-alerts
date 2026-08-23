@@ -190,21 +190,30 @@ def _standalone() -> int:
 
     # The snapshot itself never reads these; they are shown here only so a human can see what a run
     # would change. One extra read is fine in a diagnostic invoked by hand.
-    stored = [row[0] if row else "" for row in sheet.read(nation, VALUE_RANGE)]
+    # Shown as text, not normalised through cell_int: a diagnostic should surface whatever is
+    # actually in the cell (including junk) rather than launder it into a plausible number.
+    stored = [str(row[0]) if row and row[0] is not None else "" for row in
+              sheet.read(nation, VALUE_RANGE)]
     stored += [""] * (len(STOCK_ROWS) - len(stored))
 
     print(f"Server time: {parse_server_time(html)}")
-    print(f"{'row':<5}{'label':<8}{'game resource':<18}{'overview':>10}{'sheet':>10}")
-    for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
-        row = f"R{STOCK_FIRST_ROW + index}"
-        print(f"{row:<5}{label:<8}{game_name:<18}{want:>10}{str(stored[index]):>10}")
-
     if problems:
         print(f"\nStock label check FAILED for {nation!r}:")
         for problem in problems:
             print(f"  - {problem}")
+        print("\nThe row labels below may therefore be pointing at the wrong rows.")
+
+    print(f"\n{'row':<5}{'label':<8}{'game resource':<18}{'overview':>12}{'sheet':>12}")
+    for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
+        row = f"R{STOCK_FIRST_ROW + index}"
+        print(f"{row:<5}{label:<8}{game_name:<18}{want:>12,}{stored[index]:>12}")
+    print("\n'overview' is what the game reports; 'sheet' is what the sheet holds right now.\n"
+          "A difference between them is normal -- it is what a real run would write.")
+
+    if problems:
         return 1
-    print(f"\nStock label check passed for {nation!r}. Nothing was written.")
+    print(f"\nStock label check passed for {nation!r}. "
+          "This is a read-only report -- it never writes to the sheet.")
     return 0
 
 
