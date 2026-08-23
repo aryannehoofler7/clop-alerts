@@ -105,13 +105,11 @@ argument — `buildings.parse_overview_buildings` keeps its signature and its re
   is, and a snapshot with no staleness marker is worse than no snapshot.
 - `desired_stock(resources) -> list[int]` — the six quantities in row order; a good absent from the
   panel is `0`.
-- `check_labels(sheet, nation) -> tuple[list[str], list[int]]` — one read of `Q11:R16` returns both
-  the labels and the current R values. Returns the list of problems (empty = OK) and the current
-  values. A label is a problem when it does not match its expected `STOCK_ROWS` entry
+- `check_labels(sheet, nation) -> list[str]` — one read of `Q11:Q16`; returns the list of problems
+  (empty = OK). A label is a problem when it does not match its expected `STOCK_ROWS` entry
   case-insensitively after stripping.
-- `snapshot(sheet, nation, resources, server_time, current) -> list[tuple[str, int]]` — writes
-  `R11:R16` as a single 6-row block (skipped when `current` already equals the desired values), then
-  `W10`. Returns the six `(label, qty)` pairs recorded, whether or not the R write was needed.
+- `snapshot(sheet, nation, resources, server_time) -> list[tuple[str, int]]` — writes `R11:R16` as a
+  single 6-row block, then `W10`. Returns the six `(label, qty)` pairs recorded.
 
 ### Drift safety
 
@@ -123,15 +121,25 @@ is the signal that the recorded numbers are no longer being refreshed.
 
 This mirrors `buildings.sanity_check`: a sheet the tool is unsure of is left completely untouched.
 
-### Write economy
+### Always overwrite, never diff
 
-The read that checks the labels also returns the current `R11:R16`, at no extra cost. The R write is
-therefore **skipped when all six values already match** — the end state is identical and the monitor
-polls every 60s by default. `W10` is written on every run regardless, so it reads as *last verified*
-rather than *last changed*; that is what makes it a staleness marker.
+`R11:R16` is written on every run whether or not the values changed, and so is `W10`. Both are
+unconditional on purpose.
 
-Steady state is therefore 2 endpoint calls per poll (one read, one `W10` write) on top of what
-building reconciliation already does.
+An earlier draft read the current `R` values back (free, in the same read as the labels) and skipped
+the write when all six already matched. That optimisation has a hole. `sheets.cell_int` normalises
+an unreadable cell — `#REF!`, a stray label, a formula error — to `0`, which is indistinguishable
+from a legitimate zero. So for a good the nation holds none of, a corrupted cell would compare equal
+to the desired `0`, the write would be skipped, and `W10` would then stamp the sheet as freshly
+verified with garbage still sitting in the cell. That is precisely the failure the staleness marker
+exists to make visible, so the optimisation is not worth its cost.
+
+Writing unconditionally also keeps the two cells' meanings honest and identical: **`W10` means *last
+verified*, not *last changed*.** An old `W10` means the snapshot has stopped running, never merely
+that nothing moved.
+
+Cost is 3 endpoint calls per poll (one read for the labels, one block write, one cell write) on top
+of what building reconciliation already does.
 
 ### Monitor integration
 
@@ -163,7 +171,7 @@ any label problems, with a matching exit code. It performs **no writes** — the
   the same row shape); a good absent from the panel resolving to 0; `parse_server_time` finding the
   header string and raising when it is absent; `check_labels` accepting the expected labels and
   reporting a reordered, renamed, and blank one; `snapshot` writing `R11:R16` and `W10` against a
-  stubbed `GoogleSheet`, and skipping the R write when the values already match; `STOCK_ROWS` naming
+  stubbed `GoogleSheet`, including when the values already match; `STOCK_ROWS` naming
   six distinct goods that all exist in the game's non-building `resourcedefs` names.
 - `test_buildings.py` continues to pass unchanged after the parser extraction (its assertions are
   about `parse_overview_buildings`, not the parser class).

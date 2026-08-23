@@ -529,13 +529,12 @@ The flow, run in the same step as the building reconciliation and off the same o
 1. read the overview "Resources" panel into ``{resource_name: qty}`` (a good the nation holds none
    of is simply absent from the page, and reads as zero);
 2. read the CLOP **server** time out of the page header;
-3. verify the sheet's ``Q11:Q16`` still names the six goods, in order -- the same read returns the
-   current ``R11:R16`` values;
+3. verify the sheet's ``Q11:Q16`` still names the six goods, in order;
 4. write ``R11:R16`` and stamp ``W10`` with the server time.
 
 Unlike ``buildings.py`` this is a **snapshot, not a reconciliation**: the values already in the sheet
 are replaced rather than diffed and corrected, and a routine write is not an event worth alerting
-on. The current values are read only so a write that would change nothing can be skipped.
+on. Both cells are written on every run, even when nothing changed -- see ``snapshot``.
 
 Rows are addressed by position, so ``check_labels`` runs first every time: if ``Q11:Q16`` has been
 reordered or relabelled, nothing is written at all -- not even ``W10``, because a fresh timestamp
@@ -547,10 +546,10 @@ See ``docs/superpowers/specs/2026-08-23-stockpile-snapshot-design.md``.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Tuple
 
 from overview import parse_panel
-from sheets import GoogleSheet, cell_int
+from sheets import GoogleSheet
 
 #: Sheet STOCK label (column Q) -> game resource name, **in sheet row order**: the list index is the
 #: offset from ``STOCK_FIRST_ROW``, so the order is data, not decoration.
@@ -572,8 +571,7 @@ STOCK_ROWS: List[Tuple[str, str]] = [
 STOCK_FIRST_ROW = 11
 STOCK_LAST_ROW = STOCK_FIRST_ROW + len(STOCK_ROWS) - 1
 
-#: One read of the labels *and* the current values, so the label check costs no extra call.
-LABEL_RANGE = f"Q{STOCK_FIRST_ROW}:R{STOCK_LAST_ROW}"
+LABEL_RANGE = f"Q{STOCK_FIRST_ROW}:Q{STOCK_LAST_ROW}"
 VALUE_RANGE = f"R{STOCK_FIRST_ROW}:R{STOCK_LAST_ROW}"
 
 #: Where the "when was this taken" stamp goes. Empty in the sheet's layout; beside the STOCK header.
@@ -703,16 +701,15 @@ EXPECTED_LABELS = ["apple", "oil", "coffee", "mpart", "vpart", "gems"]
 
 
 class FakeSheet:
-    """Stand-in for GoogleSheet: serves the Q/R stock block and records every write."""
+    """Stand-in for GoogleSheet: serves the Q label column and records every write."""
 
-    def __init__(self, labels=None, values=None):
+    def __init__(self, labels=None):
         self.labels = list(labels) if labels is not None else list(EXPECTED_LABELS)
-        self.values = list(values) if values is not None else [0] * 6
         self.blocks = []   # (a1, values) from write()
         self.cells = []    # (a1, value) from write_cell()
 
     def read(self, tab, a1):
-        return [[label, value] for label, value in zip(self.labels, self.values)]
+        return [[label] for label in self.labels]
 
     def write(self, tab, a1, values):
         self.blocks.append((a1, values))
@@ -728,40 +725,41 @@ Then the test class, after `ServerTimeTests`:
 ```python
 class CheckLabelsTests(unittest.TestCase):
     def test_expected_labels_have_no_problems(self):
-        problems, current = check_labels(FakeSheet(values=[1, 2, 3, 4, 5, 6]), "T")
-        self.assertEqual(problems, [])
-        self.assertEqual(current, [1, 2, 3, 4, 5, 6])
-
-    def test_current_values_normalised(self):
-        _, current = check_labels(FakeSheet(values=["1,204", "", "n/a", 4, 5.0, 6]), "T")
-        self.assertEqual(current, [1204, 0, 0, 4, 5, 6])
+        self.assertEqual(check_labels(FakeSheet(), "T"), [])
 
     def test_labels_are_case_and_space_insensitive(self):
-        problems, _ = check_labels(FakeSheet(labels=[" Apple ", "OIL", "coffee",
-                                                     "mpart", "vpart", "gems"]), "T")
+        problems = check_labels(FakeSheet(labels=[" Apple ", "OIL", "coffee",
+                                                  "mpart", "vpart", "gems"]), "T")
         self.assertEqual(problems, [])
 
     def test_reordered_labels_flagged_with_their_cell(self):
-        problems, _ = check_labels(FakeSheet(labels=["oil", "apple", "coffee",
-                                                     "mpart", "vpart", "gems"]), "T")
+        problems = check_labels(FakeSheet(labels=["oil", "apple", "coffee",
+                                                  "mpart", "vpart", "gems"]), "T")
         self.assertEqual(len(problems), 2)
         self.assertIn("Q11", problems[0])
         self.assertIn("'apple'", problems[0])
         self.assertIn("'oil'", problems[0])
 
     def test_renamed_label_flagged(self):
-        problems, _ = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
-                                                     "mpart", "vpart", "diamonds"]), "T")
+        problems = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
+                                                  "mpart", "vpart", "diamonds"]), "T")
         self.assertEqual(len(problems), 1)
         self.assertIn("Q16", problems[0])
 
     def test_short_grid_flagged_rather_than_crashing(self):
-        sheet = FakeSheet()
-        sheet.labels = ["apple", "oil"]
-        sheet.values = [1, 2]
-        problems, current = check_labels(sheet, "T")
+        problems = check_labels(FakeSheet(labels=["apple", "oil"]), "T")
         self.assertEqual(len(problems), 4)     # rows 13-16 read as blank
-        self.assertEqual(current, [1, 2, 0, 0, 0, 0])
+
+    def test_reads_only_the_label_column(self):
+        # The R values are deliberately not read: they are overwritten regardless.
+        class RecordingSheet(FakeSheet):
+            def read(self, tab, a1):
+                self.read_range = a1
+                return super().read(tab, a1)
+
+        sheet = RecordingSheet()
+        check_labels(sheet, "T")
+        self.assertEqual(sheet.read_range, "Q11:Q16")
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -773,34 +771,33 @@ Expected: FAIL with `ImportError: cannot import name 'check_labels' from 'stockp
 - [ ] **Step 3: Add `check_labels` to `stockpiles.py`**
 
 ```python
-def check_labels(sheet: GoogleSheet, nation: str) -> Tuple[List[str], List[int]]:
-    """Confirm ``Q11:Q16`` still names the six goods in order, and return the current ``R`` values.
+def check_labels(sheet: GoogleSheet, nation: str) -> List[str]:
+    """Confirm ``Q11:Q16`` still names the six goods, in order.
 
-    One read serves both jobs: the labels prove the rows still mean what this module thinks they
-    mean, and the values let ``snapshot`` skip a write that would change nothing.
+    Returns the list of problems; empty means the block is safe to write. A non-empty list names
+    each offending cell and must stop **all** writing, ``W10`` included -- the rows are addressed by
+    position, so a moved label means this module no longer knows which row is which.
 
-    Returns ``(problems, current)``. An empty ``problems`` means the block is safe to write; a
-    non-empty one names each offending cell and must stop **all** writing, ``W10`` included.
+    Only the labels are read. The current ``R`` values are deliberately not consulted: they are
+    overwritten unconditionally, so there is nothing to compare them against.
     """
     grid = sheet.read(nation, LABEL_RANGE)
     problems: List[str] = []
-    current: List[int] = []
     for index, (label, _) in enumerate(STOCK_ROWS):
         row = grid[index] if index < len(grid) else []
         found = str(row[0] if len(row) > 0 else "").strip()
-        current.append(cell_int(row[1] if len(row) > 1 else ""))
         if found.lower() != label:
             problems.append(
                 f"Q{STOCK_FIRST_ROW + index} should read {label!r} but reads {found!r}"
             )
-    return problems, current
+    return problems
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `python -m unittest test_stockpiles -v`
 
-Expected: PASS, 17 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -828,8 +825,8 @@ class SnapshotTests(unittest.TestCase):
         return parse_overview_resources(OVERVIEW_HTML)   # Apples 1226, Coffee 29, Gems 6
 
     def test_writes_the_value_block_and_the_timestamp(self):
-        sheet = FakeSheet(values=[0, 0, 0, 0, 0, 0])
-        written = snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44", [0] * 6)
+        sheet = FakeSheet()
+        written = snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
         self.assertEqual(
             sheet.blocks,
             [(VALUE_RANGE, [[1226], [0], [29], [0], [0], [6]])],
@@ -841,24 +838,27 @@ class SnapshotTests(unittest.TestCase):
              ("mpart", 0), ("vpart", 0), ("gems", 6)],
         )
 
-    def test_value_write_skipped_when_already_correct(self):
-        sheet = FakeSheet()
-        current = [1226, 0, 29, 0, 0, 6]
-        written = snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44", current)
-        self.assertEqual(sheet.blocks, [])                       # nothing to change
-        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "2026-08-23 03:23:44")])
-        self.assertEqual([qty for _, qty in written], current)   # still reported as recorded
-
-    def test_timestamp_written_even_when_values_unchanged(self):
-        # W10 means "last verified", not "last changed" -- that is what makes it a staleness marker.
-        sheet = FakeSheet()
-        snapshot(sheet, "T", {}, "2026-01-01 00:00:00", [0] * 6)
-        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "2026-01-01 00:00:00")])
-
     def test_a_good_no_longer_held_is_written_back_to_zero(self):
         sheet = FakeSheet()
-        snapshot(sheet, "T", {}, "2026-08-23 03:23:44", [5, 5, 5, 5, 5, 5])
+        snapshot(sheet, "T", {}, "2026-08-23 03:23:44")
         self.assertEqual(sheet.blocks, [(VALUE_RANGE, [[0], [0], [0], [0], [0], [0]])])
+
+    def test_nothing_is_read(self):
+        # The snapshot overwrites unconditionally, so it must not depend on the sheet's contents.
+        class NoReadSheet(FakeSheet):
+            def read(self, tab, a1):
+                raise AssertionError("snapshot must not read the sheet")
+
+        snapshot(NoReadSheet(), "T", self._resources(), "2026-08-23 03:23:44")
+
+    def test_timestamp_written_last(self):
+        # W10 claims the numbers beside it are fresh, so it must never land before they do.
+        sheet = FakeSheet()
+        order = []
+        sheet.write = lambda tab, a1, values: order.append("values")
+        sheet.write_cell = lambda tab, a1, value: order.append("stamp")
+        snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
+        self.assertEqual(order, ["values", "stamp"])
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -875,22 +875,23 @@ def snapshot(
     nation: str,
     resources: Dict[str, int],
     server_time: str,
-    current: Sequence[int],
 ) -> List[Tuple[str, int]]:
     """Write ``R11:R16`` and the ``W10`` stamp; return the six ``(label, qty)`` pairs recorded.
 
-    The six values go in one ``write`` call, and that call is skipped entirely when ``current``
-    already matches -- the end state is identical, and the monitor runs this every 60 seconds.
+    Both writes are unconditional. An earlier draft compared against the sheet's current values and
+    skipped the block write when they already matched, but an unreadable cell (``#REF!``, a stray
+    label) normalises to ``0`` and so would compare equal for a good the nation holds none of --
+    leaving the garbage in place while ``W10`` declared the row freshly verified. Overwriting always
+    costs one endpoint call and removes that hole.
 
-    ``W10`` is written on every run regardless, so it reads as *last verified* rather than *last
-    changed*. That is the whole point of it: an old stamp means the snapshot has stopped running,
-    not merely that nothing has moved.
+    ``W10`` therefore reads as *last verified* rather than *last changed*: an old stamp means the
+    snapshot has stopped running, not merely that nothing has moved. It is written **after** the
+    values, so it can never claim freshness for a block write that failed.
 
     The caller must have run ``check_labels`` and got no problems. This function trusts the rows.
     """
     wanted = desired_stock(resources)
-    if list(current) != wanted:
-        sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
+    sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
     sheet.write_cell(nation, TIMESTAMP_CELL, server_time)
     return [(label, value) for (label, _), value in zip(STOCK_ROWS, wanted)]
 ```
@@ -899,7 +900,7 @@ def snapshot(
 
 Run: `python -m unittest test_stockpiles -v`
 
-Expected: PASS, 21 tests.
+Expected: PASS, 20 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -941,13 +942,18 @@ def _standalone() -> int:
     client.login()
     html = client._open("overview.php")
     wanted = desired_stock(parse_overview_resources(html))
-    problems, current = check_labels(sheet, nation)
+    problems = check_labels(sheet, nation)
+
+    # The snapshot itself never reads these; they are shown here only so a human can see what a run
+    # would change. One extra read is fine in a diagnostic invoked by hand.
+    stored = [row[0] if row else "" for row in sheet.read(nation, VALUE_RANGE)]
+    stored += [""] * (len(STOCK_ROWS) - len(stored))
 
     print(f"Server time: {parse_server_time(html)}")
-    print(f"{'row':<5}{'label':<8}{'game resource':<18}{'overview':>10}{'sheet':>8}")
-    for index, ((label, game_name), want, have) in enumerate(zip(STOCK_ROWS, wanted, current)):
+    print(f"{'row':<5}{'label':<8}{'game resource':<18}{'overview':>10}{'sheet':>10}")
+    for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
         row = f"R{STOCK_FIRST_ROW + index}"
-        print(f"{row:<5}{label:<8}{game_name:<18}{want:>10}{have:>8}")
+        print(f"{row:<5}{label:<8}{game_name:<18}{want:>10}{str(stored[index]):>10}")
 
     if problems:
         print(f"\nStock label check FAILED for {nation!r}:")
@@ -1005,19 +1011,18 @@ Replace the whole `class FakeSheet:` block (currently `test_buildings.py:65-85`)
 class FakeSheet:
     """Stand-in for GoogleSheet: serves a fixed A/B grid and the Q/R stock block, records writes."""
 
-    def __init__(self, column_a, column_b, stock_labels=None, stock_values=None):
+    def __init__(self, column_a, column_b, stock_labels=None):
         self._a = list(column_a)
         self._b = list(column_b)
         self._labels = list(stock_labels) if stock_labels is not None else [
             "apple", "oil", "coffee", "mpart", "vpart", "gems"
         ]
-        self._stock = list(stock_values) if stock_values is not None else [0] * 6
         self.writes = []   # (a1, value) from write_cell
         self.blocks = []   # (a1, values) from write
 
     def read(self, tab, a1):
         if a1.startswith("Q"):
-            return [[label, value] for label, value in zip(self._labels, self._stock)]
+            return [[label] for label in self._labels]
         n = max(len(self._a), len(self._b))
         return [[self._a[i] if i < len(self._a) else "",
                  self._b[i] if i < len(self._b) else ""] for i in range(n)]
@@ -1126,6 +1131,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertIn("Building sync skipped", notifier.failures[0])
         self.assertEqual(building_writes(sheet), [])
         # The stock block is a different region of the sheet, so it is still snapshotted.
+        self.assertTrue(sheet.blocks)
         self.assertIn("W10", [a1 for a1, _ in sheet.writes])
 
     def test_logged_out_overview_writes_nothing(self):
@@ -1210,7 +1216,7 @@ def sync_sheet_step(
         # The stockpile snapshot is a scheduled refresh rather than an event, so a successful write
         # is deliberately silent -- at a 60s poll a popup for it would never stop firing.
         server_time = parse_server_time(overview_html)
-        stock_problems, current = check_labels(sheet, nation)
+        stock_problems = check_labels(sheet, nation)
         if stock_problems:
             notifier.notify_failure(
                 "Stockpile snapshot skipped — the sheet's STOCK labels have moved, so nothing was "
@@ -1220,7 +1226,7 @@ def sync_sheet_step(
                 + "\n\nRun 'python stockpiles.py' to recheck once the sheet is fixed."
             )
         else:
-            snapshot(sheet, nation, parse_overview_resources(overview_html), server_time, current)
+            snapshot(sheet, nation, parse_overview_resources(overview_html), server_time)
     except (MonitorError, SheetError, BuildingError, StockpileError) as error:
         notifier.notify_failure(f"Sheet sync failed: {error}\n\nThe monitor continues polling.")
 ```
@@ -1420,9 +1426,9 @@ c = ClopClient(DEFAULT_BASE_URL, os.environ.get('CLOP_USERNAME') or env['CLOP_US
 c.login()
 html = c._open('overview.php')
 sheet, nation = startup_check()
-problems, current = sp.check_labels(sheet, nation)
+problems = sp.check_labels(sheet, nation)
 assert not problems, problems
-print(sp.snapshot(sheet, nation, sp.parse_overview_resources(html), sp.parse_server_time(html), current))
+print(sp.snapshot(sheet, nation, sp.parse_overview_resources(html), sp.parse_server_time(html)))
 "
 ```
 
