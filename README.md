@@ -635,9 +635,45 @@ configuration file and never overwrites one. Read the startup lines when you sta
 line is printed only at startup — a reload never prints it — which is another reason to do the pull
 and the restart together rather than leaving it for later.
 
+## Google Sheets module
+
+`sheets.py` is a separate, self-contained tool for reading and updating the **shared** CLOP
+planning spreadsheet. It is standard-library only, like the monitor, and needs no Google account,
+credential file, or setup — the endpoint it uses is committed in the module because the sheet is
+shared and so is the tool:
+
+```python
+from sheets import GoogleSheet
+
+sheet = GoogleSheet()
+sheet.read_cell("LePone(Z)", "R11")        # -> 0
+sheet.write_cell("LePone(Z)", "R11", 42)   # -> 42  (writes the live sheet)
+sheet.read("LePone(Z)", "A11:U11")         # -> a 2-D list of the row
+sheet.write("LePone(Z)", "A1:B2", [[1, 2], [3, 4]])
+```
+
+Ranges use A1 notation. `write` accepts a scalar, a flat row, or a 2-D block and coerces it to the
+shape the range expects. Any failure — network, a non-JSON reply, or a server-side error such as an
+unknown tab — raises `sheets.SheetError`.
+
+Writes to Google Sheets always need a Google identity *somewhere* (API keys are read-only). This
+project keeps that identity out of the repo by routing through a small Apps Script web app bound to
+the sheet, deployed as *execute as owner / accessible to anyone*. The Google login lives inside that
+deployment; the repo holds only its public `/exec` URL. If the deployment is ever lost, the design
+doc `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md` contains the Apps Script
+source and the redeploy steps — paste it back onto the sheet and replace `EXEC_URL` in `sheets.py`.
+
+Run the module directly to perform a live round-trip against `LePone(Z)!R11` (read, write `42`, read
+back, restore) as a smoke test:
+
+```powershell
+python .\sheets.py
+```
+
 ## Tests
 
-The parser tests use synthetic HTML and never contact the hosted game:
+The parser tests use synthetic HTML and never contact the hosted game. The Sheets tests
+(`test_sheets.py`) stub the network, so they never contact Google. Both run under one command:
 
 ```powershell
 python -m unittest -v
