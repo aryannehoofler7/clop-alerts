@@ -585,6 +585,22 @@ alert, titled **CLOP monitor problem**, so polling pauses until you acknowledge 
 continuing to fail where you cannot see it. Failures are never retried silently: a monitor that
 cannot read the game is not monitoring it.
 
+This holds everywhere, not just in the polling loop, because a printed failure is a failure nobody
+sees — and a monitor that is quietly doing nothing is indistinguishable from one with nothing to
+report. So it also covers:
+
+- **Sheet sync being off.** If `CLOP_NATION` is not set, the monitor still polls and still alerts
+  while never writing a single cell to your tab. You get a dialog at startup saying so.
+- **The two hand-run scripts.** `python .\stockpiles.py` and `python .\buildings.py` raise the
+  dialog too, not just terminal output — they are what the monitor's own dialogs tell you to run.
+- **A broken notification channel.** If the webhook stops accepting alerts you get a dialog; if the
+  dialogs themselves stop working you get a webhook message. Each is reported on the other, because
+  a channel cannot announce its own silence. If both are down, the terminal is genuinely all that
+  is left.
+
+`NoTerminalOnlyFailuresTests` in `test_clop_monitor.py` enforces this by scanning the source: a new
+failure that writes to the terminal without a dialog behind it fails the test suite.
+
 Two kinds of failure, distinguished by what the dialog says:
 
 - **The monitor has stopped and is no longer polling.** It cannot continue. The exit code says how
@@ -829,7 +845,7 @@ above catch — used to end the monitor with a Python traceback and no dialog at
 
 The parser tests use synthetic HTML and never contact the hosted game. The Sheets, overview, building
 and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_buildings.py`,
-`test_stockpiles.py`) stub the network, so they never contact Google or the game. All **388** of them
+`test_stockpiles.py`) stub the network, so they never contact Google or the game. All **398** of them
 run under one command:
 
 ```powershell

@@ -206,14 +206,17 @@ def _standalone() -> int:
     import os
     import sys
 
-    from clop_monitor import ClopClient, DEFAULT_BASE_URL, load_env_file
+    from clop_monitor import ClopClient, DEFAULT_BASE_URL, load_env_file, popup_failure
     from sheets import DEFAULT_ENV_PATH, startup_check
 
     env = load_env_file(DEFAULT_ENV_PATH)
     username = os.environ.get("CLOP_USERNAME") or env.get("CLOP_USERNAME")
     password = os.environ.get("CLOP_PASSWORD") or env.get("CLOP_PASSWORD")
     if not username or not password:
-        print("CLOP_USERNAME / CLOP_PASSWORD are not set (see .env).", file=sys.stderr)
+        popup_failure(
+            "The building check could not run: CLOP_USERNAME / CLOP_PASSWORD are not set.\n\n"
+            "Add them to .env beside this script."
+        )
         return 1
 
     sheet, nation = startup_check()
@@ -227,6 +230,12 @@ def _standalone() -> int:
         print(f"Building mapping sanity check FAILED for {nation!r}:")
         for problem in problems:
             print(f"  - {problem}")
+        popup_failure(
+            f"The building mapping or sheet layout is wrong on tab {nation!r}, so the monitor "
+            "will refuse to write the building rows. Fix the sheet, or building_map.py, so the "
+            "names line up again.\n\n"
+            + "\n".join(f"- {problem}" for problem in problems)
+        )
         return 1
     print(f"Building mapping sanity check passed for {nation!r} "
           f"({len(overview)} owned buildings, {len(SHEET_BUILDINGS)} sheet rows).")
@@ -236,12 +245,14 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
-    from clop_monitor import MonitorError
+    from clop_monitor import MonitorError, popup_failure
     from overview import OverviewError
     from sheets import SheetError
 
     try:
         sys.exit(_standalone())
     except (BuildingError, MonitorError, OverviewError, SheetError) as error:
-        print(f"Building check failed: {error}", file=sys.stderr)
+        # A dialog, not a terminal line: this script is what the monitor's own popups tell people
+        # to run, so it must not fail in a way only a terminal-watcher would notice.
+        popup_failure(f"The building check failed: {error}")
         sys.exit(1)

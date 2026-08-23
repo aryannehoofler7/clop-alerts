@@ -1809,7 +1809,12 @@ class FailureNotificationTests(unittest.TestCase):
         self.assertIn("the roof is on fire", stderr.getvalue())
 
     def _record_failures(self):
-        """Replace the notifier so tests can read what the monitor announced."""
+        """Replace the notifier so tests can read what the monitor announced.
+
+        The "Sheet sync is OFF" startup dialog is filtered out: these tests run without
+        CLOP_NATION, so it fires every time and is not what any of them is about.
+        ``SheetSyncOffTests`` covers it directly.
+        """
         failures = []
 
         class RecordingNotifier(Notifier):
@@ -1817,7 +1822,8 @@ class FailureNotificationTests(unittest.TestCase):
                 return False
 
             def notify_failure(self, message):
-                failures.append(message)
+                if "Sheet sync is OFF" not in message:
+                    failures.append(message)
                 return True
 
         patcher = mock.patch.object(clop_monitor, "Notifier", RecordingNotifier)
@@ -3981,7 +3987,11 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
                 return False
 
             def notify_failure(self, message):
-                self.failures.append(message)
+                # These tests run without CLOP_NATION, so the "Sheet sync is OFF" startup dialog
+                # fires every time and is not what any of them is about. SheetSyncOffTests covers
+                # it directly.
+                if "Sheet sync is OFF" not in message:
+                    self.failures.append(message)
                 return True
 
         patcher = mock.patch.object(clop_monitor, "Notifier", RecordingNotifier)
@@ -4292,6 +4302,130 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("archived", notifiers[1].failures[0])
         self.assertIn("The monitor has stopped", notifiers[1].failures[0])
+
+
+class ChannelFailureTests(unittest.TestCase):
+    """A broken notification channel must be announced on the other one, never only in the terminal.
+
+    This is the failure a user cannot detect unaided: alerts stop arriving, and silence looks
+    exactly like nothing having happened.
+    """
+
+    def test_dead_webhook_raises_a_dialog(self):
+        notifier = clop_monitor.Notifier(desktop=True, webhook_url="https://hook.test/x")
+        dialogs = []
+        notifier._desktop_notification = lambda message, title=None, error=False: (
+            dialogs.append(message) or True
+        )
+        with mock.patch.object(
+            clop_monitor.urllib.request, "urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        ), contextlib.redirect_stderr(io.StringIO()):
+            notifier._webhook_notification("anything")
+        self.assertEqual(len(dialogs), 1)
+        self.assertIn("webhook is not receiving alerts", dialogs[0])
+
+    def test_broken_dialog_goes_to_the_webhook(self):
+        notifier = clop_monitor.Notifier(desktop=True, webhook_url="https://hook.test/x")
+        sent = []
+        notifier._webhook_notification = sent.append
+        with contextlib.redirect_stderr(io.StringIO()):
+            notifier._report_channel_failure("dialogs are broken", via_desktop=False)
+        self.assertEqual(sent, ["dialogs are broken"])
+
+    def test_both_channels_down_does_not_recurse(self):
+        notifier = clop_monitor.Notifier(desktop=True, webhook_url="https://hook.test/x")
+        calls = []
+
+        def dead_webhook(message):
+            calls.append(("webhook", message))
+            notifier._report_channel_failure("webhook died too", via_desktop=True)
+
+        def dead_dialog(message, title=None, error=False):
+            calls.append(("dialog", message))
+            notifier._report_channel_failure("dialog died too", via_desktop=False)
+            return False
+
+        notifier._webhook_notification = dead_webhook
+        notifier._desktop_notification = dead_dialog
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            notifier._report_channel_failure("start", via_desktop=False)
+        # One hop to the other channel and no further: the fallback of the fallback would be the
+        # channel we already know is dead. Both messages still reach stderr, which by then is
+        # genuinely all that is left.
+        self.assertEqual([kind for kind, _ in calls], ["webhook"])
+        self.assertIn("start", stderr.getvalue())
+        self.assertIn("webhook died too", stderr.getvalue())
+
+
+class NoTerminalOnlyFailuresTests(unittest.TestCase):
+    """No failure path may report only to a terminal.
+
+    Nobody watches the terminal. A failure that prints and nothing else looks identical to the
+    tool working, which is the single worst outcome available to a monitor: the user believes they
+    are being told about problems while they are not. Every failure gets the blocking dialog --
+    ``Notifier.notify_failure`` in the monitor, ``popup_failure`` in the hand-run scripts.
+
+    The two allowed exceptions are the fallbacks inside ``_report_channel_failure`` itself, which
+    run only when a notification channel is already known to be broken.
+    """
+
+    FILES = ("clop_monitor.py", "buildings.py", "stockpiles.py", "sheets.py", "overview.py")
+
+    #: The only functions allowed to write a failure to stderr without a dialog behind it, each
+    #: with the reason it cannot use one. Adding to this list should feel uncomfortable.
+    ALLOWED = {
+        # These *are* the dialog and the fallback machinery. They print as well as notify.
+        "notify": "prints alongside raising the dialog",
+        "notify_failure": "prints alongside raising the dialog",
+        "_report_channel_failure": "runs only when a channel is already broken; prints last",
+        # Argument validation, before any Notifier exists and while the user is at the prompt
+        # they just typed into. argparse's own errors are terminal-only regardless.
+        "main": "usage error at startup, exits immediately in front of the user",
+    }
+
+    def test_no_failure_prints_without_a_dialog(self):
+        unexpected = []
+        for name in self.FILES:
+            source = Path(__file__).resolve().parent / name
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            # Every print in the file, labelled with the function it sits in -- or "<module>" for
+            # the `if __name__ == "__main__":` blocks, which is exactly where the scripts' failure
+            # handlers live and where an earlier version of this test missed them entirely.
+            owner = {}
+            for parent in ast.walk(tree):
+                if isinstance(parent, ast.FunctionDef):
+                    for node in ast.walk(parent):
+                        owner.setdefault(id(node), parent.name)
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "print"):
+                    continue
+                where = owner.get(id(node), "<module>")
+                if where in self.ALLOWED:
+                    continue
+                if any(kw.arg == "file" and ast.unparse(kw.value).endswith("stderr")
+                       for kw in node.keywords):
+                    unexpected.append(f"{name}:{node.lineno} in {where}")
+        self.assertEqual(
+            unexpected, [],
+            "these report a failure to stderr with no dialog behind it: " + ", ".join(unexpected),
+        )
+
+
+class SheetSyncOffTests(unittest.TestCase):
+    def test_missing_nation_raises_a_dialog_not_a_terminal_line(self):
+        """Sheet sync silently doing nothing is indistinguishable from it working.
+
+        With CLOP_NATION unset the monitor still polls, still alerts, and never writes a single
+        cell. The only symptom is a W10 that stopped advancing, which nobody sees until they need
+        it -- so the user is told at startup, in a dialog.
+        """
+        source = inspect.getsource(clop_monitor.main)
+        start = source.index("nation_from_env(")
+        branch = source[start:start + 600]
+        self.assertIn("notify_failure", branch)
+        self.assertIn("Sheet sync is OFF", branch)
+        self.assertNotIn('print("Sheet sync off', branch)
 
 
 class OpenTransportFailureTests(unittest.TestCase):

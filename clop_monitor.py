@@ -1583,6 +1583,30 @@ class Notifier:
         self.desktop = desktop
         self.webhook_url = webhook_url
         self.sound = sound
+        self._in_channel_fallback = False
+
+    def _report_channel_failure(self, message: str, *, via_desktop: bool) -> None:
+        """Report that a notification channel is broken, using the other one.
+
+        Never the failing one: a dialog that will not open cannot announce itself, and a dead
+        webhook cannot report that it is dead. A broken channel is exactly the failure that must
+        not be terminal-only -- it means alerts the user is waiting for are not arriving, and
+        silence is indistinguishable from nothing having happened.
+
+        Re-entry is guarded, because each channel's fallback is the other and both can be down at
+        once. If that happens the terminal really is all that is left.
+        """
+        print(f"\a{message}", file=sys.stderr, flush=True)
+        if self._in_channel_fallback:
+            return
+        self._in_channel_fallback = True
+        try:
+            if via_desktop and self.desktop:
+                self._desktop_notification(message, title="CLOP monitor problem", error=True)
+            elif not via_desktop and self.webhook_url:
+                self._webhook_notification(message)
+        finally:
+            self._in_channel_fallback = False
 
     def notify(self, message: str) -> bool:
         """Send an alert and return whether a desktop dialog blocked until dismissal."""
@@ -1627,7 +1651,11 @@ class Notifier:
                         stderr=subprocess.DEVNULL,
                     )
                 except OSError as error:
-                    print(f"Desktop notification failed: {error}", file=sys.stderr, flush=True)
+                    self._report_channel_failure(
+                        f"Desktop notifications are not working: {error}. "
+                        "Alerts are being raised but you are not seeing them.",
+                        via_desktop=False,
+                    )
             return False
 
         powershell = shutil.which("powershell.exe") or shutil.which("powershell")
@@ -1666,7 +1694,15 @@ class Notifier:
                             winsound.SND_FILENAME | winsound.SND_ASYNC,
                         )
                     except RuntimeError as error:
-                        print(f"Alert WAV playback failed: {error}", file=sys.stderr, flush=True)
+                        # via_desktop=False: a dialog is on screen right now (this thread exists to
+                        # sound alongside it), so the gap is the audio cue that makes an alert
+                        # noticeable when nobody is looking at the screen. That loss is worth
+                        # reporting on the other channel rather than to the terminal.
+                        self._report_channel_failure(
+                            f"The alert sound is not playing: {error}. Alerts still appear on "
+                            "screen, but they will not make a noise.",
+                            via_desktop=False,
+                        )
                         return
                     if not self.sound.loop_while_popup_open:
                         return
@@ -1686,14 +1722,18 @@ class Notifier:
             )
             if completed.returncode == 0:
                 return True
-            print(
-                f"Desktop notification failed with exit code {completed.returncode}",
-                file=sys.stderr,
-                flush=True,
+            self._report_channel_failure(
+                f"Desktop notifications are not working (exit code {completed.returncode}). "
+                "Alerts are being raised but you are not seeing them.",
+                via_desktop=False,
             )
             return False
         except OSError as error:
-            print(f"Desktop notification failed: {error}", file=sys.stderr, flush=True)
+            self._report_channel_failure(
+                f"Desktop notifications are not working: {error}. "
+                "Alerts are being raised but you are not seeing them.",
+                via_desktop=False,
+            )
             return False
         finally:
             if sound_stop is not None:
@@ -1720,7 +1760,23 @@ class Notifier:
             with urllib.request.urlopen(request, timeout=15):
                 pass
         except (urllib.error.HTTPError, urllib.error.URLError) as error:
-            print(f"Webhook notification failed: {error}", file=sys.stderr, flush=True)
+            self._report_channel_failure(
+                f"Your webhook is not receiving alerts: {error}\n\n"
+                "Anything you were relying on reaching Discord or Slack is not arriving. The "
+                "desktop dialogs still work, so watch those until the webhook is fixed.",
+                via_desktop=True,
+            )
+
+
+def popup_failure(message: str) -> None:
+    """Raise the standard blocking dialog for a failure outside the polling loop.
+
+    The hand-run diagnostics (``python stockpiles.py``, ``python buildings.py``) report through
+    this. They are what the monitor's own dialogs tell people to run, so their failures have to
+    arrive the same way: printing assumes somebody is watching a terminal, and the premise of this
+    whole tool is that nobody is.
+    """
+    Notifier().notify_failure(message)
 
 
 def sync_sheet_step(
@@ -2150,7 +2206,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             sync_nation = nation_from_env(args.env_file.resolve())
         except SheetError:
-            print("Sheet sync off (CLOP_NATION not set).", flush=True)
+            # A dialog, not a terminal line. With sync off the monitor looks perfectly healthy --
+            # it polls, it alerts, it says nothing -- while the sheet is never updated once. The
+            # only symptom is a W10 that stopped advancing, which nobody sees until they need it.
+            notifier.notify_failure(
+                "Sheet sync is OFF, so your nation tab will not be updated at all: no building "
+                "counts, no stockpile numbers, and no W10 timestamp.\n\n"
+                "CLOP_NATION is not set. Add it to .env as CLOP_NATION=<your nation>, using the "
+                "exact name of your tab in the shared sheet, then restart the monitor.\n\n"
+                "Everything else (messages, news, reports) keeps working meanwhile."
+            )
         else:
             sync_sheet = GoogleSheet()
             try:

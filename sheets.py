@@ -231,10 +231,14 @@ if __name__ == "__main__":
 
     # Startup check: resolve CLOP_NATION and verify its tab exists, then read one cell to prove the
     # round trip. Read-only -- it never edits the sheet.
+    from clop_monitor import popup_failure
+
     try:
         sheet, nation = startup_check()
     except SheetError as error:
-        print(f"Startup check failed: {error}", file=sys.stderr)
+        # A dialog, not a terminal line -- the same rule the monitor and the other two scripts
+        # follow. A failure nobody sees is the one this project refuses to ship.
+        popup_failure(f"The sheet startup check failed: {error}")
         sys.exit(1)
     print(f"Nation tab {nation!r} found.")
     print(f"{nation}!R11 = {sheet.read_cell(nation, 'R11')!r}")
