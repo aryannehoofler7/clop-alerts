@@ -1784,13 +1784,16 @@ def sync_sheet_step(
 ) -> None:
     """Sync the nation's tab from overview.php, ahead of the regular alerting.
 
-    Two syncs off one page fetch, in this order:
+    Three syncs off one page fetch, in this order:
 
     1. **Buildings** -- reconcile the have/disabled counts and pop up any corrections made.
-    2. **Stockpiles** -- snapshot the six goods into R11:R16 and stamp W10 with the server time.
+    2. **Stockpiles** -- snapshot the nation tab's six goods and stamp its timestamp.
+    3. **Dashboard** -- write the nation's own column on the alliance-wide tab: all 31 goods and
+       the six status rows.
 
-    They guard different regions of the sheet and are independent: one being skipped for a layout
-    problem does not skip the other.
+    Steps 2 and 3 are one call into ``stockpiles.snapshot``, off one parse. They guard different
+    regions of the sheet and are independent of each other and of the buildings step: one being
+    skipped for a layout problem does not skip the others.
 
     That independence covers layout problems only. A transport or sheet failure in either aborts
     both, deliberately: it means the shared connection is down, so retrying the other half would
@@ -1808,10 +1811,10 @@ def sync_sheet_step(
     from overview import OverviewError, require_valid_overview
     from sheets import SheetError
     from stockpiles import (
+        NationStatus,
+        NationStatusError,
         StockpileError,
-        check_labels,
-        parse_overview_resources,
-        parse_server_time,
+        Stockpiles,
         snapshot,
     )
 
@@ -1827,8 +1830,10 @@ def sync_sheet_step(
         # Validate the whole page before trusting any of it: a broken overview read as "owns
         # nothing, holds nothing" would zero the tab and stamp it freshly verified.
         require_valid_overview(overview_html)
-        server_time = parse_server_time(overview_html)
-        resources = parse_overview_resources(overview_html)
+        # Parsed once, here: both sheet regions are written from these two objects, and nothing
+        # downstream re-fetches or re-parses the page.
+        stock = Stockpiles.from_overview(overview_html)
+        status = NationStatus.from_overview(overview_html)
 
         phase = "the building reconcile"
         overview = parse_overview_buildings(overview_html)
@@ -1848,20 +1853,25 @@ def sync_sheet_step(
                     + "\n".join(f"- {correction.describe()}" for correction in corrections)
                 )
 
-        # The stockpile snapshot is a scheduled refresh rather than an event, so a successful write
-        # is deliberately silent -- at a 60s poll a popup for it would never stop firing.
+        # The snapshot is a scheduled refresh rather than an event, so a successful write is
+        # deliberately silent -- at a 60s poll a popup for it would never stop firing.
         phase = "the stockpile snapshot"
-        stock_problems = check_labels(sheet, nation)
+        _report, stock_problems = snapshot(sheet, nation, stock, status)
         if stock_problems:
             notifier.notify_failure(
-                "Stockpile snapshot skipped - the sheet's STOCK labels have moved, so nothing was "
-                "written (R11:R16 and the W10 timestamp are untouched, and W10 will now go stale). "
-                "Run 'python stockpiles.py' to recheck once the sheet is fixed.\n\n"
+                "Stockpile snapshot: part of the sheet was not written because its layout is not "
+                "what the script expects. The affected region is untouched and its timestamp will "
+                "now go stale. Run 'python stockpiles.py' to recheck once the sheet is fixed.\n\n"
                 + "\n".join(f"- {problem}" for problem in stock_problems)
             )
-        else:
-            snapshot(sheet, nation, resources, server_time)
-    except (MonitorError, OverviewError, SheetError, BuildingError, StockpileError) as error:
+    except (
+        MonitorError,
+        OverviewError,
+        SheetError,
+        BuildingError,
+        StockpileError,
+        NationStatusError,
+    ) as error:
         notifier.notify_failure(
             f"Sheet sync failed during {phase}: {error}\n\nThe monitor continues polling."
         )

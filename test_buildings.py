@@ -48,6 +48,26 @@ OVERVIEW_HTML = """
 """
 
 
+#: The Dashboard's column A, in the live order: four status rows, a spacer, two more, a spacer,
+#: then the 31 goods with their two spacers. Nation "T" sits in column C.
+DASHBOARD_COLUMN_A = (
+    ["Active", "Sat", "NLR", "SE", "", "GDP", "Bits", ""]
+    + ["Energy", "Apples", "Coffee", "Oil", "Gas", "Gems", "Cider", "Pies", "Toys",
+       "Tungsten", "Plastics", "",
+       "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites", "",
+       "Forbidden Research", "Apotheosis Serum",
+       "DNA - Burro - Central", "DNA - Burro - North", "DNA - Burro - South",
+       "DNA - Prze - Central", "DNA - Prze - North", "DNA - Prze - South",
+       "DNA - Saddle - Central", "DNA - Saddle - North", "DNA - Saddle - South",
+       "DNA - Zebrica - Central", "DNA - Zebrica - North", "DNA - Zebrica - South"]
+)
+
+
+def dashboard_grid(nations=("READ ONLY", "TOTAL", "T", "other(P)")):
+    """The Dashboard as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels."""
+    return [list(nations)] + [[label] for label in DASHBOARD_COLUMN_A]
+
+
 def sheet_column_a():
     """A synthetic column A: header, a few have rows, DISABLED marker, a few disabled rows."""
     col = [""] * 130
@@ -66,20 +86,34 @@ def sheet_column_a():
 
 
 class FakeSheet:
-    """Stand-in for GoogleSheet: serves a fixed A/B grid and the Q stock labels, records writes."""
+    """Stand-in for GoogleSheet across all three ranges sync_sheet_step reads.
 
-    def __init__(self, column_a, column_b, stock_labels=None):
+    ``A1:B130`` on the nation tab is the buildings grid, ``Q1:W60`` its STOCK block, and
+    ``A1:Z60`` on the Dashboard the alliance-wide grid. ``blocks`` and ``writes`` stay keyed by A1
+    alone -- the nation tab and the Dashboard never share a range, so nothing is ambiguous.
+    """
+
+    def __init__(self, column_a, column_b, stock_labels=None, dashboard=None):
         self._a = list(column_a)
         self._b = list(column_b)
         self._labels = list(stock_labels) if stock_labels is not None else [
             "apple", "oil", "coffee", "mpart", "vpart", "gems"
         ]
+        self._dashboard = dashboard if dashboard is not None else dashboard_grid()
         self.writes = []   # (a1, value) from write_cell
         self.blocks = []   # (a1, values) from write
 
     def read(self, tab, a1):
+        if tab == "Dashboard":
+            return self._dashboard
         if a1.startswith("Q"):
-            return [[label] for label in self._labels]
+            # Q..W: the STOCK header at row 10 with HAVE beside it and the stamp in W, then the
+            # six labels. Mirrors the live nation tab.
+            grid = [["", "", "", "", "", "", ""] for _ in range(9)]
+            grid.append(["STOCK", "HAVE", "NEED", "BUY", "", "", "2026-08-23 03:23:44"])
+            for label in self._labels:
+                grid.append([label, "", "", "", "", "", ""])
+            return grid
         n = max(len(self._a), len(self._b))
         return [[self._a[i] if i < len(self._a) else "",
                  self._b[i] if i < len(self._b) else ""] for i in range(n)]
@@ -280,8 +314,26 @@ class MappingIntegrityTests(unittest.TestCase):
         self.assertEqual(energy, {"Solar Collector", "Tidal Generator"})
 
 
+# The Nation panel sync_sheet_step needs for the Dashboard's status rows.
+NATION_PANEL_HTML = """
+<div class="panel-heading">Nation</div>
+<table class="table"><tbody>
+  <tr><td style="text-align: right;">Government Type</td><td>Loose Despotism</td></tr>
+  <tr><td style="text-align: right;">Economic Type</td><td>Poorly Defined</td></tr>
+  <tr><td style="text-align: right;">Relationship with Solar Empire</td>
+      <td><span>-120</span> (<span>3</span> per tick)</td></tr>
+  <tr><td style="text-align: right;">Relationship with New Lunar Republic</td>
+      <td><span>1500</span> (Ascending)</td></tr>
+  <tr><td style="text-align: right;">Satisfaction</td>
+      <td><span>218</span> (<span>-5</span> per tick)</td></tr>
+  <tr><td style="text-align: right;">GDP</td><td><span>60,900</span> bits per tick</td></tr>
+  <tr><td style="text-align: right;">Funds</td><td><span>1,234,567</span> bits</td></tr>
+</tbody></table>
+"""
+
 LOGGED_IN_OVERVIEW = (
     '<a href="logout.php">Logout</a><li><a>Server time: 2026-08-23 03:23:44</a></li>'
+    + NATION_PANEL_HTML
     + OVERVIEW_HTML
     + "</html>"
 )
@@ -359,10 +411,19 @@ class SyncSheetStepTests(unittest.TestCase):
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         # The real quantities must reach the block -- not zeros, and not the buildings dict.
-        self.assertEqual(
-            sheet.blocks, [("R11:R16", [[1226], [0], [0], [0], [0], [6]])]
-        )
+        blocks = dict(sheet.blocks)
+        self.assertEqual(blocks["R11:R16"], [[1226], [0], [0], [0], [0], [6]])
         self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
+        # ...and the same numbers reach the Dashboard, alongside the status rows.
+        self.assertEqual(
+            blocks["C2:C5"],
+            [["'2026-08-23 03:23:44"], ["218 (-5)"], ["1500 (Ascending)"], ["-120 (3)"]],
+        )
+        self.assertEqual(blocks["C7:C8"], [[60900], [1234567]])
+        # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
+        self.assertEqual(
+            blocks["C10:C20"], [[0], [1226], [0], [0], [0], [6], [0], [0], [0], [0], [0]]
+        )
         # A routine snapshot is a scheduled refresh, not an event: no popup for it.
         self.assertEqual(notifier.failures, [])
         self.assertEqual(notifier.alerts, [])
@@ -370,15 +431,48 @@ class SyncSheetStepTests(unittest.TestCase):
     def test_bad_stock_labels_warn_and_write_no_stock_cells(self):
         from clop_monitor import sync_sheet_step
 
+        # A label the lookup cannot find at all. Reordering no longer breaks anything -- rows are
+        # found by name -- so the failure worth testing is a label that is simply gone.
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130,
+                          stock_labels=["apple", "oil", "coffee", "mpart", "vpart", "rocks"])
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("gems", notifier.failures[0])
+        self.assertEqual([a1 for a1, _ in sheet.blocks if a1.startswith("R")], [])
+        self.assertNotIn("W10", [a1 for a1, _ in sheet.writes])         # and no stamp
+        # The Dashboard is a different region and still updates.
+        self.assertTrue([a1 for a1, _ in sheet.blocks if a1.startswith("C")])
+
+    def test_reordered_stock_labels_are_followed_not_rejected(self):
+        from clop_monitor import sync_sheet_step
+
+        # The labels are all there, just in a different order. The old positional block would have
+        # refused to write; the lookup writes each good to wherever its label now sits.
         col_a, _ = full_column_a()
         sheet = FakeSheet(col_a, [""] * 130,
                           stock_labels=["oil", "apple", "coffee", "mpart", "vpart", "gems"])
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(notifier.failures, [])
+        # Oil first now, then apples: 0 then 1226, not the other way round.
+        self.assertEqual(dict(sheet.blocks)["R11:R16"], [[0], [1226], [0], [0], [0], [6]])
+
+    def test_missing_dashboard_column_warns_and_writes_no_dashboard_cells(self):
+        from clop_monitor import sync_sheet_step
+
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130,
+                          dashboard=dashboard_grid(nations=("READ ONLY", "TOTAL", "somebody(P)")))
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         self.assertEqual(len(notifier.failures), 1)
-        self.assertIn("Stockpile snapshot skipped", notifier.failures[0])
-        self.assertEqual(sheet.blocks, [])                              # no R block
-        self.assertNotIn("W10", [a1 for a1, _ in sheet.writes])         # and no stamp
+        self.assertIn("no column in row 1", notifier.failures[0])
+        self.assertIn("somebody(P)", notifier.failures[0])   # row 1 is shown, to fix it by
+        self.assertEqual([a1 for a1, _ in sheet.blocks if a1.startswith("C")], [])
+        # The nation tab is a different region and still updates.
+        self.assertIn("R11:R16", [a1 for a1, _ in sheet.blocks])
 
     def test_sanity_failure_warns_and_writes_no_building_cells(self):
         from clop_monitor import sync_sheet_step
@@ -397,8 +491,11 @@ class SyncSheetStepTests(unittest.TestCase):
     def test_both_checks_failing_writes_nothing_and_warns_twice(self):
         from clop_monitor import sync_sheet_step
 
-        sheet = FakeSheet(sheet_column_a(), [""] * 130,   # buildings missing -> sanity fails
-                          stock_labels=["oil", "apple", "coffee", "mpart", "vpart", "gems"])
+        sheet = FakeSheet(
+            sheet_column_a(), [""] * 130,               # buildings missing -> sanity fails
+            stock_labels=["apple", "oil", "coffee", "mpart", "vpart", "rocks"],
+            dashboard=dashboard_grid(nations=("READ ONLY", "TOTAL")),
+        )
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         self.assertEqual(len(notifier.failures), 2)
@@ -517,6 +614,7 @@ class SyncSheetStepTests(unittest.TestCase):
         # legitimate page and must still sync. This is the property the checks above trade against.
         no_buildings = ('<a href="logout.php">Logout</a>'
                         '<li><a>Server time: 2026-08-23 03:23:44</a></li>'
+                        + NATION_PANEL_HTML +
                         '<div class="panel-heading">Resources</div>'
                         '<table class="table"><tbody>'
                         '<tr><td style="text-align: right;">Apples</td>'
@@ -529,8 +627,9 @@ class SyncSheetStepTests(unittest.TestCase):
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(no_buildings), sheet, "T", notifier)
         self.assertEqual(notifier.failures, [])
-        self.assertEqual(sheet.blocks, [("R11:R16", [[7], [0], [0], [0], [0], [0]])])
+        self.assertEqual(dict(sheet.blocks)["R11:R16"], [[7], [0], [0], [0], [0], [0]])
         self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
+        self.assertEqual(dict(sheet.blocks)["C7:C8"], [[60900], [1234567]])
 
 
 if __name__ == "__main__":
