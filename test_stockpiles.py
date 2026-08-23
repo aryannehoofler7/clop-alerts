@@ -6,11 +6,14 @@ import unittest
 from stockpiles import (
     STOCK_FIRST_ROW,
     STOCK_ROWS,
+    TIMESTAMP_CELL,
+    VALUE_RANGE,
     StockpileError,
     check_labels,
     desired_stock,
     parse_overview_resources,
     parse_server_time,
+    snapshot,
 )
 
 
@@ -180,6 +183,67 @@ class CheckLabelsTests(unittest.TestCase):
         sheet = RecordingSheet()
         check_labels(sheet, "T")
         self.assertEqual(sheet.read_range, "Q11:Q16")
+
+    def test_blank_cell_is_reported_as_empty_not_as_none(self):
+        class NoneCellSheet(FakeSheet):
+            def read(self, tab, a1):
+                return [[None] for _ in self.labels]
+
+        problems = check_labels(NoneCellSheet(), "T")
+        self.assertEqual(len(problems), 6)
+        self.assertNotIn("None", problems[0])
+        self.assertIn("''", problems[0])
+
+    def test_empty_grid_flags_every_row(self):
+        # A brand-new tab can come back with nothing at all.
+        self.assertEqual(len(check_labels(FakeSheet(labels=[]), "T")), 6)
+
+    def test_middle_row_mismatch_names_its_own_cell(self):
+        problems = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
+                                                  "widgets", "vpart", "gems"]), "T")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Q14", problems[0])
+
+
+class SnapshotTests(unittest.TestCase):
+    def _resources(self):
+        return parse_overview_resources(OVERVIEW_HTML)   # Apples 1226, Coffee 29, Gems 6
+
+    def test_writes_the_value_block_and_the_timestamp(self):
+        sheet = FakeSheet()
+        written = snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
+        self.assertEqual(
+            sheet.blocks,
+            [(VALUE_RANGE, [[1226], [0], [29], [0], [0], [6]])],
+        )
+        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "2026-08-23 03:23:44")])
+        self.assertEqual(
+            written,
+            [("apple", 1226), ("oil", 0), ("coffee", 29),
+             ("mpart", 0), ("vpart", 0), ("gems", 6)],
+        )
+
+    def test_a_good_no_longer_held_is_written_back_to_zero(self):
+        sheet = FakeSheet()
+        snapshot(sheet, "T", {}, "2026-08-23 03:23:44")
+        self.assertEqual(sheet.blocks, [(VALUE_RANGE, [[0], [0], [0], [0], [0], [0]])])
+
+    def test_nothing_is_read(self):
+        # The snapshot overwrites unconditionally, so it must not depend on the sheet's contents.
+        class NoReadSheet(FakeSheet):
+            def read(self, tab, a1):
+                raise AssertionError("snapshot must not read the sheet")
+
+        snapshot(NoReadSheet(), "T", self._resources(), "2026-08-23 03:23:44")
+
+    def test_timestamp_written_last(self):
+        # W10 claims the numbers beside it are fresh, so it must never land before they do.
+        sheet = FakeSheet()
+        order = []
+        sheet.write = lambda tab, a1, values: order.append("values")
+        sheet.write_cell = lambda tab, a1, value: order.append("stamp")
+        snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
+        self.assertEqual(order, ["values", "stamp"])
 
 
 class MappingIntegrityTests(unittest.TestCase):

@@ -128,9 +128,36 @@ def check_labels(sheet: GoogleSheet, nation: str) -> List[str]:
     problems: List[str] = []
     for index, (label, _) in enumerate(STOCK_ROWS):
         row = grid[index] if index < len(grid) else []
-        found = str(row[0] if len(row) > 0 else "").strip()
-        if found.lower() != label:
+        cell = row[0] if len(row) > 0 else None
+        found = "" if cell is None else str(cell).strip()
+        if found.lower() != label.lower():
             problems.append(
                 f"Q{STOCK_FIRST_ROW + index} should read {label!r} but reads {found!r}"
             )
     return problems
+
+
+def snapshot(
+    sheet: GoogleSheet,
+    nation: str,
+    resources: Dict[str, int],
+    server_time: str,
+) -> List[Tuple[str, int]]:
+    """Write ``R11:R16`` and the ``W10`` stamp; return the six ``(label, qty)`` pairs recorded.
+
+    Both writes are unconditional. An earlier draft compared against the sheet's current values and
+    skipped the block write when they already matched, but an unreadable cell (``#REF!``, a stray
+    label) normalises to ``0`` and so would compare equal for a good the nation holds none of --
+    leaving the garbage in place while ``W10`` declared the row freshly verified. Overwriting always
+    costs one endpoint call and removes that hole.
+
+    ``W10`` therefore reads as *last verified* rather than *last changed*: an old stamp means the
+    snapshot has stopped running, not merely that nothing has moved. It is written **after** the
+    values, so it can never claim freshness for a block write that failed.
+
+    The caller must have run ``check_labels`` and got no problems. This function trusts the rows.
+    """
+    wanted = desired_stock(resources)
+    sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
+    sheet.write_cell(nation, TIMESTAMP_CELL, server_time)
+    return [(label, value) for (label, _), value in zip(STOCK_ROWS, wanted)]
