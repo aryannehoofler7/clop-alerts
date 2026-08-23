@@ -17,6 +17,8 @@ Rows are addressed by position, so ``check_labels`` runs first every time: if ``
 reordered or relabelled, nothing is written at all -- not even ``W10``, because a fresh timestamp
 over stale numbers is worse than an obviously stale one.
 
+This module never acts on the game -- it only reads overview.php and writes the sheet.
+
 See ``docs/superpowers/specs/2026-08-23-stockpile-snapshot-design.md``.
 """
 
@@ -153,7 +155,9 @@ def snapshot(
 
     ``W10`` therefore reads as *last verified* rather than *last changed*: an old stamp means the
     snapshot has stopped running, not merely that nothing has moved. It is written **after** the
-    values, so it can never claim freshness for a block write that failed.
+    values, so it can never claim freshness for a block write that failed. The reverse partial
+    failure -- values written, stamp not -- leaves fresh numbers under an old stamp, which
+    understates freshness rather than overstating it, and the next run repairs it.
 
     The caller must have run ``check_labels`` and got no problems. This function trusts the rows.
     """
@@ -161,3 +165,50 @@ def snapshot(
     sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
     sheet.write_cell(nation, TIMESTAMP_CELL, server_time)
     return [(label, value) for (label, _), value in zip(STOCK_ROWS, wanted)]
+
+
+def _standalone() -> int:
+    """Login, read overview, and report the six quantities and the label check. Writes nothing."""
+    import os
+
+    from clop_monitor import ClopClient, DEFAULT_BASE_URL, load_env_file
+    from sheets import DEFAULT_ENV_PATH, startup_check
+
+    env = load_env_file(DEFAULT_ENV_PATH)
+    username = os.environ.get("CLOP_USERNAME") or env.get("CLOP_USERNAME")
+    password = os.environ.get("CLOP_PASSWORD") or env.get("CLOP_PASSWORD")
+    if not username or not password:
+        print("CLOP_USERNAME / CLOP_PASSWORD are not set (see .env).")
+        return 1
+
+    sheet, nation = startup_check()
+    client = ClopClient(DEFAULT_BASE_URL, username, password)
+    client.login()
+    html = client._open("overview.php")
+    wanted = desired_stock(parse_overview_resources(html))
+    problems = check_labels(sheet, nation)
+
+    # The snapshot itself never reads these; they are shown here only so a human can see what a run
+    # would change. One extra read is fine in a diagnostic invoked by hand.
+    stored = [row[0] if row else "" for row in sheet.read(nation, VALUE_RANGE)]
+    stored += [""] * (len(STOCK_ROWS) - len(stored))
+
+    print(f"Server time: {parse_server_time(html)}")
+    print(f"{'row':<5}{'label':<8}{'game resource':<18}{'overview':>10}{'sheet':>10}")
+    for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
+        row = f"R{STOCK_FIRST_ROW + index}"
+        print(f"{row:<5}{label:<8}{game_name:<18}{want:>10}{str(stored[index]):>10}")
+
+    if problems:
+        print(f"\nStock label check FAILED for {nation!r}:")
+        for problem in problems:
+            print(f"  - {problem}")
+        return 1
+    print(f"\nStock label check passed for {nation!r}. Nothing was written.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_standalone())
