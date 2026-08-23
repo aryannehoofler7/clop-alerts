@@ -691,10 +691,42 @@ deployment; the repo holds only its public `/exec` URL. If the deployment is eve
 doc `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md` contains the Apps Script
 source and the redeploy steps — paste it back onto the sheet and replace `EXEC_URL` in `sheets.py`.
 
+## Building reconciliation
+
+When `CLOP_NATION` is set, the monitor runs one extra step **first each poll, before the regular
+alerting**: it reads your nation's building counts from `overview.php` and corrects your nation tab
+to match. It updates only the cells that are wrong — the **have** count in column B and, in the
+`DISABLED:` region lower down, the **disabled** count — and then pops up a dialog listing the
+corrections it made (e.g. `Basic Mine have 8 -> 10`). Buildings you no longer own are set back to 0.
+Nothing on the game is changed; this only reads overview and writes the sheet.
+
+The building names on `overview.php` differ from the sheet's column A (the game calls it
+`Basic Copper Mine`, the sheet says `Basic Mine`), and one sheet row can stand for several game
+buildings (the single `DNA` row covers every regional DNA facility; `Energy Collector` covers the
+Solar Collector and Tidal Generator). That translation lives in **`building_map.py`**, whose names
+come straight from the game's own building list (`resourcedefs`).
+
+Because that mapping and the sheet's layout can drift, `buildings.py` sanity-checks them before every
+write, and skips the write (with a popup) if anything looks wrong rather than writing to the wrong
+row. Run the same check yourself any time — for instance after editing the sheet's layout — with:
+
+```powershell
+python .\buildings.py
+```
+
+It logs in, verifies the mapping against your sheet read-only, and reports pass/fail with an exit
+code. If it ever flags a building it can't place, update `building_map.py` (or the sheet) so the
+names line up again.
+
+Building sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the
+tab is missing or unreachable — the monitor's message/news/report alerting is never affected either
+way.
+
 ## Tests
 
-The parser tests use synthetic HTML and never contact the hosted game. The Sheets tests
-(`test_sheets.py`) stub the network, so they never contact Google. Both run under one command:
+The parser tests use synthetic HTML and never contact the hosted game. The Sheets and building tests
+(`test_sheets.py`, `test_buildings.py`) stub the network, so they never contact Google or the game.
+All of them run under one command:
 
 ```powershell
 python -m unittest -v
