@@ -6,6 +6,9 @@ row shape: a right-aligned name cell followed by a cell whose ``<span>`` holds t
 
     <td style="text-align: right;">Apples</td><td><span class="text-success">226</span></td>
 
+``parse_panel`` captures the value cell's first ``<span>``; ``parse_panel_text`` captures the whole
+cell instead, which the Nation panel needs. Both arm through the same heading rule.
+
 ``PanelParser`` arms only after the ``panel-heading`` div whose text matches the heading it was
 given, and stops at that panel's ``</table>``, so the identically-shaped sibling panels are not
 picked up. Two details of the real markup are handled by falling out of the rules above rather than
@@ -41,9 +44,10 @@ from typing import List, Optional, Sequence, Tuple
 class PanelParser(HTMLParser):
     """Collect ``[(name, value_text), ...]`` from the overview panel headed ``heading``."""
 
-    def __init__(self, heading: str) -> None:
+    def __init__(self, heading: str, cell_text: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self._heading = heading
+        self._cell_text = cell_text
         self._in_heading = False
         self._heading_buf: List[str] = []
         self._pending_table = False
@@ -72,7 +76,20 @@ class PanelParser(HTMLParser):
         elif tag == "td" and "text-align: right" in (attr.get("style") or "") and self._name is None:
             self._capture = "name"
             self._buf = []
-        elif tag == "span" and self._name is not None and self._value is None:
+        elif (
+            self._cell_text
+            and tag == "td"
+            and self._name is not None
+            and self._value is None
+        ):
+            self._capture = "cell"
+            self._buf = []
+        elif (
+            not self._cell_text
+            and tag == "span"
+            and self._name is not None
+            and self._value is None
+        ):
             self._capture = "value"
             self._buf = []
 
@@ -94,6 +111,11 @@ class PanelParser(HTMLParser):
         if tag == "td" and self._capture == "name":
             self._name = "".join(self._buf).strip()
             self._capture = None
+        elif tag == "td" and self._capture == "cell":
+            # The whole cell, tags stripped and whitespace collapsed. Nested tags contribute their
+            # text and do not end capture -- only this cell's own </td> does.
+            self._value = " ".join("".join(self._buf).split())
+            self._capture = None
         elif tag == "span" and self._capture == "value":
             self._value = "".join(self._buf).strip()
             self._capture = None
@@ -111,6 +133,25 @@ def parse_panel(html: str, heading: str) -> List[Tuple[str, str]]:
     panel is a problem.
     """
     parser = PanelParser(heading)
+    parser.feed(html)
+    return parser.rows
+
+
+def parse_panel_text(html: str, heading: str) -> List[Tuple[str, str]]:
+    """Return ``[(name, whole_cell_text), ...]`` for the panel headed ``heading``.
+
+    ``parse_panel`` captures a value cell's *first* ``<span>``, which is right for Resources and
+    Buildings and wrong for the Nation panel: its per-tick figure is a second span in the same cell
+    (``overview.php:82-86``), and under Alicorn Elite / Transponyism the game emits a bare
+    ``(Ascending)`` with no span at all (``overview.php:50-60``). Whole-cell text is the only shape
+    that covers all three. As a side effect it also reads the span-less cells -- Government Type,
+    Economic Type -- which ``parse_panel`` drops.
+
+    This shares ``PanelParser`` rather than being a second parser on purpose: the "arm only on a
+    ``panel-heading`` div whose text matches exactly" rule lives there, and it is what stops a
+    favourite action named ``Nation`` impersonating the Nation panel.
+    """
+    parser = PanelParser(heading, cell_text=True)
     parser.feed(html)
     return parser.rows
 

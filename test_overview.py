@@ -15,6 +15,7 @@ from overview import (
     OverviewError,
     panel_present,
     parse_panel,
+    parse_panel_text,
     require_valid_overview,
 )
 
@@ -136,6 +137,71 @@ class GameSourceAssumptionsTests(unittest.TestCase):
         loop = source[start:start + 800]
         self.assertIn("$buildings[]", loop)
         self.assertIn("$resources[$rs['name']]", loop)
+
+
+NATION_PANEL = """
+<div class="panel-heading">Nation</div>
+<table class="table"><tbody>
+  <tr><td style="text-align: right;">Government Type</td><td>Loose Despotism</td></tr>
+  <tr><td style="text-align: right;">Economic Type</td><td>Poorly Defined</td></tr>
+  <tr><td style="text-align: right;"><span class="text-danger">Warning:</span></td>
+      <td><span class="text-danger">Your economic type is not active!</span></td></tr>
+  <tr><td style="text-align: right;">Relationship with Solar Empire</td>
+      <td><span class="text-danger">-120</span>
+          (<span class="text-success">3</span> per tick)</td></tr>
+  <tr><td style="text-align: right;">Relationship with New Lunar Republic</td>
+      <td><span class="text-success">1500</span>
+          (Ascending)</td></tr>
+  <tr><td style="text-align: right;">Satisfaction</td>
+      <td><span class="text-success">218</span> (<span class="text-danger">-5</span> per tick)</td></tr>
+  <tr><td style="text-align: right;">GDP</td>
+      <td><span class="text-success">60,900</span> bits per tick</td></tr>
+  <tr><td style="text-align: right;">Funds</td>
+      <td><span class="text-success">1,234,567</span> bits</td></tr>
+</tbody></table>
+"""
+
+
+class ParsePanelTextTests(unittest.TestCase):
+    def rows(self):
+        return dict(parse_panel_text(NATION_PANEL, "Nation"))
+
+    def test_two_span_cell_captured_whole(self):
+        # parse_panel would stop at "-120" and lose the per-tick figure entirely.
+        self.assertEqual(self.rows()["Relationship with Solar Empire"], "-120 (3 per tick)")
+
+    def test_cell_whose_per_tick_is_bare_text(self):
+        # Alicorn Elite / Transponyism render "(Ascending)" with no span at all.
+        self.assertEqual(
+            self.rows()["Relationship with New Lunar Republic"], "1500 (Ascending)"
+        )
+
+    def test_cell_with_no_span_captured(self):
+        # parse_panel drops these rows entirely, because it needs a span to capture.
+        self.assertEqual(self.rows()["Government Type"], "Loose Despotism")
+
+    def test_trailing_text_after_the_span_kept(self):
+        self.assertEqual(self.rows()["GDP"], "60,900 bits per tick")
+        self.assertEqual(self.rows()["Funds"], "1,234,567 bits")
+
+    def test_whitespace_collapsed(self):
+        self.assertEqual(self.rows()["Satisfaction"], "218 (-5 per tick)")
+
+    def test_name_cell_containing_a_span_still_reads_as_the_name(self):
+        # The conditional "Warning:" row (rendered when active_economy is false).
+        self.assertEqual(self.rows()["Warning:"], "Your economic type is not active!")
+
+    def test_still_arms_only_on_an_exact_heading(self):
+        # Favourite actions render as class="panel-heading h4" with a user-chosen label. A loose
+        # match would let a favourite action named "Nation" impersonate the Nation panel.
+        html = NATION_PANEL.replace('class="panel-heading"', 'class="panel-heading h4"')
+        self.assertEqual(parse_panel_text(html, "Nation"), [])
+
+    def test_parse_panel_is_unchanged_by_the_new_mode(self):
+        # The span-capturing behaviour buildings.py and goods.py rely on must not shift.
+        rows = dict(parse_panel(NATION_PANEL, "Nation"))
+        self.assertEqual(rows["Satisfaction"], "218")
+        self.assertNotIn("Government Type", rows)   # no span in that cell
 
 
 if __name__ == "__main__":
