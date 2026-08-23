@@ -104,6 +104,12 @@ class ParseResourcesTests(unittest.TestCase):
         # A nation can legitimately hold nothing; an absent panel is not a malformed page.
         self.assertEqual(parse_overview_resources("<html></html>"), {})
 
+    def test_present_panel_with_no_rows_is_empty(self):
+        # A nation that holds nothing renders the heading with an empty table. That is valid;
+        # it is a *missing* heading that means a broken page, and sync_sheet_step guards that.
+        html = '<div class="panel-heading">Resources</div><table class="table"><tbody></tbody></table>'
+        self.assertEqual(parse_overview_resources(html), {})
+
     def test_negative_quantity_accepted(self):
         html = """
 <div class="panel-heading">Resources</div>

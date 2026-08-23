@@ -40,6 +40,7 @@ class PanelParser(HTMLParser):
         self._name: Optional[str] = None
         self._value: Optional[str] = None
         self._buf: List[str] = []
+        self.found = False
         self.rows: List[Tuple[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
@@ -74,6 +75,7 @@ class PanelParser(HTMLParser):
             self._in_heading = False
             if "".join(self._heading_buf).strip() == self._heading:
                 self._pending_table = True
+                self.found = True
             return
         if not self._in_table:
             return
@@ -99,3 +101,17 @@ def parse_panel(html: str, heading: str) -> List[Tuple[str, str]]:
     parser = PanelParser(heading)
     parser.feed(html)
     return parser.rows
+
+
+def panel_present(html: str, heading: str) -> bool:
+    """Whether the page carries the panel headed ``heading`` at all.
+
+    The distinction matters more than it looks. overview.php renders every panel heading
+    unconditionally, so a heading with an empty table means the nation genuinely has nothing of
+    that kind -- but a *missing* heading means this is not an overview page: a PHP fatal after the
+    header flushed, a maintenance page, a truncated response. ``parse_panel`` returns an empty list
+    for both, and a caller that reads the second as "holds nothing" would happily zero the sheet.
+    """
+    parser = PanelParser(heading)
+    parser.feed(html)
+    return parser.found

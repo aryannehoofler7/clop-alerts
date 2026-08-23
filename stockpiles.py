@@ -206,9 +206,14 @@ def _standalone() -> int:
     print(f"\n{'row':<5}{'label':<8}{'game resource':<18}{'overview':>12}{'sheet':>12}")
     for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
         row = f"R{STOCK_FIRST_ROW + index}"
-        print(f"{row:<5}{label:<8}{game_name:<18}{want:>12,}{stored[index]:>12}")
-    print("\n'overview' is what the game reports; 'sheet' is what the sheet holds right now.\n"
-          "A difference between them is normal -- it is what a real run would write.")
+        print(f"{row:<5}{label:<8}{game_name:<18}{want:>12}{stored[index]:>12}")
+    # Both columns are printed raw so they line up digit for digit -- comma-formatting one side of a
+    # comparison makes an already-correct row look like a difference.
+    legend = "\n'overview' is what the game reports; 'sheet' is what the sheet holds right now."
+    if not problems:
+        # Only true when the labels check out: a failed check means a real run writes nothing.
+        legend += "\nA difference between them is normal -- it is what a real run would write."
+    print(legend)
 
     if problems:
         return 1
@@ -220,4 +225,10 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
-    sys.exit(_standalone())
+    from sheets import SheetError
+
+    try:
+        sys.exit(_standalone())
+    except (StockpileError, SheetError) as error:
+        print(f"Stock check failed: {error}")
+        sys.exit(1)

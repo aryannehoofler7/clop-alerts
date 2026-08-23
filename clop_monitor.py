@@ -1725,14 +1725,22 @@ def sync_sheet_step(
     2. **Stockpiles** -- snapshot the six goods into R11:R16 and stamp W10 with the server time.
 
     They guard different regions of the sheet and are independent: one being skipped for a layout
-    problem does not skip the other. The whole step is best-effort -- every failure is reported
-    through the same blocking dialog and then swallowed, because sheet sync must never take the
-    monitor down.
+    problem does not skip the other.
+
+    That independence covers layout problems only. A transport or sheet failure in either aborts
+    both, deliberately: it means the shared connection is down, so retrying the other half would
+    only produce a second popup about the same outage.
+
+    The whole step is best-effort -- every failure is reported through the same blocking dialog and
+    then swallowed, because sheet sync must never take the monitor down.
 
     A dropped session is re-logged-in before anything is trusted: a logged-out overview would look
     like a nation that owns nothing and holds nothing, and would zero the sheet.
     """
+    # Imported here, not at module scope: sheets.py imports load_env_file from this module, so a
+    # top-level import would be a cycle. Do not "tidy" these up to the top of the file.
     from buildings import BuildingError, parse_overview_buildings, reconcile, sanity_check
+    from overview import panel_present
     from sheets import SheetError
     from stockpiles import (
         StockpileError,
@@ -1742,6 +1750,7 @@ def sync_sheet_step(
         snapshot,
     )
 
+    phase = "reading overview.php"
     try:
         overview_html = client._open("overview.php")
         if not is_logged_in(overview_html):
@@ -1750,14 +1759,27 @@ def sync_sheet_step(
             if not is_logged_in(overview_html):
                 raise MonitorError("not logged in when reading overview.php")
 
+        # Both panel headings are rendered unconditionally by overview.php, so a missing one means
+        # the page is not a real overview -- not that the nation owns nothing. Checked before any
+        # write, together with the server-time stamp, so a broken page cannot zero the tab.
+        for panel in ("Buildings", "Resources"):
+            if not panel_present(overview_html, panel):
+                raise MonitorError(
+                    f"overview.php has no {panel} panel, so it is not a normal overview page. "
+                    "Nothing was written to the sheet."
+                )
+        server_time = parse_server_time(overview_html)
+        resources = parse_overview_resources(overview_html)
+
+        phase = "the building reconcile"
         overview = parse_overview_buildings(overview_html)
         problems = sanity_check(sheet, nation, overview)
         if problems:
             notifier.notify_failure(
-                "Building sync skipped — the sheet layout or building mapping looks wrong, so no "
-                "building cells were changed:\n\n"
+                "Building sync skipped - the sheet layout or building mapping looks wrong, so no "
+                "building cells were changed. Run 'python buildings.py' to recheck once the sheet "
+                "is fixed.\n\n"
                 + "\n".join(f"- {problem}" for problem in problems)
-                + "\n\nRun 'python buildings.py' to recheck once the sheet is fixed."
             )
         else:
             corrections = reconcile(sheet, nation, overview)
@@ -1769,20 +1791,21 @@ def sync_sheet_step(
 
         # The stockpile snapshot is a scheduled refresh rather than an event, so a successful write
         # is deliberately silent -- at a 60s poll a popup for it would never stop firing.
-        server_time = parse_server_time(overview_html)
+        phase = "the stockpile snapshot"
         stock_problems = check_labels(sheet, nation)
         if stock_problems:
             notifier.notify_failure(
-                "Stockpile snapshot skipped — the sheet's STOCK labels have moved, so nothing was "
-                "written (R11:R16 and the W10 timestamp are untouched, and W10 will now go "
-                "stale):\n\n"
+                "Stockpile snapshot skipped - the sheet's STOCK labels have moved, so nothing was "
+                "written (R11:R16 and the W10 timestamp are untouched, and W10 will now go stale). "
+                "Run 'python stockpiles.py' to recheck once the sheet is fixed.\n\n"
                 + "\n".join(f"- {problem}" for problem in stock_problems)
-                + "\n\nRun 'python stockpiles.py' to recheck once the sheet is fixed."
             )
         else:
-            snapshot(sheet, nation, parse_overview_resources(overview_html), server_time)
+            snapshot(sheet, nation, resources, server_time)
     except (MonitorError, SheetError, BuildingError, StockpileError) as error:
-        notifier.notify_failure(f"Sheet sync failed: {error}\n\nThe monitor continues polling.")
+        notifier.notify_failure(
+            f"Sheet sync failed during {phase}: {error}\n\nThe monitor continues polling."
+        )
 
 
 def check_and_notify(
@@ -2119,24 +2142,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # stay off rather than fail every poll.
         from sheets import GoogleSheet, SheetError, nation_from_env
 
-        building_sheet: Optional[GoogleSheet] = None
-        building_nation: Optional[str] = None
+        sync_sheet: Optional[GoogleSheet] = None
+        sync_nation: Optional[str] = None
         try:
-            building_nation = nation_from_env(args.env_file.resolve())
+            sync_nation = nation_from_env(args.env_file.resolve())
         except SheetError:
             print("Sheet sync off (CLOP_NATION not set).", flush=True)
         else:
-            building_sheet = GoogleSheet()
+            sync_sheet = GoogleSheet()
             try:
-                building_sheet.require_tab(building_nation)
+                sync_sheet.require_tab(sync_nation)
                 print(
                     f"Sheet sync on: reconciling buildings and snapshotting stockpiles for "
-                    f"{building_nation!r} each poll before alerting.",
+                    f"{sync_nation!r} each poll before alerting.",
                     flush=True,
                 )
             except SheetError as error:
                 notifier.notify_failure(f"Sheet sync is off: {error}")
-                building_sheet = None
+                sync_sheet = None
 
         loaded = LoadedSettings(settings, settings_source)
         while True:
@@ -2150,8 +2173,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             try:
                 # Sheet sync is its own process that fires first, before the regular
                 # message/news/report alerting. It handles and reports its own failures.
-                if building_sheet is not None and building_nation is not None:
-                    sync_sheet_step(client, building_sheet, building_nation, notifier)
+                if sync_sheet is not None and sync_nation is not None:
+                    sync_sheet_step(client, sync_sheet, sync_nation, notifier)
                 current, _ = check_and_notify(
                     client,
                     previous,

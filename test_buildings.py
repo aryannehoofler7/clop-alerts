@@ -21,6 +21,8 @@ OVERVIEW_HTML = """
 <div class="panel-heading">Resources</div>
 <table class="table"><tbody>
   <tr><td style="text-align: right;">Copper</td><td><span class="text-success">201</span></td></tr>
+  <tr><td style="text-align: right;">Apples</td><td><span class="text-success">1,226</span></td></tr>
+  <tr><td style="text-align: right;">Gems</td><td><span class="text-success">6</span></td></tr>
 </tbody></table>
 <div class="panel-heading">Buildings</div>
 <table class="table"><tbody>
@@ -344,6 +346,10 @@ class SyncSheetStepTests(unittest.TestCase):
         sheet = FakeSheet(col_a, col_b)
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        # The real quantities must reach the block -- not zeros, and not the buildings dict.
+        self.assertEqual(
+            sheet.blocks, [("R11:R16", [[1226], [0], [0], [0], [0], [6]])]
+        )
         self.assertIn(("W10", "2026-08-23 03:23:44"), sheet.writes)
         # A routine snapshot is a scheduled refresh, not an event: no popup for it.
         self.assertEqual(notifier.failures, [])
@@ -375,6 +381,55 @@ class SyncSheetStepTests(unittest.TestCase):
         # The stock block is a different region of the sheet, so it is still snapshotted.
         self.assertTrue(sheet.blocks)
         self.assertIn("W10", [a1 for a1, _ in sheet.writes])
+
+    def test_both_checks_failing_writes_nothing_and_warns_twice(self):
+        from clop_monitor import sync_sheet_step
+
+        sheet = FakeSheet(sheet_column_a(), [""] * 130,   # buildings missing -> sanity fails
+                          stock_labels=["oil", "apple", "coffee", "mpart", "vpart", "gems"])
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(len(notifier.failures), 2)
+        self.assertEqual(notifier.alerts, [])
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+
+    def test_unreadable_quantity_writes_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        # An unreadable Qty raises StockpileError. It must be caught before anything is written --
+        # otherwise the buildings get corrected off a page we then declare unreadable.
+        bad = LOGGED_IN_OVERVIEW.replace(
+            '<td style="text-align: right;">Apples</td><td><span class="text-success">1,226</span></td>',
+            '<td style="text-align: right;">Apples</td><td><span class="text-success">N/A</span></td>',
+        )
+        self.assertNotEqual(bad, LOGGED_IN_OVERVIEW)   # the replace must actually have matched
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(bad), sheet, "T", notifier)
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+        self.assertEqual(len(notifier.failures), 1)
+
+    def test_page_without_panels_writes_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        # 200 OK, logged in, even a server-time stamp -- but the panel bodies never rendered.
+        # A PHP fatal after header.php has flushed looks exactly like this. Reading it as "the
+        # nation owns nothing and holds nothing" would zero the whole tab and stamp it verified.
+        broken = ('<a href="logout.php">Logout</a>'
+                  '<li><a>Server time: 2026-08-23 03:23:44</a></li>'
+                  '<div id="content"><h3>Sierra Lepone</h3></div>')
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(broken), sheet, "T", notifier)
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+        self.assertEqual(notifier.alerts, [])
+        self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("panel", notifier.failures[0].lower())
 
     def test_logged_out_overview_writes_nothing(self):
         from clop_monitor import sync_sheet_step
