@@ -3,7 +3,8 @@
 
 The flow, run as its own step before the monitor's regular alerting:
 
-1. parse the overview "Buildings" panel into ``{game_name: (have, disabled)}`` (owned buildings
+1. parse the overview "Buildings" panel (via ``overview.parse_panel``) into
+   ``{game_name: (have, disabled)}`` (owned buildings
    only -- anything absent means zero);
 2. fold those onto sheet building rows through ``building_map.GAME_TO_SHEET`` (summing the DNA and
    Energy Collector groups);
@@ -20,10 +21,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from building_map import GAME_TO_SHEET, SHEET_BUILDINGS
+from overview import parse_panel
 from sheets import GoogleSheet
 
 #: Column A of a nation tab spans two regions inside these rows; read a little past the disabled
@@ -56,80 +57,10 @@ class Regions:
     disabled_rows: Dict[str, int]     # sheet building name -> 1-based row in the disabled region
 
 
-class BuildingsPanelParser(HTMLParser):
-    """Extract ``{name: "count text"}`` from the overview "Buildings" panel, ignoring other panels.
-
-    Each building row is ``<td style="text-align: right;">NAME</td><td><span>COUNT</span></td>``.
-    We arm only after the ``panel-heading`` whose text is "Buildings" and stop at that panel's
-    ``</table>``, so the identically-shaped resource and finance tables are not picked up.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._in_heading = False
-        self._heading_buf: List[str] = []
-        self._pending_table = False
-        self._in_table = False
-        self._capture: Optional[str] = None  # "name" | "count" | None
-        self._name: Optional[str] = None
-        self._count: Optional[str] = None
-        self._buf: List[str] = []
-        self.rows: List[Tuple[str, str]] = []
-
-    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
-        attr = dict(attrs)
-        if tag == "div" and (attr.get("class") or "") == "panel-heading":
-            self._in_heading = True
-            self._heading_buf = []
-            return
-        if self._pending_table and tag == "table":
-            self._pending_table = False
-            self._in_table = True
-            return
-        if not self._in_table:
-            return
-        if tag == "tr":
-            self._name = self._count = None
-        elif tag == "td" and "text-align: right" in (attr.get("style") or "") and self._name is None:
-            self._capture = "name"
-            self._buf = []
-        elif tag == "span" and self._name is not None and self._count is None:
-            self._capture = "count"
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_heading:
-            self._heading_buf.append(data)
-        elif self._capture is not None:
-            self._buf.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "div" and self._in_heading:
-            self._in_heading = False
-            if "".join(self._heading_buf).strip() == "Buildings":
-                self._pending_table = True
-            return
-        if not self._in_table:
-            return
-        if tag == "td" and self._capture == "name":
-            self._name = "".join(self._buf).strip()
-            self._capture = None
-        elif tag == "span" and self._capture == "count":
-            self._count = "".join(self._buf).strip()
-            self._capture = None
-        elif tag == "tr":
-            if self._name and self._count is not None:
-                self.rows.append((self._name, self._count))
-        elif tag == "table":
-            self._in_table = False
-
-
 def parse_overview_buildings(html: str) -> Dict[str, Tuple[int, int]]:
     """Return ``{overview_name: (have, disabled)}`` for the owned buildings on overview.php."""
-    parser = BuildingsPanelParser()
-    parser.feed(html)
     result: Dict[str, Tuple[int, int]] = {}
-    for name, count_text in parser.rows:
+    for name, count_text in parse_panel(html, "Buildings"):
         match = _COUNT_RE.match(count_text)
         if not match:
             continue
