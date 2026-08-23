@@ -8,6 +8,15 @@ recipes since could differ.
 Written because the monitor's shipped ignore-pattern `Build % completed successfully.` turned out to
 miss most of what it was meant to cover. This is the catalogue that replaced it.
 
+**Revised the same day.** The first list this catalogue produced answered the miss by adding
+patterns, and reached 33 of them: twelve for the completion sentence alone, two for relations, two
+for satisfaction, two for the `Change in ...` totals. Twelve of the 33 were redundant — a pattern
+matches anywhere in a line, so `% completed successfully.` already covered the eleven verb-specific
+ones beside it — and the list still missed eight routine families, because effort had gone into
+wordings that were already covered rather than into families that were not. The list is now **25
+patterns covering 49 routine sentences**, one per family, and
+[the rule below](#the-rule-the-list-is-held-to) is enforced by a test.
+
 ## How reports are written
 
 `INSERT INTO reports (nation_id, report, time)` appears at **38 sites** across ten files:
@@ -106,9 +115,16 @@ for the common ones, all commented out.
   enemy forgets eventually; …`
 - `As you have more than 50,000 %, % was siphoned off.` / `As you have more than 1,000 %, % were
   siphoned off.`
+- `Even for the Solar Empire, there are limits to hate. (+%)` and the NLR twin
+  (`frequent.php:745`, `:752`) — the floor on hate, the mirror of the relationship caps above
+- `Some of the environmental damage has been repaired. (% sat)` (`frequent.php:355`)
+- `The Solar Empire doesn't like your good relations with the New Lunar Republic. (-%)` and the NLR
+  twin (`frequent.php:248`, `:254`) — a standing cost of courting both, not an event
 - Trades the player initiated: `You dealt away % %.`, `You received % %.`,
-  `You accepted a deal with %.`, `You transferred % % to % for % bits.` — and
-  `You bought % % from % for % bits.`, but see *The marketplace sentences cut both ways* below
+  `You accepted a deal with %.`, `You transferred % % to % for % bits.`,
+  `This nation paid % bits and % received % bits.` (`backend_transfer.php:60` — the wording for a
+  money transfer, which does *not* start "You") — and `You bought % % from % for % bits.`, but see
+  *The marketplace sentences cut both ways* below
 - `You have created the military force %.`
 - All eighteen Major Action lines — `Government changed to %`, `Economy changed to %`,
   `Nation name changed from % to %`. Note several have **no trailing full stop**, and the game's own
@@ -157,6 +173,74 @@ switching one on would equally silence somebody buying from your standing sell o
 
 There is no way to separate them by pattern. Anyone who trades enough for the noise to matter can
 add a `You sold …` pattern themselves, knowing what it costs.
+
+## The shipped pattern set
+
+Twenty-five patterns, all commented out, covering the 49 routine sentences above. The column on the
+right is what each one reaches — not a paraphrase of the pattern, but the count of distinct game
+sentences it silences.
+
+| Pattern | Covers |
+|---|---|
+| `completed successfully.` | all 62 actions |
+| `You spent % %.` | the resource cost of an action |
+| `You paid % bits.` | the money cost of an action |
+| `You gained % %.` | an action's yield, a tick's production, and money either way |
+| `You bought % from % for % bits.` | both marketplaces (see the caveat below) |
+| `You transferred % to % for % bits.` | a resource transfer you sent |
+| `This nation paid % bits and` | a money transfer you sent |
+| `You dealt away % %.` | resources, weapons, armour and bits given in a deal |
+| `You accepted a deal with` | the deal you accepted — *not* `Your deal with % was accepted.` |
+| `You have created the military force` | a new force |
+| `Show Details` / `Hide Details` | the tick wrapper (2) |
+| `Change in %:` | the satisfaction total and both empire relation totals (3) |
+| `You're ascending;` | the wrapper an ascending empire gets instead |
+| `Your % used %.` | government upkeep (7), production consumption, force upkeep (9) |
+| `Your % drank %.` | the State Controlled and Free Market economies (2) |
+| `Your relationship with the` | four wordings and both caps (6) |
+| `Your population` | four satisfaction wordings and its cap (5) |
+| `You hit the % cap of %.` | eight satisfaction caps and two relationship caps (10) |
+| `there are limits to hate.` | the floor on hate, both empires (2) |
+| `is hard to keep` | oversatisfaction decay and friendship decay (3) |
+| `forgets eventually;` | enmity decay, both empires (2) |
+| `siphoned off.` | both siphons (2) |
+| `environmental damage has been repaired.` | the environment healing |
+| `doesn't like your good relations with` | each empire's jealousy of the other (2) |
+
+Three routine-looking families deliberately have **no** pattern, and the reasons are worth keeping
+because each is a decision rather than an oversight:
+
+- **`You received % %.`** — the deal *you* accepted and a deal *somebody else* accepted differ only
+  by the trailing words `as part of your deal`, and a pattern short enough to cover the first covers
+  the second. The second is somebody acting on you, so neither is silenced.
+- **The eighteen Major Action lines** — `Government changed to %`, `Economy changed to %`,
+  `Nation name changed from % to %`. A player takes one perhaps twice a year; seeing it confirmed is
+  the point. (Several have no trailing full stop, and the game's own typo `Government revered from
+  … to …` appears in five of them, so covering them would take three patterns for no benefit.)
+- **`You lose % sat for having an empire of % nations.`** — a standing penalty worth watching, and
+  filed under Notable above.
+
+## The rule the list is held to
+
+Two properties, both tested, and they are what stop the list growing back:
+
+1. **Coverage** — the shipped set silences every line in the routine catalogue.
+   (`test_the_shipped_set_silences_every_routine_line_the_game_writes`)
+2. **No redundancy** — remove any one pattern and some routine line starts alerting again.
+   (`test_no_shipped_pattern_is_redundant`)
+
+Together they force one pattern per *family of game sentence* rather than one per wording, which is
+the distinction the first list lost. The mechanism that makes families collapsible is that
+**a pattern matches anywhere in a line**: the shortest phrase unique to a family covers every
+variant of it, so `Your relationship with the` needs nothing appended to reach all six relation
+sentences, and a leading or trailing `%` is always dead weight. That is why `% completed
+successfully.` and `completed successfully.` are the same pattern, and why shipping
+`Build % completed successfully.` beside the catch-all bought nothing at all.
+
+The third property — that no shipped pattern silences anything in the Notable list — predates this
+revision and is unchanged (`test_no_shipped_pattern_silences_a_notable_line`). It is why the
+collapsing above is safe: every pattern was widened only until it still failed to match any Notable
+sentence.
 
 ## `Change in Satisfaction:` — the trap that per-line judging removed
 

@@ -734,48 +734,18 @@ class SettingsDefaultsTests(unittest.TestCase):
         self.assertIsNone(settings.sound.wav_path)
 
 
-#: Each shipped example pattern with a report message it is meant to silence.
 #: Each shipped example pattern with a real report the game writes for it. The report text is
 #: taken from the game source, not invented: every finished action reports
 #: "<action name> completed successfully." (backend_actions.php:240), and the action name comes
 #: straight from the recipes table, which is why only 38 of the game's 62 actions begin "Build ".
+#:
+#: One entry per FAMILY of game sentence, not one per wording. Because a pattern matches
+#: anywhere in a line, the shortest phrase unique to a family covers every variant of it, so
+#: "Your relationship with the" stands for six sentences and "completed successfully." for all
+#: 62 actions. ROUTINE_REPORTS below is the corpus that proves it; the pair here only names
+#: each pattern's most recognisable member.
 IGNORABLE_REPORTS = [
-    (
-        "% completed successfully.",
-        "Dig Basic Copper Mine completed successfully.",
-    ),
-    (
-        "Build % completed successfully.",
-        "Build Advanced Factory completed successfully.",
-    ),
-    (
-        "Upgrade % completed successfully.",
-        "Upgrade to Gasoline Combustion Facility completed successfully.",
-    ),
-    ("Dig % completed successfully.", "Dig Gem Mine completed successfully."),
-    ("Plow % completed successfully.", "Plow Coffee Farm completed successfully."),
-    (
-        "Manufacture % completed successfully.",
-        "Manufacture Precision Parts completed successfully.",
-    ),
-    (
-        "Ship % completed successfully.",
-        "Ship Tungsten to the New Lunar Republic completed successfully.",
-    ),
-    (
-        "Smuggle % completed successfully.",
-        "Smuggle Drugs into the SE completed successfully.",
-    ),
-    (
-        "Distribute % completed successfully.",
-        "Distribute Pies completed successfully.",
-    ),
-    ("Burn Oil completed successfully.", "Burn Oil completed successfully."),
-    ("Drug Farm completed successfully.", "Drug Farm completed successfully."),
-    (
-        "Receive Factory Aid completed successfully.",
-        "Receive Factory Aid completed successfully.",
-    ),
+    ("completed successfully.", "Dig Basic Copper Mine completed successfully."),
     ("You spent % %.", "You spent 20 Machinery Parts."),
     ("You paid % bits.", "You paid 50,000 bits."),
     ("You gained % %.", "You gained 5 Oil from your 1 Basic Oil Well."),
@@ -784,17 +754,22 @@ IGNORABLE_REPORTS = [
         "You bought 50 Apples from Luna Sueno for 55,000 bits.",
     ),
     (
-        "You transferred % % to % for % bits.",
+        "You transferred % to % for % bits.",
         "You transferred 20 Oil to Buenos Mares for 40,000 bits.",
     ),
     (
-        "You have created the military force %.",
+        "This nation paid % bits and",
+        "This nation paid 5,000 bits and Buenos Mares received 4,850 bits.",
+    ),
+    ("You dealt away % %.", "You dealt away 5 Oil."),
+    ("You accepted a deal with", "You accepted a deal with Luna Sueno."),
+    (
+        "You have created the military force",
         "You have created the military force First Cavalry.",
     ),
     ("Show Details", "Show Details"),
     ("Hide Details", "Hide Details"),
-    ("Change in Satisfaction:", "Change in Satisfaction: -2"),
-    ("Change in % Relation:", "Change in SE Relation: +1"),
+    ("Change in %:", "Change in Satisfaction: -2"),
     (
         "You're ascending;",
         "You're ascending; your relationships with the Solar Empire and New Lunar Republic "
@@ -803,34 +778,108 @@ IGNORABLE_REPORTS = [
     ("Your % used %.", "Your 3 Basic Factory used up 5 Oil."),
     ("Your % drank %.", "Your State Controllers drank 6 cider."),
     (
-        "Your relationship with the % due to your %",
+        "Your relationship with the",
         "Your relationship with the Solar Empire has improved due to your "
         "1 Basic Oil Well. (+3)",
     ),
     (
-        "Your relationship with the % can't get any %",
-        "Your relationship with the Solar Empire can't get any better, despite the "
-        "effects of your 1 Basic Oil Well.",
-    ),
-    (
-        "Your population's satisfaction has % due to your %",
+        "Your population",
         "Your population's satisfaction has dwindled due to your 3 Basic Factory. (-4)",
     ),
-    (
-        "Your population can't be any more satisfied,",
-        "Your population can't be any more satisfied, despite the effects of your "
-        "3 Basic Factory.",
-    ),
     ("You hit the % cap of %.", "You hit the Democracy satisfaction cap of 1500. (-40)"),
-    ("% is hard to keep", "A satisfied population is hard to keep. (-5 sat)"),
     (
-        "% forgets eventually;",
+        "there are limits to hate.",
+        "Even for the Solar Empire, there are limits to hate. (+5)",
+    ),
+    ("is hard to keep", "A satisfied population is hard to keep. (-5 sat)"),
+    (
+        "forgets eventually;",
         "A bad enemy forgets eventually; you gain 2 relationship with the Solar Empire.",
     ),
+    ("siphoned off.", "As you have more than 50,000 Oil, 300 was siphoned off."),
     (
-        "As you have more than % siphoned off.",
-        "As you have more than 50,000 Oil, 300 was siphoned off.",
+        "environmental damage has been repaired.",
+        "Some of the environmental damage has been repaired. (5 sat)",
     ),
+    (
+        "doesn't like your good relations with",
+        "The Solar Empire doesn't like your good relations with the New Lunar Republic. (-3)",
+    ),
+]
+
+#: Every routine sentence the game can write to `reports`, one line per source template, read
+#: from the game at D:\Koan\clop\clop. This is the coverage target: the shipped patterns must
+#: silence all of it, and no shipped pattern may be droppable while it still does, which is
+#: what stops the list drifting back into a pattern per wording.
+ROUTINE_REPORTS = [
+    # backend_actions.php:240 / :189 / :232 / :235 / :216 - a finished action, whatever its name
+    "Dig Basic Copper Mine completed successfully.",
+    "Build Advanced Factory completed successfully.",
+    "Upgrade to Gasoline Combustion Facility completed successfully.",
+    "Receive Factory Aid completed successfully.",
+    "You spent 20 Machinery Parts.",
+    "You paid 50,000 bits.",
+    "You gained 50,000 bits.",
+    "You gained 5 Oil.",
+    # frequent.php:327 / :335 - the tick's production and consumption
+    "You gained 5 Oil from your 1 Basic Oil Well.",
+    "Your 3 Basic Factory used up 5 Oil.",
+    # frequent.php:506-637 - the government and economy upkeep bills, all six wordings
+    "Your Democracy used 20 gasoline.",
+    "Your Democracy used 2 vehicle parts.",
+    "Your Independence used 40 gasoline.",
+    "Your decentralized government used 50 gasoline.",
+    "Your machinery of Repression used 10 gasoline.",
+    "Your Authoritarian government used 10 gasoline and 3 machinery parts.",
+    "Your machinery of Oppression used 10 gasoline and 5 machinery parts.",
+    "Your State Controllers drank 6 cider.",
+    "Your Free Marketeers drank 6 coffee.",
+    # frequent.php:397-472 - military force upkeep, UTC hours 0 and 12
+    "Your First Cavalry used up 12 apples.",
+    # allfunctions.php:157 / :162 / :167 - relations, four wordings and two caps
+    "Your relationship with the Solar Empire has improved due to your 1 Basic Oil Well. (+3)",
+    "Your relationship with the New Lunar Republic has worsened due to your 3 Basic Factory. (-2)",
+    "Your relationship with the Solar Empire can't get any better, despite the effects of "
+    "your 1 Basic Oil Well.",
+    "Your relationship with the Solar Empire can't get any worse- your 1 Basic Oil Well "
+    "sure tried, though!",
+    # allfunctions.php:190 / :195 - satisfaction, the same four wordings and its cap
+    "Your population's satisfaction has dwindled due to your 3 Basic Factory. (-4)",
+    "Your population can't be any more satisfied, despite the effects of your 3 Basic Factory.",
+    # frequent.php:776-795 - the wrapper and the three totals
+    "Show Details",
+    "Hide Details",
+    "Change in Satisfaction: -2",
+    "Change in SE Relation: +1",
+    "Change in NLR Relation: 0",
+    "You're ascending; your relationships with the Solar Empire and New Lunar Republic "
+    "can only go down.",
+    # frequent.php:666-752 - the satisfaction and relationship caps, and the floor on hate
+    "You hit the Democracy satisfaction cap of 1500. (-40)",
+    "You hit the satisfaction cap of 1000. (-40)",
+    "You hit the Solar Empire relationship cap of 1000. (-12)",
+    "Even for the Solar Empire, there are limits to hate. (+5)",
+    # frequent.php:152-236 - what decays on its own
+    "A satisfied population is hard to keep. (-5 sat)",
+    "A good friend is hard to keep; you lose 2 relationship with the Solar Empire.",
+    "A bad enemy forgets eventually; you gain 2 relationship with the Solar Empire.",
+    # frequent.php:347 / :365 - the siphons, singular and plural
+    "As you have more than 50,000 Oil, 300 was siphoned off.",
+    "As you have more than 1,000 Tanks, 5 were siphoned off.",
+    # frequent.php:355 / :248 / :254 - the environment healing, and each Empire's jealousy
+    "Some of the environmental damage has been repaired. (5 sat)",
+    "The Solar Empire doesn't like your good relations with the New Lunar Republic. (-3)",
+    "The New Lunar Republic doesn't like your good relations with the Solar Empire. (-3)",
+    # backend_marketplace.php:207 / backend_transfer.php:60 / :151 - trades you made
+    "You bought 50 Apples from Luna Sueno for 55,000 bits.",
+    "You transferred 20 Oil to Buenos Mares for 40,000 bits.",
+    "This nation paid 5,000 bits and Buenos Mares received 4,850 bits.",
+    # backend_deals.php:229 / :250 / :314 - a deal you accepted
+    "You accepted a deal with Luna Sueno.",
+    "You dealt away 5 Oil.",
+    "You dealt away 5,000 bits.",
+    # backend_createforces.php:99
+    "You have created the military force First Cavalry.",
 ]
 
 #: Every line from the catalogue's "Notable" list, with the wording the game writes. No
@@ -855,11 +904,15 @@ NOTABLE_REPORTS = [
     "You lost 30 satisfaction for having a military of total size 300.",
     "You lose 10 sat for having an empire of 3 nations.",
     "Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)",
+    "Your government lacks the gasoline to function properly! (-50 sat)",
+    "Your economy lacks the cider to function properly! (-25 sat, unable to make deals)",
     "Your deal with Luna Sueno was rejected.",
     "Your deal with Luna Sueno was accepted.",
+    "Your deal with Luna Sueno was canceled.",
     "You received 5 Oil as part of your deal.",
     "You sold 10 Copper to quaity kirenese merch and ice and made 9,000 bits.",
     "This nation received 20 Apples from Buenos Mares.",
+    "This nation received 4,850 bits from Buenos Mares.",
     "You have completed the forbidden research, and the facility has been automatically "
     "dismantled. A new Major Action is available to you.",
 ]
@@ -1000,7 +1053,7 @@ class ReportIgnorePatternTests(unittest.TestCase):
 
     def test_uncommenting_a_shipped_pattern_switches_it_on(self):
         value = shipped_example()
-        wanted = "# Burn Oil completed successfully."
+        wanted = "# completed successfully."
         value["reports"]["ignore"] = [
             entry[2:] if entry == wanted else entry for entry in value["reports"]["ignore"]
         ]
@@ -1011,7 +1064,7 @@ class ReportIgnorePatternTests(unittest.TestCase):
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             settings = load_settings(path)
-        self.assertEqual(settings.alerts.report_ignore, ("Burn Oil completed successfully.",))
+        self.assertEqual(settings.alerts.report_ignore, ("completed successfully.",))
         self.assertTrue(
             report_raises_no_alert("Burn Oil completed successfully.", settings.alerts.report_ignore)
         )
@@ -1273,6 +1326,30 @@ class ShippedPatternSafetyTests(unittest.TestCase):
 
     def test_the_shipped_set_is_exactly_the_patterns_the_fixture_documents(self):
         self.assertEqual(shipped_report_patterns(), [pattern for pattern, _ in IGNORABLE_REPORTS])
+
+    def test_the_shipped_set_silences_every_routine_line_the_game_writes(self):
+        patterns = shipped_report_patterns()
+        unsilenced = [
+            message for message in ROUTINE_REPORTS if surviving_report_lines(message, patterns)
+        ]
+        self.assertEqual(unsilenced, [])
+
+    def test_no_shipped_pattern_is_redundant(self):
+        """Dropping any one pattern must leave a routine line alerting.
+
+        The pair of this and the coverage test above is the whole rule the shipped list is
+        held to: cover every routine family, with no pattern that another already covers.
+        Without it the list drifts back into a pattern per wording - it once carried twelve
+        for "<action> completed successfully.", eleven of which the twelfth already matched.
+        """
+        patterns = shipped_report_patterns()
+        for dropped in patterns:
+            rest = [pattern for pattern in patterns if pattern != dropped]
+            with self.subTest(dropped=dropped):
+                self.assertTrue(
+                    any(surviving_report_lines(message, rest) for message in ROUTINE_REPORTS),
+                    f"{dropped!r} silences nothing the other patterns do not already silence",
+                )
 
 
 class ShippedPatternsOnRealReportsTests(unittest.TestCase):

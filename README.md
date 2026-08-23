@@ -129,12 +129,12 @@ choose alert categories and sound behaviour:
   "reports": {
     "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
     "ignore": [
-      "# You sold % and made % bits.",
+      "# completed successfully.",
       "# You bought % from % for % bits.",
-      "# Change in Satisfaction:",
-      "# Burn Oil",
-      "# Distribute Pies",
-      "# Build % completed successfully."
+      "# Change in %:",
+      "# Your % used %.",
+      "# Your relationship with the",
+      "# siphoned off."
     ]
   },
   "market": {
@@ -151,8 +151,9 @@ choose alert categories and sound behaviour:
 }
 ```
 
-The `market` section is abbreviated above: the real `settings.example.json` lists all 28 tradeable
-goods, every one of them commented out. See
+Two sections are abbreviated above: the real `settings.example.json` lists all 28 tradeable goods,
+and all 25 report patterns, every one of them commented out. See
+[Ignoring routine reports](#ignoring-routine-reports) and
 [Watching the buyer's marketplace](#watching-the-buyers-marketplace).
 
 **The file is optional and every key in it is optional.** `settings.json` is git-ignored: only the
@@ -252,12 +253,12 @@ so:
 ```json
 "reports": {
   "ignore": [
-    "% completed successfully.",
+    "completed successfully.",
     "You spent % %.",
     "You paid % bits.",
     "# You bought % from % for % bits.",
     "# Show Details",
-    "# Change in Satisfaction:"
+    "# Change in %:"
   ]
 }
 ```
@@ -272,6 +273,9 @@ report whose text genuinely begins with `#`.
 - A pattern matches **anywhere** in a line.
 - `%` stands for **any run of characters**, including none, so `You paid % bits.` covers any price.
 - Matching **ignores case**.
+- Because a pattern matches anywhere, a leading or trailing `%` does nothing: `% completed
+  successfully.` and `completed successfully.` are the same pattern. Use the shortest phrase that
+  says which line you mean.
 - Everything else is literal: `.` and `(` mean themselves, not what they mean in a regular
   expression.
 - **One pattern silences one line.** A finished build arrives as three lines — `You spent 20
@@ -298,28 +302,38 @@ game's 62 actions only **38** are named `Build ...`. The other 24 begin with `Up
 are the same kind of event with different first words.
 
 A pattern of `Build % completed successfully.` therefore silences your oil wells and not your copper
-mines. Use **`% completed successfully.`** instead and it covers every completion — builds,
+mines. The shipped pattern is **`completed successfully.`**, which covers every completion — builds,
 upgrades, digs, shipments, weapons and armour alike — in one line.
 
-The verb-specific patterns ship alongside it for when you want to be selective. Uncommenting
-`Build %`, `Upgrade %`, `Dig %` and `Plow %` silences your construction work while still telling you
-when a shipment to one of the Empires lands, which is a relations change you may want to see.
+No verb-specific pattern ships, because the line above already matches every one of them and a
+pattern that silences nothing new is just something else to read. If you want to be selective —
+silence your construction work but still hear when a shipment to one of the Empires lands, which is
+a relations change worth seeing — write the verb patterns you want yourself, and switch the
+catch-all off.
 
 Failed and refused builds produce no report at all, so nothing here can hide one.
 
 #### Silencing the two-hourly tick
 
 The tick is the noisiest thing the game writes and the one most worth silencing. It takes a pattern
-per routine line, and the settings example ships the whole set, commented out, in one block from
+per routine *family*, and the settings example ships the whole set, commented out, in one block from
 `Show Details` downwards: the Show/Hide wrapper and the `Change in ...` totals, production and
 consumption, the relation and satisfaction effects, the satisfaction and relationship caps, the
-government and military upkeep bills, and the siphons that take the top off a stockpile. Switch that
-block on and a quiet tick says nothing at all.
+government and military upkeep bills, the siphons that take the top off a stockpile, each Empire's
+jealousy of the other, and the environment healing. Switch that block on and a quiet tick says
+nothing at all.
+
+A family, not a wording: the tick writes `Your relationship with the Solar Empire has improved …`,
+`… has dwindled …`, `… has recovered …`, `… has worsened …` and two more when the relation is at its
+cap, and one pattern — `Your relationship with the` — takes all six, because a pattern matches
+anywhere in the line. The fourteen tick patterns cover thirty-odd sentences that way. Before adding
+a pattern of your own, check whether one of them already matches the line: patterns that silence
+nothing new are what made the earlier version of this list twice the size for less coverage.
 
 `Change in Satisfaction:` used to be the pattern to avoid, because it appears in every tick and
 whole-report matching meant it silenced the tick's warnings along with its bookkeeping. Per-line
-matching is what makes it safe: it now silences one line, the `Change in Satisfaction: -2` total, and
-nothing else. A tick containing any of
+matching is what makes it safe: `Change in %:` now silences three lines, the satisfaction and
+relation totals, and nothing else. A tick containing any of
 
 - `You couldn't pay the upkeep for your First Cavalry and it's gone!`
 - `Too many Basic Oil Wells cause environmental damage! (-5 sat)`
