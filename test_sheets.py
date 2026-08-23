@@ -158,7 +158,7 @@ class ErrorHandlingTests(unittest.TestCase):
 
         with stub_urlopen(boom):
             with self.assertRaises(SheetError) as ctx:
-                GoogleSheet().read("T", "A1")
+                GoogleSheet(retry_delays=()).read("T", "A1")
         self.assertIn("500", str(ctx.exception))
 
     def test_url_error_raises(self):
@@ -167,8 +167,54 @@ class ErrorHandlingTests(unittest.TestCase):
 
         with stub_urlopen(boom):
             with self.assertRaises(SheetError) as ctx:
-                GoogleSheet().read("T", "A1")
+                GoogleSheet(retry_delays=()).read("T", "A1")
         self.assertIn("could not reach", str(ctx.exception))
+
+    def test_transient_google_404_is_retried_then_succeeds(self):
+        outcomes = [
+            urllib.error.HTTPError(
+                "https://script.google.com/exec",
+                404,
+                "Not Found",
+                {},
+                io.BytesIO(b"<html>temporary Google error</html>"),
+            ),
+            ok([[42]]),
+        ]
+
+        def respond(_req):
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(respond) as calls:
+                result = GoogleSheet(retry_delays=(1.0, 3.0)).read("T", "A1")
+        self.assertEqual(result, [[42]])
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_persistent_transient_error_raises_only_after_three_attempts(self):
+        def boom(req):
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, io.BytesIO(b"temporary Google error")
+            )
+
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(boom) as calls:
+                with self.assertRaisesRegex(SheetError, "after 3 attempts"):
+                    GoogleSheet(retry_delays=(1.0, 3.0)).read("T", "A1")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 3.0])
+
+    def test_protocol_error_is_not_retried(self):
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(lambda req: no_such_tab("Ghost")) as calls:
+                with self.assertRaisesRegex(SheetError, "no such tab: Ghost"):
+                    GoogleSheet().read("Ghost", "A1")
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
 
 
 def no_such_tab(name="Nope"):
@@ -218,7 +264,7 @@ class TabExistsTests(unittest.TestCase):
 
         with stub_urlopen(boom):
             with self.assertRaises(SheetError):
-                GoogleSheet().tab_exists("LePone(Z)")
+                GoogleSheet(retry_delays=()).tab_exists("LePone(Z)")
 
     def test_require_tab_raises_for_missing(self):
         with stub_urlopen(lambda req: no_such_tab("Ghost")):

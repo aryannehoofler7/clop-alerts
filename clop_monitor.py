@@ -24,6 +24,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+from goods import StockpileError, Stockpiles
+
 
 DEFAULT_BASE_URL = "https://4clop.org/"
 DEFAULT_INTERVAL_SECONDS = 60
@@ -67,6 +69,8 @@ class WatchedGood:
     alliance: bool = True
     always: Tuple[str, ...] = ()
     never: Tuple[str, ...] = ()
+    reserve: str = "none"
+    reserve_amount: int = 0
 
 
 @dataclass(frozen=True)
@@ -198,7 +202,10 @@ def parse_fourchan_thread_url(url: str) -> FourChanThreadSettings:
 
 
 #: The only settings a market good may carry; anything else is a typo the loader rejects.
-MARKET_GOOD_KNOBS = frozenset({"friends", "alliance", "always", "never"})
+MARKET_GOOD_KNOBS = frozenset(
+    {"friends", "alliance", "always", "never", "reserve", "reserve_amount"}
+)
+MARKET_RESERVE_MODES = frozenset({"none", "qty", "ticks"})
 
 
 def switchable_patterns(raw: object, label: str) -> Tuple[str, ...]:
@@ -226,6 +233,22 @@ def market_good_flag(
     if not isinstance(result, bool):
         raise MonitorError(f"Setting {name} for market good {good!r} must be true or false")
     return result
+
+
+def market_good_reserve(section: Dict[str, object], good: str) -> Tuple[str, int]:
+    """Load one good's reserve mode and threshold as an inseparable pair."""
+    raw_mode = section.get("reserve", "none")
+    if not isinstance(raw_mode, str) or raw_mode not in MARKET_RESERVE_MODES:
+        raise MonitorError(
+            f"Setting reserve for market good {good!r} must be one of: "
+            + ", ".join(sorted(MARKET_RESERVE_MODES))
+        )
+    raw_amount = section.get("reserve_amount", 0)
+    if isinstance(raw_amount, bool) or not isinstance(raw_amount, int) or raw_amount < 0:
+        raise MonitorError(
+            f"Setting reserve_amount for market good {good!r} must be a non-negative integer"
+        )
+    return raw_mode, raw_amount
 
 
 def load_market_goods(
@@ -274,6 +297,7 @@ def load_market_goods(
                 f"Market good {name!r} has unknown settings {', '.join(unknown)}; "
                 f"valid settings are {', '.join(sorted(MARKET_GOOD_KNOBS))}"
             )
+        reserve, reserve_amount = market_good_reserve(raw_good, name)
         market_goods.append(
             WatchedGood(
                 name=name,
@@ -287,6 +311,8 @@ def load_market_goods(
                     raw_good.get("never", []),
                     f"never for market good {name!r} (nation names)",
                 ),
+                reserve=reserve,
+                reserve_amount=reserve_amount,
             )
         )
     return tuple(market_goods)
@@ -968,20 +994,117 @@ def matches_any_pattern(text: str, patterns: Sequence[str]) -> bool:
     return False
 
 
-def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
-    """The lines of a report that no ignore pattern silences, in page order.
+#: Logical report selectors exposed by settings.json. These deliberately live in code rather
+#: than settings.example.json: a tick is one game report and should be one user-facing option,
+#: even though keeping its warnings requires judging its routine lines individually.
+TICK_REPORT_SELECTOR = "Tick"
+ACTION_REPORT_PREFIX = "Action:"
 
-    Each line is judged on its own because the game packs a whole tick into one report row:
-    routine production and a force that starved to death arrive together, so a pattern
-    matched against the row is all-or-nothing for both. Nothing surviving means the report
-    raises no alert, which is what a matching pattern always meant; anything surviving is
-    what the alert shows, so the one line that matters is not buried in the other forty.
+#: Every routine line family cron/frequent.php can put inside the two-hourly tick report.
+#: Anything not matching this list survives, so enabling ``Tick`` still alerts on a lost force,
+#: missing factory input, environmental damage, combat, revolt, or another warning.
+TICK_ROUTINE_PATTERNS: Tuple[str, ...] = (
+    "Show Details",
+    "Hide Details",
+    "Change in %:",
+    "You're ascending;",
+    "You gained % %.",
+    "Your % used %.",
+    "Your % drank %.",
+    "Your relationship with the",
+    "Your population",
+    "You hit the % cap of %.",
+    "there are limits to hate.",
+    "is hard to keep",
+    "forgets eventually;",
+    "siphoned off.",
+    "environmental damage has been repaired.",
+    "doesn't like your good relations with",
+)
+
+#: Companion lines written before ``<recipe name> completed successfully.`` by
+#: backend_actions.php, backend_favoriteactions.php and backend_makeequipment.php. Once an
+#: ``Action:`` selector chooses that recipe, these are part of the same logical report.
+ACTION_ROUTINE_PATTERNS: Tuple[str, ...] = (
+    "You spent % %.",
+    "You paid % bits.",
+    "You gained % %.",
+    "Your relationship with the",
+    "Your population",
+)
+
+
+def _is_tick_report(lines: Sequence[str]) -> bool:
+    """Whether these page lines contain the game's structurally distinctive tick wrapper."""
+    return (
+        any(line.casefold() == "show details" for line in lines)
+        and any(line.casefold() == "hide details" for line in lines)
+        and any(line.casefold().startswith("change in satisfaction:") for line in lines)
+    )
+
+
+def _action_name(completion_line: str) -> Optional[str]:
+    """Return the recipe name from the game's one action-completion sentence."""
+    suffix = " completed successfully."
+    if completion_line.casefold().endswith(suffix):
+        return completion_line[: -len(suffix)]
+    return None
+
+
+def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
+    """The lines of a report that no ignore entry silences, in page order.
+
+    ``Tick`` and ``Action: <recipe pattern>`` are logical selectors for the two multi-line
+    report types players actually recognise. They expand to their narrowly defined routine
+    companion lines here, which keeps warnings in the same timestamp-merged table cell.
+    Everything else remains a backwards-compatible per-line pattern. Nothing surviving means
+    the report raises no alert; anything surviving is exactly what the alert shows.
 
     This is deliberately a domain-named entry point over the shared matching rule rather
     than a rename left half-finished: the reports call site is about reports, and the market
     call site is about nation names, so neither should read as the other.
     """
-    return [line for line in message.split("\n") if not matches_any_pattern(line, patterns)]
+    lines = message.split("\n")
+    ordinary_patterns: List[str] = []
+    action_patterns: List[str] = []
+    ignore_tick = False
+    for pattern in patterns:
+        if pattern.casefold() == TICK_REPORT_SELECTOR.casefold():
+            ignore_tick = True
+        elif pattern.casefold().startswith(ACTION_REPORT_PREFIX.casefold()):
+            action_pattern = pattern[len(ACTION_REPORT_PREFIX) :].strip()
+            if action_pattern:
+                action_patterns.append(action_pattern)
+        else:
+            # Backwards compatibility: settings written before logical selectors remain
+            # ordinary per-line patterns with exactly their old behaviour.
+            ordinary_patterns.append(pattern)
+
+    ignored = [matches_any_pattern(line, ordinary_patterns) for line in lines]
+
+    if ignore_tick and _is_tick_report(lines):
+        for index, line in enumerate(lines):
+            ignored[index] = ignored[index] or matches_any_pattern(
+                line, TICK_ROUTINE_PATTERNS
+            )
+
+    selected_completion_indexes = []
+    for index, line in enumerate(lines):
+        action_name = _action_name(line)
+        if action_name is not None and matches_any_pattern(action_name, action_patterns):
+            selected_completion_indexes.append(index)
+            ignored[index] = True
+
+    if selected_completion_indexes:
+        # The game may merge reports sharing a second into one table cell. Suppressing only
+        # narrowly defined action bookkeeping keeps an unselected action's completion or any
+        # warning visible even in that merged shape.
+        for index, line in enumerate(lines):
+            ignored[index] = ignored[index] or matches_any_pattern(
+                line, ACTION_ROUTINE_PATTERNS
+            )
+
+    return [line for index, line in enumerate(lines) if not ignored[index]]
 
 
 def new_reports_since(
@@ -1041,6 +1164,8 @@ class Snapshot:
     #: Every watched good's pending buy orders this poll. Not persisted: alerting is
     #: every-poll, so there is no baseline to keep.
     market_orders: Tuple[MarketOrder, ...] = ()
+    #: This poll's overview stockpile. Not persisted: it is live availability data.
+    stockpiles: Optional[Stockpiles] = None
 
     def to_json(self) -> Dict[str, object]:
         return {
@@ -1406,7 +1531,11 @@ class ClopClient:
             raise AuthenticationError("Login failed; check the credentials or the hosted login flow")
         return html
 
-    def snapshot(self, include_market: bool = True) -> Snapshot:
+    def snapshot(
+        self,
+        include_market: bool = True,
+        stockpiles: Optional[Stockpiles] = None,
+    ) -> Snapshot:
         navigation_html = self._open("index.php")
         if not is_logged_in(navigation_html):
             self.login()
@@ -1433,6 +1562,11 @@ class ClopClient:
         latest_fourchan_post = self._latest_fourchan_post()
         market_orders: Tuple[MarketOrder, ...] = ()
         if include_market and self.market_goods:
+            # Availability is read before the buyer's market. main() normally hands in the
+            # object it already parsed for sheet sync; direct callers get the same safe order
+            # through this fallback rather than being allowed to alert without stock data.
+            if stockpiles is None:
+                _, stockpiles = read_overview_stockpiles(self)
             roster = self._alliance_roster() if self.alliance_id is not None else None
             market_orders = self._market_orders(roster)
         return Snapshot(
@@ -1444,6 +1578,7 @@ class ClopClient:
             reports_checked=True,
             report_rows=tuple(report_rows),
             market_orders=market_orders,
+            stockpiles=stockpiles,
         )
 
 
@@ -1483,21 +1618,54 @@ def goods_to_watch(settings: AlertCategorySettings) -> Tuple[WatchedGood, ...]:
     return settings.market_goods if settings.market_orders else ()
 
 
-def market_order_alerts(order: MarketOrder, good: WatchedGood) -> bool:
+def market_order_alerts(
+    order: MarketOrder,
+    good: WatchedGood,
+    stockpiles: Optional[Stockpiles] = None,
+) -> bool:
     """Whether one buy order raises an alert under this good's settings.
 
     never is absolute, which is what "never alert on" says; always then beats both relation
     checks, so both of them off with a populated always reads as "only these nations,
     whoever they are". The two relation checks are independent, so a buyer who is both a
-    friend and an ally satisfies either one on its own.
+    friend and an ally satisfies either one on its own. A matching buyer must then also pass
+    the reserve check: name overrides never invent stock that is not available to contribute.
     """
     if matches_any_pattern(order.nation_name, good.never):
         return False
-    if matches_any_pattern(order.nation_name, good.always):
+    buyer_matches = (
+        matches_any_pattern(order.nation_name, good.always)
+        or (good.friends and order.is_friend)
+        or (good.alliance and order.is_ally)
+    )
+    if not buyer_matches:
+        return False
+    if stockpiles is None:
+        raise MonitorError(
+            f"Cannot decide whether to alert on {order.good}: no stockpile snapshot was read"
+        )
+
+    quantity = stockpiles.get(order.good)
+    if quantity <= 0:
+        return False
+    if good.reserve == "none":
         return True
-    if good.friends and order.is_friend:
-        return True
-    return good.alliance and order.is_ally
+    if good.reserve == "qty":
+        return quantity - good.reserve_amount > 0
+    if good.reserve != "ticks":
+        raise MonitorError(
+            f"Market good {good.name!r} has invalid reserve mode {good.reserve!r}"
+        )
+
+    try:
+        ticks = stockpiles.ticks(order.good)
+    except StockpileError as error:
+        raise MonitorError(str(error)) from error
+    if isinstance(ticks, int):
+        return ticks > good.reserve_amount
+    # N/A means non-negative net production, so the stock does not run out. NONE means
+    # less than one tick remains. The positive-quantity guard above still applies to both.
+    return ticks == "N/A"
 
 
 def build_alerts(
@@ -1547,7 +1715,8 @@ def build_alerts(
             f"  {order.nation_name} ({order.relation_label()}) "
             f"wants {order.amount:,} at {order.price:,} bits each"
             for order in current.market_orders
-            if order.good.casefold() == watched and market_order_alerts(order, good)
+            if order.good.casefold() == watched
+            and market_order_alerts(order, good, current.stockpiles)
         ]
         if lines:
             alerts.append(
@@ -1779,8 +1948,38 @@ def popup_failure(message: str) -> None:
     Notifier().notify_failure(message)
 
 
+def read_overview_stockpiles(client: ClopClient) -> Tuple[str, Stockpiles]:
+    """Read and validate overview.php once, returning its reusable stockpile parse.
+
+    The HTML is returned alongside the exported ``goods.Stockpiles`` helper because sheet
+    sync also needs buildings and nation status from the same response. Callers can therefore
+    parse once for buy-order reserves and still hand the original page to the other consumers.
+    """
+    from overview import OverviewError, require_valid_overview
+
+    overview_html = client._open("overview.php")
+    if not is_logged_in(overview_html):
+        client.login()
+        overview_html = client._open("overview.php")
+        if not is_logged_in(overview_html):
+            raise MonitorError("not logged in when reading overview.php")
+    try:
+        require_valid_overview(overview_html)
+    except OverviewError as error:
+        raise MonitorError(str(error)) from error
+    try:
+        return overview_html, Stockpiles.from_overview(overview_html)
+    except StockpileError as error:
+        raise MonitorError(str(error)) from error
+
+
 def sync_sheet_step(
-    client: ClopClient, sheet: object, nation: str, notifier: Notifier
+    client: ClopClient,
+    sheet: object,
+    nation: str,
+    notifier: Notifier,
+    overview_html: Optional[str] = None,
+    stock: Optional[Stockpiles] = None,
 ) -> None:
     """Sync the nation's tab from overview.php, ahead of the regular alerting.
 
@@ -1808,31 +2007,17 @@ def sync_sheet_step(
     # Imported here, not at module scope: sheets.py imports load_env_file from this module, so a
     # top-level import would be a cycle. Do not "tidy" these up to the top of the file.
     from buildings import BuildingError, parse_overview_buildings, reconcile, sanity_check
-    from overview import OverviewError, require_valid_overview
     from sheets import SheetError
     from stockpiles import (
         NationStatus,
         NationStatusError,
-        StockpileError,
-        Stockpiles,
         snapshot,
     )
 
     phase = "reading overview.php"
     try:
-        overview_html = client._open("overview.php")
-        if not is_logged_in(overview_html):
-            client.login()
-            overview_html = client._open("overview.php")
-            if not is_logged_in(overview_html):
-                raise MonitorError("not logged in when reading overview.php")
-
-        # Validate the whole page before trusting any of it: a broken overview read as "owns
-        # nothing, holds nothing" would zero the tab and stamp it freshly verified.
-        require_valid_overview(overview_html)
-        # Parsed once, here: both sheet regions are written from these two objects, and nothing
-        # downstream re-fetches or re-parses the page.
-        stock = Stockpiles.from_overview(overview_html)
+        if overview_html is None or stock is None:
+            overview_html, stock = read_overview_stockpiles(client)
         status = NationStatus.from_overview(overview_html)
 
         phase = "the building reconcile"
@@ -1867,7 +2052,6 @@ def sync_sheet_step(
             )
     except (
         MonitorError,
-        OverviewError,
         SheetError,
         BuildingError,
         StockpileError,
@@ -1885,9 +2069,14 @@ def check_and_notify(
     state_path: Path,
     alert_settings: AlertCategorySettings = AlertCategorySettings(),
     persist_state: bool = True,
+    stockpiles: Optional[Stockpiles] = None,
 ) -> Tuple[Snapshot, bool]:
     """Poll once, pausing for a Windows dialog and refreshing state after dismissal."""
-    current = client.snapshot()
+    current = (
+        client.snapshot(stockpiles=stockpiles)
+        if stockpiles is not None
+        else client.snapshot()
+    )
     alerts = build_alerts(previous, current, alert_settings)
     paused_for_alert = False
     if alerts:
@@ -1907,6 +2096,7 @@ def check_and_notify(
                 latest_report=current.latest_report,
                 report_rows=current.report_rows,
                 fourchan_post=current.fourchan_post,
+                stockpiles=current.stockpiles,
             )
             print("Alert dismissed; refreshed the monitoring snapshot.", flush=True)
     if persist_state:
@@ -2250,10 +2440,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             settings = loaded.settings
             poll_failed = False
             try:
-                # Sheet sync is its own process that fires first, before the regular
-                # message/news/report alerting. It handles and reports its own failures.
+                # A watched market needs the current stock before any order can alert. When
+                # sheet sync is also on, both consumers share this one fetch and one parse.
+                overview_html: Optional[str] = None
+                stockpiles: Optional[Stockpiles] = None
+                if goods_to_watch(settings.alerts):
+                    overview_html, stockpiles = read_overview_stockpiles(client)
+
+                # Sheet sync still fires before the regular alerts. Without a watched market
+                # it reads overview itself; with one it receives the object prepared above.
                 if sync_sheet is not None and sync_nation is not None:
-                    sync_sheet_step(client, sync_sheet, sync_nation, notifier)
+                    sync_sheet_step(
+                        client,
+                        sync_sheet,
+                        sync_nation,
+                        notifier,
+                        overview_html,
+                        stockpiles,
+                    )
                 current, _ = check_and_notify(
                     client,
                     previous,
@@ -2261,6 +2465,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.state,
                     settings.alerts,
                     settings.cache.persist_to_file,
+                    stockpiles,
                 )
                 previous = current
                 print(

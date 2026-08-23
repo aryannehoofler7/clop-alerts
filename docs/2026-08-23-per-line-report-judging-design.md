@@ -3,6 +3,12 @@
 **Date:** 2026-08-23
 **Status:** implemented
 
+**Amended 2026-08-24:** per-line judging is still the safety mechanism, but users no longer have to
+configure one pattern per internal tick sentence family. `reports.ignore` now accepts the logical
+selector `Tick`, which expands to those routine families in code and leaves unmatched warning lines
+visible. `Action: <recipe-name pattern>` does the equivalent for a completed action and its
+bookkeeping lines.
+
 Apply `reports.ignore` to each line of a report rather than to the whole report, so that a routine
 two-hourly tick can be silenced without also silencing the one line in it that matters.
 
@@ -80,15 +86,15 @@ In exchange, patterns become more precise. `You paid % bits.` now silences exact
 action report rather than being unable to distinguish it from the rest, which is what makes the
 shipped set able to silence a whole tick without reaching a single notable line.
 
-### The shipped patterns grow
+### The internal catalogue grows
 
-Silencing a tick now needs a pattern per routine line rather than one pattern for the row. The
-catalogue in `2026-08-23-clop-report-formats.md` lists them, and they collapse into roughly fifteen
-compact patterns, all shipped commented out as usual — the wrapper lines, production and
-consumption, relation and satisfaction effects, the caps, the upkeep lines, and the siphon lines.
+Silencing a tick internally needs a matcher per routine line rather than one literal pattern for
+the row. The catalogue in `2026-08-23-clop-report-formats.md` lists them, and they collapse into
+roughly fifteen compact patterns behind the one user-facing `Tick` selector — the wrapper lines,
+production and consumption, relation and satisfaction effects, caps, upkeep, and siphon lines.
 
-Every one of them is a "Routine" entry from that catalogue. Nothing from the "Notable" list ships as
-a pattern, so an unedited monitor cannot hide a warning.
+Every one is a "Routine" entry from that catalogue. Nothing from the "Notable" list is part of the
+selector, so enabling `Tick` cannot hide a warning.
 
 That rule also cost one pattern that shipped before this change: `You sold % and made % bits.` is a
 "Notable" entry, because it fires when somebody else buys from your standing sell order. It was
@@ -127,10 +133,12 @@ silenced contributes nothing.
 - every shipped pattern still matches the line it is meant to, and none matches any Notable line
   from the catalogue.
 
-## Rejected
+## Rejected at the time
 
-- **A better tick pattern.** There is not one. The routine and notable text share a report row, so
-  any pattern matching the first matches the second.
+- **A better literal tick pattern.** There is not one. The routine and notable text share a report
+  row, so any literal pattern matching the first matches the second. The later `Tick` selector is
+  deliberately not a literal pattern: it names the report and expands to the safe routine families
+  internally.
 - **An `alert_anyway` override list**, mirroring the market's `always`/`never`: keep whole-report
   matching, but let a pattern force an alert through. Simpler to build, but the alert still shows
   the entire tick blob, and it requires the user to enumerate every notable line — with the same

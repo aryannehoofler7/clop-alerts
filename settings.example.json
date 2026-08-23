@@ -18,209 +18,250 @@
     "repeat_interval_seconds": 10
   },
   "reports": {
-    "_ignore_help": "Each LINE of a report is matched against the patterns below. A line that matches is left out of the alert; a report whose every line matches raises no alert at all. Matching ignores case and looks anywhere in the line; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
+    "_ignore_help": "Each entry below is one thing you can silence. Tick is the whole two-hourly tick report: internally the monitor removes all of its routine bookkeeping but still alerts on warnings inside that tick. Action: matches the recipe name and silences that completed action as one report, including its spent/paid/gained lines. The remaining entries are advanced per-line patterns for standalone report families. Matching ignores case; % stands for any run of characters. An entry starting with # is switched off: delete the # to switch it on.",
     "ignore": [
-      "# completed successfully.",
-      "# You spent % %.",
-      "# You paid % bits.",
-      "# You gained % %.",
+      "# Tick",
+      "Action: Build %",
+      "Action: Burn Oil",
+      "Action: Distribute Pies",
       "# You bought % from % for % bits.",
-      "# You transferred % to % for % bits.",
+      "You transferred % to % for % bits.",
       "# This nation paid % bits and",
       "# You dealt away % %.",
-      "# You accepted a deal with",
-      "# You have created the military force",
-      "# Show Details",
-      "# Hide Details",
-      "# Change in %:",
-      "# You're ascending;",
-      "# Your % used %.",
-      "# Your % drank %.",
-      "# Your relationship with the",
-      "# Your population",
-      "# You hit the % cap of %.",
-      "# there are limits to hate.",
-      "# is hard to keep",
-      "# forgets eventually;",
-      "# siphoned off.",
-      "# environmental damage has been repaired.",
-      "# doesn't like your good relations with"
+      "You accepted a deal with",
+      "You have created the military force"
     ],
-    "_coverage_help": "These 25 patterns are ONE PER FAMILY OF GAME SENTENCE, not one per wording, and between them they cover every routine line the game can write to reports. Because a pattern matches anywhere in a line, the shortest phrase that is unique to a family covers all of its variants: 'Your relationship with the' takes the four wordings (improved, dwindled, recovered, worsened) and both cap variants; 'Your % used %.' takes the government upkeep bill, a factory eating its inputs and a military force eating its rations; 'Change in %:' takes the satisfaction total and both empire relation totals. Adding a narrower pattern for a wording already covered here buys nothing - check whether one of these already matches before you add anything.",
-    "_completions_help": "Every finished action reports '<action name> completed successfully.', using the action's own name, so the action name is the ONLY part that varies - there is no separate wording for a build, an upgrade or a shipment. That is why one pattern covers all 62 actions and why anchoring on a verb does not: only 38 actions are named 'Build ...', and 'Build % completed successfully.' silences those while leaving the 24 named Upgrade, Dig, Plow, Ship, Smuggle, Manufacture, Distribute, Burn, Drug or Receive to alert. If you want to be selective - silence your building work but still hear about shipments to the Empires - write the verb pattern you want yourself, for example 'Build % completed successfully.'; none ship, because they are all covered by the line above.",
-    "_tick_help": "The tick patterns run from 'Show Details' to the end of the list: the wrapper, production and consumption, the relation and satisfaction effects, the caps, the upkeep bills, the siphons, the jealousy of each Empire at your friendship with the other, and the environment healing. Switch them all on and a quiet tick goes silent, while a tick that lost you a force, starved a factory or damaged the environment still alerts - with just that line, because the lines are judged one at a time. Every one of these is routine bookkeeping; nothing that reports something happening TO you is listed here, so an unedited file cannot hide a warning.",
+    "_actions_help": "Action selectors use the actual recipe name from the game. 'Action: Build %' covers all 38 building, weapon and armour recipes whose names begin Build. Exact examples show how to silence only Burn Oil or only Distribute Pies. You can use any other name from the Actions page, or a family such as 'Action: Upgrade %', 'Action: Ship %', 'Action: Dig %', 'Action: Plow %', 'Action: Manufacture %', 'Action: Smuggle %' or 'Action: Distribute %'.",
+    "_tick_help": "Tick is deliberately one option because cron/frequent.php writes one tick report. It covers the wrapper, production and consumption, relation and satisfaction effects, caps, government/economy/military upkeep, siphons, empire jealousy and environment repair. A tick that lost a force, starved a building, caused environmental damage, contained combat or triggered a revolt still alerts with only those warning lines.",
     "_trade_help": "'You bought ...' and 'You sold ...' are each written to BOTH sides of a trade, with identical wording, so the monitor cannot tell which side you were. On marketplace.php 'You bought' goes to whoever clicked buy and 'You sold' goes to the seller whose listing was taken; on buyermarketplace.php it is the other way round. So the shipped 'You bought' pattern silences your own purchases AND a stranger filling your standing buy order. No 'You sold' pattern ships, because switching it on would also silence somebody buying from your standing sell order, which is usually the news you wanted. Add one yourself if you trade often enough that you would rather not hear about it.",
     "_omissions_help": "Three routine-looking families deliberately have NO pattern. 'You received % %.' is left out because the deal you accepted and a deal somebody else accepted read alike apart from the words 'as part of your deal', so any pattern short enough to cover the first covers the second, and the second is somebody acting on you. The eighteen Major Action lines ('Government changed to %', 'Economy changed to %', 'Nation name changed from % to %') are left out because you take one perhaps twice a year and seeing it confirmed is the point. 'You lose % sat for having an empire of % nations.' is left out because it is a standing penalty worth watching, not bookkeeping."
   },
   "market": {
-    "_goods_help": "A good whose key starts with # is switched off: delete the # to watch that good's buyer's market, and the monitor will alert every poll while a matching order is pending.",
+    "_goods_help": "A good whose key starts with # is switched off: delete the # to watch that good's buyer's market, and the monitor will alert every poll while a matching order is pending and you have stock above its reserve.",
+    "_reserve_help": "reserve must be the string none, qty, or ticks. none still requires Qty above 0. qty requires current Qty minus reserve_amount to be above 0. ticks requires the current Ticks-Worth to be above reserve_amount. reserve_amount must be a non-negative whole number. N/A ticks count as never running out, NONE as less than one tick; both still require positive Qty.",
     "_overrides_help": "friends alerts on buyers on your friends list (blue in game); alliance alerts on buyers in your alliance (green in game); a buyer who is both satisfies either. always and never override both. IMPORTANT: they match the NATION name exactly as it appears in the Buyer column of the marketplace, NOT the player's username - the two are unrelated in this game, so a player called Lacera Viscera may play a nation called Fish Bucket, and you must write the nation. Matching works like reports.ignore: case-insensitive, anywhere in the name, % standing for any run of characters. never beats always, and always beats both friends and alliance. An always or never entry starting with # is switched off too. Note friends and alliance cover every nation a player owns, while always and never name one nation each.",
     "goods": {
       "# Apples": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Cider": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Coffee": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Composites": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Copper": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Drugs": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Gasoline": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Gems": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Machinery Parts": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Oil": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Pies": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Plastics": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Precision Parts": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Toys": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Tungsten": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# Vehicle Parts": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - Central Burrozil": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - Central Przewalskia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - Central Saddle Arabia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - Central Zebrica": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - North Burrozil": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - North Przewalskia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - North Saddle Arabia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - North Zebrica": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - South Burrozil": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - South Przewalskia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - South Saddle Arabia": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       },
       "# DNA - South Zebrica": {
         "friends": true,
         "alliance": true,
+        "reserve": "none",
+        "reserve_amount": 0,
         "always": [],
         "never": []
       }

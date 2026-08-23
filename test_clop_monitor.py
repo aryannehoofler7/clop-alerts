@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import clop_monitor
+from goods import Stockpiles
 from clop_monitor import (
     DEFAULT_WAV_PATH,
     AlertCategorySettings,
@@ -736,21 +737,32 @@ class SettingsDefaultsTests(unittest.TestCase):
         self.assertIsNone(settings.sound.wav_path)
 
 
-#: Each shipped example pattern with a real report the game writes for it. The report text is
-#: taken from the game source, not invented: every finished action reports
-#: "<action name> completed successfully." (backend_actions.php:240), and the action name comes
-#: straight from the recipes table, which is why only 38 of the game's 62 actions begin "Build ".
-#:
-#: One entry per FAMILY of game sentence, not one per wording. Because a pattern matches
-#: anywhere in a line, the shortest phrase unique to a family covers every variant of it, so
-#: "Your relationship with the" stands for six sentences and "completed successfully." for all
-#: 62 actions. ROUTINE_REPORTS below is the corpus that proves it; the pair here only names
-#: each pattern's most recognisable member.
+#: Each shipped choice with a real-shaped report it silences. The first four are logical report
+#: selectors: one tick, all Build-named actions, exactly Burn Oil, and exactly Distribute Pies.
+#: The rest are backwards-compatible line patterns for standalone report families.
 IGNORABLE_REPORTS = [
-    ("completed successfully.", "Dig Basic Copper Mine completed successfully."),
-    ("You spent % %.", "You spent 20 Machinery Parts."),
-    ("You paid % bits.", "You paid 50,000 bits."),
-    ("You gained % %.", "You gained 5 Oil from your 1 Basic Oil Well."),
+    (
+        "Tick",
+        "Show Details\nHide Details\nYou gained 5 Oil from your 1 Basic Oil Well.\n"
+        "Change in Satisfaction: -2\nChange in SE Relation: +1\nChange in NLR Relation: 0",
+    ),
+    (
+        "Action: Build %",
+        "You spent 20 Machinery Parts.\nYou paid 50,000 bits.\n"
+        "Build Advanced Factory completed successfully.",
+    ),
+    (
+        "Action: Burn Oil",
+        "You spent 5 Oil.\nYou gained 5 Energy.\n"
+        "Your population's satisfaction has dwindled due to your 1 Burn Oil. (-5)\n"
+        "Burn Oil completed successfully.",
+    ),
+    (
+        "Action: Distribute Pies",
+        "You spent 1 Pies.\n"
+        "Your population's satisfaction has improved due to your 1 Distribute Pies. (+2)\n"
+        "Distribute Pies completed successfully.",
+    ),
     (
         "You bought % from % for % bits.",
         "You bought 50 Apples from Luna Sueno for 55,000 bits.",
@@ -768,44 +780,6 @@ IGNORABLE_REPORTS = [
     (
         "You have created the military force",
         "You have created the military force First Cavalry.",
-    ),
-    ("Show Details", "Show Details"),
-    ("Hide Details", "Hide Details"),
-    ("Change in %:", "Change in Satisfaction: -2"),
-    (
-        "You're ascending;",
-        "You're ascending; your relationships with the Solar Empire and New Lunar Republic "
-        "can only go down.",
-    ),
-    ("Your % used %.", "Your 3 Basic Factory used up 5 Oil."),
-    ("Your % drank %.", "Your State Controllers drank 6 cider."),
-    (
-        "Your relationship with the",
-        "Your relationship with the Solar Empire has improved due to your "
-        "1 Basic Oil Well. (+3)",
-    ),
-    (
-        "Your population",
-        "Your population's satisfaction has dwindled due to your 3 Basic Factory. (-4)",
-    ),
-    ("You hit the % cap of %.", "You hit the Democracy satisfaction cap of 1500. (-40)"),
-    (
-        "there are limits to hate.",
-        "Even for the Solar Empire, there are limits to hate. (+5)",
-    ),
-    ("is hard to keep", "A satisfied population is hard to keep. (-5 sat)"),
-    (
-        "forgets eventually;",
-        "A bad enemy forgets eventually; you gain 2 relationship with the Solar Empire.",
-    ),
-    ("siphoned off.", "As you have more than 50,000 Oil, 300 was siphoned off."),
-    (
-        "environmental damage has been repaired.",
-        "Some of the environmental damage has been repaired. (5 sat)",
-    ),
-    (
-        "doesn't like your good relations with",
-        "The Solar Empire doesn't like your good relations with the New Lunar Republic. (-3)",
     ),
 ]
 
@@ -1048,22 +1022,17 @@ class ReportIgnorePatternTests(unittest.TestCase):
     def test_no_patterns_ignores_nothing(self):
         self.assertFalse(report_raises_no_alert(WORTH_ALERTING, []))
 
-    def test_shipped_patterns_are_present_but_all_commented_out(self):
+    def test_shipped_choices_are_all_present(self):
         value = shipped_example()
         self.assertEqual(
-            value["reports"]["ignore"],
-            [f"# {pattern}" for pattern, _ in IGNORABLE_REPORTS],
+            [entry.lstrip("#").strip() for entry in value["reports"]["ignore"]],
+            [pattern for pattern, _ in IGNORABLE_REPORTS],
         )
         self.assertNotIn("_ignore_examples", value["reports"])
-        # Shipped as-is, the example silences nothing.
-        self.assertEqual(load_settings(Path("settings.example.json")).alerts.report_ignore, ())
 
     def test_uncommenting_a_shipped_pattern_switches_it_on(self):
         value = shipped_example()
-        wanted = "# completed successfully."
-        value["reports"]["ignore"] = [
-            entry[2:] if entry == wanted else entry for entry in value["reports"]["ignore"]
-        ]
+        value["reports"]["ignore"] = ["Action: Burn Oil"]
         # The bundled WAV is reached by a path relative to the settings file, which a temp
         # directory has no copy of; the sound is irrelevant here.
         value["sound"]["wav_path"] = None
@@ -1071,9 +1040,14 @@ class ReportIgnorePatternTests(unittest.TestCase):
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             settings = load_settings(path)
-        self.assertEqual(settings.alerts.report_ignore, ("completed successfully.",))
+        self.assertEqual(settings.alerts.report_ignore, ("Action: Burn Oil",))
         self.assertTrue(
-            report_raises_no_alert("Burn Oil completed successfully.", settings.alerts.report_ignore)
+            report_raises_no_alert(
+                "You spent 5 Oil.\nYou gained 5 Energy.\n"
+                "Your population's satisfaction has dwindled due to your 1 Burn Oil. (-5)\n"
+                "Burn Oil completed successfully.",
+                settings.alerts.report_ignore,
+            )
         )
 
 
@@ -1127,6 +1101,50 @@ class CompletionPatternTests(unittest.TestCase):
         ):
             with self.subTest(message=message[:40]):
                 self.assertFalse(report_raises_no_alert(message, ["% completed successfully."]))
+
+
+class LogicalReportSelectorTests(unittest.TestCase):
+    """Tick and Action entries represent game reports, not their incidental sentences."""
+
+    def test_build_selector_silences_the_whole_multiline_build_report(self):
+        report = (
+            "You spent 20 Machinery Parts.\n"
+            "You paid 50,000 bits.\n"
+            "Your population's satisfaction has improved due to your 1 Build Bakery. (+2)\n"
+            "Build Bakery completed successfully."
+        )
+        self.assertEqual(surviving_report_lines(report, ["Action: Build %"]), [])
+
+    def test_exact_action_choices_are_selective(self):
+        burn = (
+            "You spent 5 Oil.\nYou gained 5 Energy.\n"
+            "Your population's satisfaction has dwindled due to your 1 Burn Oil. (-5)\n"
+            "Burn Oil completed successfully."
+        )
+        pies = (
+            "You spent 1 Pies.\n"
+            "Your population's satisfaction has improved due to your 1 Distribute Pies. (+2)\n"
+            "Distribute Pies completed successfully."
+        )
+        self.assertEqual(surviving_report_lines(burn, ["Action: Burn Oil"]), [])
+        self.assertEqual(surviving_report_lines(pies, ["Action: Distribute Pies"]), [])
+        self.assertIn(
+            "Burn Oil completed successfully.",
+            surviving_report_lines(burn, ["Action: Distribute Pies"]),
+        )
+
+    def test_selected_action_does_not_hide_a_warning_in_a_merged_cell(self):
+        warning = "You couldn't pay the upkeep for your First Cavalry and it's gone!"
+        report = (
+            "You spent 5 Oil.\nBurn Oil completed successfully.\n" + warning
+        )
+        self.assertEqual(surviving_report_lines(report, ["Action: Burn Oil"]), [warning])
+
+    def test_tick_word_is_not_a_broad_substring_pattern(self):
+        self.assertEqual(
+            surviving_report_lines("The clock is ticking normally.", ["Tick"]),
+            ["The clock is ticking normally."],
+        )
 
 
 class ReportScanTests(unittest.TestCase):
@@ -1334,29 +1352,18 @@ class ShippedPatternSafetyTests(unittest.TestCase):
     def test_the_shipped_set_is_exactly_the_patterns_the_fixture_documents(self):
         self.assertEqual(shipped_report_patterns(), [pattern for pattern, _ in IGNORABLE_REPORTS])
 
-    def test_the_shipped_set_silences_every_routine_line_the_game_writes(self):
-        patterns = shipped_report_patterns()
-        unsilenced = [
-            message for message in ROUTINE_REPORTS if surviving_report_lines(message, patterns)
-        ]
-        self.assertEqual(unsilenced, [])
+    def test_tick_is_one_choice_covering_every_routine_tick_family_from_the_source(self):
+        # ROUTINE_REPORTS[8:44] is the complete frequent.php tick corpus above: production,
+        # consumption, upkeep, effects, wrapper, caps, decay, siphons, repair and jealousy.
+        report = tick_report(ROUTINE_REPORTS[8:44])
+        page_lines = parse_report_rows(reports_page([report]))[0][0]
+        self.assertEqual(surviving_report_lines(page_lines, ["Tick"]), [])
 
-    def test_no_shipped_pattern_is_redundant(self):
-        """Dropping any one pattern must leave a routine line alerting.
-
-        The pair of this and the coverage test above is the whole rule the shipped list is
-        held to: cover every routine family, with no pattern that another already covers.
-        Without it the list drifts back into a pattern per wording - it once carried twelve
-        for "<action> completed successfully.", eleven of which the twelfth already matched.
-        """
-        patterns = shipped_report_patterns()
-        for dropped in patterns:
-            rest = [pattern for pattern in patterns if pattern != dropped]
-            with self.subTest(dropped=dropped):
-                self.assertTrue(
-                    any(surviving_report_lines(message, rest) for message in ROUTINE_REPORTS),
-                    f"{dropped!r} silences nothing the other patterns do not already silence",
-                )
+    def test_action_choices_are_not_permutations_of_the_completion_sentence(self):
+        self.assertEqual(
+            shipped_report_patterns()[:4],
+            ["Tick", "Action: Build %", "Action: Burn Oil", "Action: Distribute Pies"],
+        )
 
 
 class ShippedPatternsOnRealReportsTests(unittest.TestCase):
@@ -1976,6 +1983,8 @@ class WatchedGoodTests(unittest.TestCase):
         self.assertTrue(good.alliance)
         self.assertEqual(good.always, ())
         self.assertEqual(good.never, ())
+        self.assertEqual(good.reserve, "none")
+        self.assertEqual(good.reserve_amount, 0)
 
     def test_alert_categories_default_to_market_on_with_nothing_watched(self):
         settings = clop_monitor.AlertCategorySettings()
@@ -2026,6 +2035,8 @@ class MarketSettingsTests(unittest.TestCase):
                         "alliance": True,
                         "always": ["Luna Sueno"],
                         "never": ["Sombra"],
+                        "reserve": "ticks",
+                        "reserve_amount": 4,
                     }
                 }
             }
@@ -2039,9 +2050,23 @@ class MarketSettingsTests(unittest.TestCase):
                     alliance=True,
                     always=("Luna Sueno",),
                     never=("Sombra",),
+                    reserve="ticks",
+                    reserve_amount=4,
                 ),
             ),
         )
+
+    def test_an_invalid_reserve_mode_is_rejected(self):
+        for reserve in ("quantity", "Ticks", None, 1):
+            with self.subTest(reserve=reserve):
+                with self.assertRaisesRegex(MonitorError, "none, qty, ticks"):
+                    self.load({"goods": {"Oil": {"reserve": reserve}}})
+
+    def test_reserve_amount_must_be_a_non_negative_integer(self):
+        for amount in (-1, 1.5, True, "4"):
+            with self.subTest(amount=amount):
+                with self.assertRaisesRegex(MonitorError, "reserve_amount"):
+                    self.load({"goods": {"Oil": {"reserve_amount": amount}}})
 
     def test_a_commented_out_nation_name_is_dropped(self):
         settings = self.load({"goods": {"Oil": {"always": ["# Luna Sueno", "Sombra"]}}})
@@ -2102,7 +2127,9 @@ class MarketSettingsTests(unittest.TestCase):
             self.load({"goods": {"Oil": {"freinds": False}}})
 
     def test_an_unknown_knob_is_rejected_by_naming_the_valid_ones(self):
-        with self.assertRaisesRegex(MonitorError, "alliance, always, friends, never"):
+        with self.assertRaisesRegex(
+            MonitorError, "alliance, always, friends, never, reserve, reserve_amount"
+        ):
             self.load({"goods": {"Oil": {"freinds": False}}})
 
     def test_two_good_keys_differing_only_by_case_are_rejected(self):
@@ -2169,16 +2196,19 @@ class ShippedMarketGoodsTests(unittest.TestCase):
         goods = shipped_example()["market"]["goods"]
         self.assertEqual(list(goods), [f"# {name}" for name in TRADEABLE_GOODS])
 
-    def test_every_shipped_good_shows_all_four_knobs(self):
+    def test_every_shipped_good_shows_all_reserve_and_buyer_knobs(self):
         for key, good in shipped_example()["market"]["goods"].items():
             with self.subTest(good=key):
                 self.assertEqual(
-                    sorted(good), ["alliance", "always", "friends", "never"]
+                    sorted(good),
+                    ["alliance", "always", "friends", "never", "reserve", "reserve_amount"],
                 )
                 self.assertTrue(good["friends"])
                 self.assertTrue(good["alliance"])
                 self.assertEqual(good["always"], [])
                 self.assertEqual(good["never"], [])
+                self.assertEqual(good["reserve"], "none")
+                self.assertEqual(good["reserve_amount"], 0)
 
     def test_shipped_as_is_the_example_watches_nothing(self):
         settings = load_settings(Path("settings.example.json"))
@@ -2520,7 +2550,10 @@ class MarketDecisionTests(unittest.TestCase):
         return clop_monitor.MarketOrder("Oil", 1, name, 5, 1000, **flags)
 
     def decide(self, order, **knobs):
-        return clop_monitor.market_order_alerts(order, clop_monitor.WatchedGood("Oil", **knobs))
+        stock = knobs.pop("stock", Stockpiles({"Oil": 5}, {"Oil": 3}))
+        return clop_monitor.market_order_alerts(
+            order, clop_monitor.WatchedGood("Oil", **knobs), stock
+        )
 
     def test_a_friend_alerts_when_friends_is_on(self):
         self.assertTrue(self.decide(self.order(is_friend=True), friends=True, alliance=False))
@@ -2574,10 +2607,87 @@ class MarketDecisionTests(unittest.TestCase):
     def test_name_patterns_ignore_case(self):
         self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
 
+    def test_none_reserve_still_requires_a_positive_quantity(self):
+        self.assertFalse(
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 0}))
+        )
+        self.assertTrue(
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 1}))
+        )
+
+    def test_qty_reserve_requires_strictly_more_than_the_threshold(self):
+        good = {"reserve": "qty", "reserve_amount": 5}
+        self.assertFalse(
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 5}), **good)
+        )
+        self.assertTrue(
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 6}), **good)
+        )
+
+    def test_ticks_reserve_requires_strictly_more_than_the_threshold(self):
+        good = {"reserve": "ticks", "reserve_amount": 3}
+        self.assertFalse(
+            self.decide(
+                self.order(is_friend=True),
+                stock=Stockpiles({"Oil": 10}, {"Oil": 3}),
+                **good,
+            )
+        )
+        self.assertTrue(
+            self.decide(
+                self.order(is_friend=True),
+                stock=Stockpiles({"Oil": 10}, {"Oil": 4}),
+                **good,
+            )
+        )
+
+    def test_ticks_words_keep_their_game_meaning(self):
+        good = {"reserve": "ticks", "reserve_amount": 3}
+        self.assertTrue(
+            self.decide(
+                self.order(is_friend=True),
+                stock=Stockpiles({"Oil": 10}, {"Oil": "N/A"}),
+                **good,
+            )
+        )
+        self.assertFalse(
+            self.decide(
+                self.order(is_friend=True),
+                stock=Stockpiles({"Oil": 10}, {"Oil": "NONE"}),
+                **good,
+            )
+        )
+
+    def test_ticks_reserve_never_alerts_with_zero_quantity_even_if_ticks_are_na(self):
+        self.assertFalse(
+            self.decide(
+                self.order(is_friend=True),
+                reserve="ticks",
+                reserve_amount=0,
+                stock=Stockpiles({}, {}),
+            )
+        )
+
+    def test_ticks_reserve_reports_a_missing_ticks_column_as_a_monitor_error(self):
+        with self.assertRaisesRegex(MonitorError, "no Ticks-Worth column"):
+            self.decide(
+                self.order(is_friend=True),
+                reserve="ticks",
+                reserve_amount=0,
+                stock=Stockpiles({"Oil": 10}),
+            )
+
 
 class MarketAlertTests(unittest.TestCase):
     def snapshot(self, *orders):
-        return Snapshot(0, 0, None, market_orders=tuple(orders))
+        quantities = {order.good: max(order.amount, 1) for order in orders}
+        return Snapshot(
+            0,
+            0,
+            None,
+            market_orders=tuple(orders),
+            stockpiles=Stockpiles(quantities),
+        )
 
     def settings(self, *goods):
         return AlertCategorySettings(market_goods=tuple(goods))
@@ -2722,6 +2832,29 @@ def market_responder(rows_by_resource_id):
         return MARKET_FORM + (market_page(*rows) if rows else EMPTY_MARKET_BANNER)
 
     return serve
+
+
+def market_overview(amounts=None, ticks=None):
+    """A valid overview carrying enough stock data for market-reserve decisions."""
+    amounts = amounts or {"Machinery Parts": 100, "Oil": 100, "Apples": 100}
+    ticks = ticks or {}
+    rows = "".join(
+        f'<tr><td style="text-align: right;">{name}</td>'
+        f"<td>{amount}</td><td>0</td><td>0</td><td>0</td><td>0</td>"
+        f"<td>{ticks.get(name, 'N/A')}</td></tr>"
+        for name, amount in amounts.items()
+    )
+    return (
+        AUTHENTICATED_HEADER
+        + '<div class="panel-heading">Resources</div><table>'
+        '<tr><td style="text-align: right;">Resource</td><td>Qty</td><td>Generated</td>'
+        "<td>Used</td><td>Loss</td><td>Net</td><td>Ticks-Worth</td></tr>"
+        + rows
+        + "</table>"
+        '<div class="panel-heading">Buildings</div><table>'
+        '<tr><td style="text-align: right;">Farm</td><td><span>1</span></td></tr>'
+        "</table></html>"
+    )
 
 
 def market_client(pages, goods=(("Machinery Parts", 10),), alliance_id=None):
@@ -2948,14 +3081,33 @@ class MarketFetchTests(unittest.TestCase):
                     {"10": [market_row(42, "Theirs", "text-danger", 12, "5,000")]}
                 ),
                 "viewalliance.php?alliance_id=7": ALLIANCE_PAGE,
+                "overview.php": market_overview(),
             },
             alliance_id=7,
         )
         snapshot = client.snapshot()
+        paths = [path for path, _ in calls]
+        self.assertLess(paths.index("overview.php"), paths.index("buyermarketplace.php"))
         # Nation 42 is in the roster, so the red enemy colour does not hide their membership.
         self.assertEqual(len(snapshot.market_orders), 1)
         self.assertTrue(snapshot.market_orders[0].is_ally)
         self.assertTrue(snapshot.market_orders[0].is_enemy)
+
+    def test_a_preparsed_stockpile_is_reused_without_an_overview_fetch(self):
+        navigation = AUTHENTICATED_HEADER.replace("(7)", "").replace("(2)", "")
+        client, calls = market_client(
+            {
+                "index.php": navigation,
+                "news.php?page=1": navigation + "<h3>News</h3>No news yet.",
+                "reports.php": navigation + "<h3>Reports</h3><table></table>",
+                "buyermarketplace.php": market_responder({}),
+            },
+            alliance_id=0,
+        )
+        stock = Stockpiles({"Machinery Parts": 12})
+        snapshot = client.snapshot(stockpiles=stock)
+        self.assertIs(snapshot.stockpiles, stock)
+        self.assertNotIn("overview.php", [path for path, _ in calls])
 
 
 class MarketPreflightTests(unittest.TestCase):
@@ -3163,12 +3315,20 @@ class OverrideNameIsTheNationTests(unittest.TestCase):
 
     def test_never_silences_by_nation_name(self):
         good = clop_monitor.WatchedGood("Machinery Parts", never=("Fish Bucket",))
-        self.assertFalse(clop_monitor.market_order_alerts(self.orders()[0], good))
+        self.assertFalse(
+            clop_monitor.market_order_alerts(
+                self.orders()[0], good, Stockpiles({"Machinery Parts": 1})
+            )
+        )
 
     def test_the_players_username_matches_nothing(self):
         good = clop_monitor.WatchedGood("Machinery Parts", never=("Lacera Viscera",))
         # The ally still alerts: the username never reached the comparison.
-        self.assertTrue(clop_monitor.market_order_alerts(self.orders()[0], good))
+        self.assertTrue(
+            clop_monitor.market_order_alerts(
+                self.orders()[0], good, Stockpiles({"Machinery Parts": 1})
+            )
+        )
 
 
 class MarketThroughAPollTests(unittest.TestCase):
@@ -3199,6 +3359,7 @@ class MarketThroughAPollTests(unittest.TestCase):
             "news.php?page=1": self.QUIET_NAVIGATION + "<h3>News</h3>No news yet.",
             "reports.php": self.QUIET_NAVIGATION + "<h3>Reports</h3><table></table>",
             "buyermarketplace.php": market_responder(rows_by_resource_id),
+            "overview.php": market_overview(),
         }
 
     def poll(self, client, previous, notifier, settings):

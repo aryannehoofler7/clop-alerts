@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -48,6 +49,13 @@ EXEC_URL = (
 SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 DEFAULT_TIMEOUT = 30.0
+
+#: One initial request plus these two retries. A few seconds is long enough to absorb the brief
+#: Google Apps Script 404/5xx glitches seen in production without holding the monitor up for an
+#: entire polling interval. Writes are explicit assignments, so repeating the identical payload is
+#: idempotent if Google applied it but dropped the response.
+DEFAULT_RETRY_DELAYS = (1.0, 3.0)
+RETRYABLE_HTTP_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
 #: Environment variable naming the sheet tab for your nation (its value is the exact tab name, e.g.
 #: ``LePone(Z)``). Set it in ``.env`` alongside CLOP_USERNAME / CLOP_PASSWORD.
@@ -160,9 +168,16 @@ def _as_grid(values: Any) -> Grid:
 class GoogleSheet:
     """Read and write ranges of the shared sheet by A1 notation, via the Apps Script endpoint."""
 
-    def __init__(self, exec_url: str = EXEC_URL, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        exec_url: str = EXEC_URL,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS,
+    ) -> None:
         self.exec_url = exec_url
         self.timeout = timeout
+        self.retry_delays = tuple(retry_delays)
 
     def read(self, tab: str, a1: str) -> Grid:
         """Return the values in ``tab!a1`` as a 2-D list of rows (as the sheet stores them)."""
@@ -221,24 +236,44 @@ class GoogleSheet:
         payload = {"action": action, "tab": tab, "range": a1}
         if values is not None:
             payload["values"] = values
-        request = urllib.request.Request(
-            self.exec_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                status = response.status
-                raw = response.read()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read()[:200].decode("utf-8", "replace")
-            raise SheetError(f"HTTP {exc.code} from sheet endpoint: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise SheetError(f"could not reach sheet endpoint: {exc.reason}") from exc
+        encoded = json.dumps(payload).encode("utf-8")
+        attempts = len(self.retry_delays) + 1
+        for attempt in range(attempts):
+            request = urllib.request.Request(
+                self.exec_url,
+                data=encoded,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    status = response.status
+                    raw = response.read()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read()[:200].decode("utf-8", "replace")
+                message = f"HTTP {exc.code} from sheet endpoint: {detail}"
+                if exc.code in RETRYABLE_HTTP_STATUSES and attempt < len(self.retry_delays):
+                    time.sleep(self.retry_delays[attempt])
+                    continue
+                suffix = f" after {attempts} attempts" if attempt else ""
+                raise SheetError(message + suffix) from exc
+            except urllib.error.URLError as exc:
+                message = f"could not reach sheet endpoint: {exc.reason}"
+                if attempt < len(self.retry_delays):
+                    time.sleep(self.retry_delays[attempt])
+                    continue
+                suffix = f" after {attempts} attempts" if attempt else ""
+                raise SheetError(message + suffix) from exc
 
-        if status != 200:
-            raise SheetError(f"HTTP {status} from sheet endpoint: {raw[:200]!r}")
+            if status != 200:
+                message = f"HTTP {status} from sheet endpoint: {raw[:200]!r}"
+                if status in RETRYABLE_HTTP_STATUSES and attempt < len(self.retry_delays):
+                    time.sleep(self.retry_delays[attempt])
+                    continue
+                suffix = f" after {attempts} attempts" if attempt else ""
+                raise SheetError(message + suffix)
+            break
+
         try:
             body = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:

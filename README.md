@@ -143,9 +143,9 @@ choose alert categories and sound behaviour:
   },
   "market": {
     "goods": {
-      "# Machinery Parts": {"friends": true, "alliance": true, "always": [], "never": []},
-      "# Oil":             {"friends": true, "alliance": true, "always": [], "never": []},
-      "# Pies":            {"friends": true, "alliance": true, "always": [], "never": []}
+      "# Machinery Parts": {"friends": true, "alliance": true, "reserve": "none", "reserve_amount": 0, "always": [], "never": []},
+      "# Oil":             {"friends": true, "alliance": true, "reserve": "none", "reserve_amount": 0, "always": [], "never": []},
+      "# Pies":            {"friends": true, "alliance": true, "reserve": "none", "reserve_amount": 0, "always": [], "never": []}
     }
   },
   "fourchan": {
@@ -236,18 +236,17 @@ poll.
 ### Ignoring routine reports
 
 Most reports are the game's own bookkeeping — trades you made, the two-hourly tick, a building you
-queued — and alerting on them buries the ones that matter. `reports.ignore` is a list of patterns,
-and **each line of a report is judged against them separately**:
+queued — and alerting on them buries the ones that matter. `reports.ignore` is a list of things you
+do not want to hear about. The two multi-line forms have logical selectors:
 
-- a line that matches is left out of the alert;
-- a report whose **every** line matches raises no alert at all;
-- a report with any line left alerts, showing **only the lines that survived**.
+- `Tick` means the game's one two-hourly tick report;
+- `Action: <recipe-name pattern>` means one completed game action, including its spent, paid,
+  gained, relation, and satisfaction lines.
 
-That matters because the two-hourly tick is a single report containing everything that happened —
-forty lines of production with, once in a while, `You couldn't pay the upkeep for your First Cavalry
-and it's gone!` in the middle of them. Judging the report as a whole meant silencing the tick and
-that line together, or neither. Judging it a line at a time lets you silence the routine forty and
-still be told about the one.
+The monitor still judges their contents line by line internally. A tick can contain forty routine
+lines and `You couldn't pay the upkeep for your First Cavalry and it's gone!` in the middle. `Tick`
+removes the routine bookkeeping but keeps that warning, so users configure one report while the
+alert contains only the line that matters.
 
 **A pattern starting with `#` is switched off.** JSON has no comment syntax, so this is how a pattern
 is commented out: it stays in the list where you can see it, and you delete the two characters to
@@ -257,87 +256,51 @@ so:
 ```json
 "reports": {
   "ignore": [
-    "completed successfully.",
-    "You spent % %.",
-    "You paid % bits.",
+    "Tick",
+    "Action: Build %",
+    "# Action: Burn Oil",
+    "# Action: Distribute Pies",
     "# You bought % from % for % bits.",
-    "# Show Details",
-    "# Change in %:"
+    "# You transferred % to % for % bits."
   ]
 }
 ```
 
-That file goes quiet for a finished action, and leaves the rest switched off. It takes all three
-switched-on patterns to do it, because a finished build is three lines and each needs its own: drop
-`You spent % %.` and the report still alerts, showing `You spent 20 Machinery Parts.` on its own.
-Leading spaces before the `#` are fine. The `#` only means "off" at the very start of a pattern,
-so `Report #% filed` is a normal pattern; the cost of the convention is that you cannot match a
-report whose text genuinely begins with `#`.
+That file silences ticks and completed actions whose recipe name begins `Build`; Burn Oil,
+Distribute Pies, purchases, and transfers remain switched off. Leading spaces before `#` are fine.
+The `#` only means "off" at the start of an entry, so `Report #% filed` remains a normal custom
+pattern.
 
 - A pattern matches **anywhere** in a line.
 - `%` stands for **any run of characters**, including none, so `You paid % bits.` covers any price.
 - Matching **ignores case**.
-- Because a pattern matches anywhere, a leading or trailing `%` does nothing: `% completed
-  successfully.` and `completed successfully.` are the same pattern. Use the shortest phrase that
-  says which line you mean.
 - Everything else is literal: `.` and `(` mean themselves, not what they mean in a regular
   expression.
-- **One pattern silences one line.** A finished build arrives as three lines — `You spent 20
-  Machinery Parts.`, `You paid 50,000 bits.`, `Build Advanced Factory completed successfully.` — and
-  going quiet takes a pattern for each. That is the price of being able to keep the fourth line when
-  a fourth line turns up.
-
-Patterns are substrings, not whole-line rules, so keep them specific enough to mean what you want.
-
-**A pattern cannot span two lines.** The lines are the game's own: wherever the page breaks a report
-— a `<br/>`, or the end of the block the tick wraps its details in — the monitor breaks it too, and
-`%` does not reach across the break. So write each pattern to match one line as the page shows it.
-The exception proves the rule: three of the game's reports are written with a newline in the middle
-of a sentence rather than between two of them, and those still count as one line, because it is the
-page's own line breaks that are honoured and not every newline in the text.
+- Plain entries without `Tick` or `Action:` remain per-line patterns for compatibility and for
+  standalone report families. They cannot span the page's `<br/>` line breaks.
 
 #### Silencing finished actions
 
-Every action you complete reports **`<action name> completed successfully.`**, and the name is the
-action's own, taken straight from the game's recipe list. That matters more than it sounds: of the
-game's 62 actions only **38** are named `Build ...`. The other 24 begin with `Upgrade`, `Dig`,
-`Plow`, `Ship`, `Smuggle`, `Manufacture`, `Distribute`, `Burn`, `Drug` or `Receive` — so
-`Build Basic Oil Well completed successfully.` and `Dig Basic Copper Mine completed successfully.`
-are the same kind of event with different first words.
+Every completed action ends with **`<recipe name> completed successfully.`**. `Action:` matches that
+recipe name and treats its preceding bookkeeping as part of the same report. The shipped examples
+are deliberately choices a player recognises:
 
-A pattern of `Build % completed successfully.` therefore silences your oil wells and not your copper
-mines. The shipped pattern is **`completed successfully.`**, which covers every completion — builds,
-upgrades, digs, shipments, weapons and armour alike — in one line.
+- `Action: Build %` covers all 38 building, weapon, and armour recipes beginning `Build`;
+- `Action: Burn Oil` covers only Burn Oil;
+- `Action: Distribute Pies` covers only Distribute Pies.
 
-No verb-specific pattern ships, because the line above already matches every one of them and a
-pattern that silences nothing new is just something else to read. If you want to be selective —
-silence your construction work but still hear when a shipment to one of the Empires lands, which is
-a relations change worth seeing — write the verb patterns you want yourself, and switch the
-catch-all off.
+Use any name shown on the Actions page. `%` makes families such as `Action: Upgrade %`,
+`Action: Ship %`, `Action: Dig %`, `Action: Plow %`, `Action: Manufacture %`,
+`Action: Smuggle %`, or `Action: Distribute %`.
 
 Failed and refused builds produce no report at all, so nothing here can hide one.
 
 #### Silencing the two-hourly tick
 
-The tick is the noisiest thing the game writes and the one most worth silencing. It takes a pattern
-per routine *family*, and the settings example ships the whole set, commented out, in one block from
-`Show Details` downwards: the Show/Hide wrapper and the `Change in ...` totals, production and
-consumption, the relation and satisfaction effects, the satisfaction and relationship caps, the
-government and military upkeep bills, the siphons that take the top off a stockpile, each Empire's
-jealousy of the other, and the environment healing. Switch that block on and a quiet tick says
-nothing at all.
-
-A family, not a wording: the tick writes `Your relationship with the Solar Empire has improved …`,
-`… has dwindled …`, `… has recovered …`, `… has worsened …` and two more when the relation is at its
-cap, and one pattern — `Your relationship with the` — takes all six, because a pattern matches
-anywhere in the line. The fourteen tick patterns cover thirty-odd sentences that way. Before adding
-a pattern of your own, check whether one of them already matches the line: patterns that silence
-nothing new are what made the earlier version of this list twice the size for less coverage.
-
-`Change in Satisfaction:` used to be the pattern to avoid, because it appears in every tick and
-whole-report matching meant it silenced the tick's warnings along with its bookkeeping. Per-line
-matching is what makes it safe: `Change in %:` now silences three lines, the satisfaction and
-relation totals, and nothing else. A tick containing any of
+The tick is the noisiest thing the game writes and it is one report, so it is one setting: `Tick`.
+That selector covers every routine family found in `cron/frequent.php`: the Show/Hide wrapper,
+production and consumption, relation and satisfaction effects, caps, government/economy/military
+upkeep, stockpile siphons, Empire jealousy, and environmental repair. A tick containing any of
 
 - `You couldn't pay the upkeep for your First Cavalry and it's gone!`
 - `Too many Basic Oil Wells cause environmental damage! (-5 sat)`
@@ -446,8 +409,8 @@ switched off, and you switch a good on by deleting those two characters from its
 ```json
 "market": {
   "goods": {
-    "Machinery Parts":   {"friends": true, "alliance": true, "always": [], "never": []},
-    "# Oil":             {"friends": true, "alliance": true, "always": [], "never": []}
+    "Machinery Parts":   {"friends": true, "alliance": true, "reserve": "qty", "reserve_amount": 100, "always": [], "never": []},
+    "# Oil":             {"friends": true, "alliance": true, "reserve": "none", "reserve_amount": 0, "always": [], "never": []}
   }
 }
 ```
@@ -531,6 +494,33 @@ than being quietly ignored, since a misspelled knob would otherwise fall back to
 the opposite of what you wrote. Two goods whose keys differ only in capitalisation are refused the
 same way.
 
+#### Keeping a reserve
+
+Every buyer match is filtered against the stockpile read from `overview.php` before the buyer's
+market is checked. `reserve` is a string with exactly three valid values, and an invalid value
+refuses the settings file instead of silently choosing a fallback:
+
+- `"none"` alerts only while current `Qty` is above zero. `reserve_amount` is ignored.
+- `"qty"` alerts only when `Qty - reserve_amount > 0`. With a reserve of 100, a stockpile of 100
+  stays silent and 101 alerts.
+- `"ticks"` alerts only when the Resources panel's `Ticks-Worth` is greater than
+  `reserve_amount`. The game's `N/A` means the stock never runs out and passes any finite ticks
+  reserve; `NONE` means less than one tick and does not pass. Positive `Qty` is still required.
+
+`reserve_amount` must be a non-negative whole number. Reserves are absolute: `always` can override
+the friend/alliance checks, but it cannot alert when there is no excess stock to contribute.
+
+```json
+"Machinery Parts": {
+  "friends": true,
+  "alliance": true,
+  "reserve": "ticks",
+  "reserve_amount": 4,
+  "always": [],
+  "never": []
+}
+```
+
 #### When it alerts, and what it costs
 
 Unlike news and reports, **a market alert repeats on every poll for as long as the order is
@@ -540,12 +530,14 @@ which also alert every poll while they are nonzero. Nothing about market orders 
 `.state/`, so deleting that folder changes nothing here, and a restart re-alerts on whatever is
 still pending.
 
-Watching costs requests. Each poll makes one GET of `buyermarketplace.php` to pick up its rotating
-form token, then one POST per watched good — the order table exists only in response to a POST —
-plus one GET for the alliance roster, which is re-read every poll because members join and leave.
-Switching all 28 goods on is therefore about 30 requests every poll, which is worth knowing before
-you do it at the default 60-second interval. Nothing watched means no market requests at all. The
-roster GET is skipped — leaving the cost at 1 + one POST per good — in two cases: when your nation is
+Watching costs requests. Each poll first makes one GET of `overview.php` for the reserve check, then
+one GET of `buyermarketplace.php` to pick up its rotating form token, then one POST per watched good
+— the order table exists only in response to a POST — plus one GET for the alliance roster, which
+is re-read every poll because members join and leave. Switching all 28 goods on is therefore about
+31 requests every poll, which is worth knowing before you do it at the default 60-second interval.
+When sheet sync is enabled, it reuses that same parsed overview instead of fetching the page again.
+Nothing watched means no market requests at all. The roster GET is skipped — leaving the cost at
+2 + one POST per good — in two cases: when your nation is
 in no alliance, and when *every* watched good switches the alliance check off with
 `"alliance": false`. Since `alliance` defaults to `true`, one good left at the default is enough to
 bring the roster back.
@@ -689,6 +681,11 @@ sheet.write("LePone(Z)", "A1:B2", [[1, 2], [3, 4]])
 Ranges use A1 notation. `write` accepts a scalar, a flat row, or a 2-D block and coerces it to the
 shape the range expects. Any failure — network, a non-JSON reply, or a server-side error such as an
 unknown tab — raises `sheets.SheetError`.
+
+Transient endpoint failures are retried before that error escapes: the original request, then two
+retries after 1 and 3 seconds. This includes network failures and HTTP 404, 408, 425, 429, and
+5xx responses. Apps Script protocol replies such as `no such tab` are definitive and fail
+immediately. Writes assign explicit values, so retrying the identical write is safe.
 
 ### Your nation tab
 

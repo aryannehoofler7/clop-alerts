@@ -8,6 +8,14 @@ recipes since could differ.
 Written because the monitor's shipped ignore-pattern `Build % completed successfully.` turned out to
 miss most of what it was meant to cover. This is the catalogue that replaced it.
 
+**Interface amendment, 2026-08-24.** The sentence-family catalogue below remains the internal
+safety corpus, but it is no longer dumped into `settings.example.json`. The game writes one tick
+report, so settings now expose one `Tick` selector; the monitor applies the catalogue internally to
+remove routine tick lines while preserving warnings in the same report. Completed recipes likewise
+use `Action: <recipe-name pattern>`, with shipped examples for `Build %`, `Burn Oil`, and
+`Distribute Pies`. The old 25-entry list described below is implementation history, not the current
+user-facing settings list.
+
 **Revised the same day.** The first list this catalogue produced answered the miss by adding
 patterns, and reached 33 of them: twelve for the completion sentence alone, two for relations, two
 for satisfaction, two for the `Change in ...` totals. Twelve of the 33 were redundant — a pattern
@@ -274,9 +282,9 @@ matched a pattern against the whole row, switching it on silenced every "Notable
 arrived inside the tick — the lost force, the environmental damage, the starving government — and no
 other pattern did any better, because the routine and the notable text share a row.
 
-Judging each line separately is what fixed it: the phrase now silences the one line it appears on.
-The tick still takes a pattern per routine line to go quiet, which is what the block from
-`Show Details` down in `settings.example.json` is for.
+Judging each line separately is what fixed it: the phrase silences only the line it appears on.
+The tick still takes an internal matcher per routine line to go quiet; the user-facing `Tick`
+selector applies the complete safe set as one option.
 
 ## Known gaps in this catalogue
 
