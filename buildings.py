@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from building_map import GAME_TO_SHEET, SHEET_BUILDINGS
 from overview import parse_panel
-from sheets import GoogleSheet
+from sheets import GoogleSheet, cell_int
 
 #: Column A of a nation tab spans two regions inside these rows; read a little past the disabled
 #: region so a longer sheet is still covered.
@@ -93,18 +93,6 @@ def desired_counts(
     return result
 
 
-def _num(value: object) -> int:
-    """Normalise a sheet cell to an integer; an empty cell is zero."""
-    if value in (None, ""):
-        return 0
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        return int(value)
-    text = str(value).strip().replace(",", "")
-    return int(text) if re.fullmatch(r"-?\d+", text) else 0
-
-
 def locate_regions(column_a: Sequence[object]) -> Regions:
     """Find the have- and disabled-region name->row maps from column A's values (0-based input)."""
     have_header: Optional[int] = None
@@ -150,13 +138,13 @@ def reconcile(
         want_have, want_disabled = desired[name]
         have_row = regions.have_rows.get(name)
         if have_row is not None:
-            current = _num(column_b[have_row - 1])
+            current = cell_int(column_b[have_row - 1])
             if current != want_have:
                 sheet.write_cell(nation, f"B{have_row}", want_have)
                 corrections.append(Correction(name, "have", current, want_have))
         disabled_row = regions.disabled_rows.get(name)
         if disabled_row is not None:
-            current = _num(column_b[disabled_row - 1])
+            current = cell_int(column_b[disabled_row - 1])
             if current != want_disabled:
                 sheet.write_cell(nation, f"B{disabled_row}", want_disabled)
                 corrections.append(Correction(name, "disabled", current, want_disabled))

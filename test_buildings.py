@@ -98,6 +98,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result["Bakery"], (2, 0))
         self.assertEqual(result["Gem Mine"], (1, 0))
 
+    def test_unknown_heading_yields_no_rows(self):
+        from overview import parse_panel
+
+        self.assertEqual(parse_panel(OVERVIEW_HTML, "Nonexistent Panel"), [])
+
 
 class DesiredCountsTests(unittest.TestCase):
     def test_unowned_buildings_default_to_zero(self):

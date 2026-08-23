@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -53,6 +54,23 @@ DEFAULT_TIMEOUT = 30.0
 NATION_ENV = "CLOP_NATION"
 
 Grid = List[List[Any]]
+
+
+def cell_int(value: Any) -> int:
+    """Normalise a value the sheet handed back into an integer; an empty cell is zero.
+
+    The sheet returns real numbers as ``int``/``float`` and everything else as text, so a cell
+    somebody typed ``1,204`` into arrives as a string. Anything that is not a whole number -- a
+    label, a formula error, ``1.5`` -- reads as zero, because these cells are all counts.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    return int(text) if re.fullmatch(r"-?\d+", text) else 0
 
 
 class SheetError(RuntimeError):

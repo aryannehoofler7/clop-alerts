@@ -249,5 +249,23 @@ class StartupCheckTests(unittest.TestCase):
                     startup_check(env_path=Path("does-not-exist"))
 
 
+class CellIntTests(unittest.TestCase):
+    def test_empty_cell_is_zero(self):
+        self.assertEqual(sheets.cell_int(""), 0)
+        self.assertEqual(sheets.cell_int(None), 0)
+
+    def test_numbers_pass_through(self):
+        self.assertEqual(sheets.cell_int(7), 7)
+        self.assertEqual(sheets.cell_int(7.0), 7)
+
+    def test_comma_formatted_text_parses(self):
+        self.assertEqual(sheets.cell_int("1,204"), 1204)
+        self.assertEqual(sheets.cell_int(" -3 "), -3)
+
+    def test_non_numeric_text_is_zero(self):
+        self.assertEqual(sheets.cell_int("n/a"), 0)
+        self.assertEqual(sheets.cell_int("1.5"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
