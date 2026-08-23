@@ -15,7 +15,16 @@
     "wav_path": "sounds/twilight-clock-is-ticking.wav",
     "_wav_path_help": "Set wav_path to null to use the normal Windows alert sound.",
     "loop_while_popup_open": false,
+    "_loop_while_popup_open_help": "Only applies to the dialog style below, which stays on screen until you click it. A toast is gone in seconds, so it plays the clip once.",
     "repeat_interval_seconds": 10
+  },
+  "notifications": {
+    "style": "toast",
+    "_style_help": "toast for the sleek Windows notification that slides in and stays in Action Center, or dialog for the old blocking pop-up box. Monitor failures always use the dialog either way, because a toast can be swallowed by Focus Assist and a broken monitor must not go unseen.",
+    "icon_dir": "icons",
+    "_icon_dir_help": "A folder of sprite images shown on toasts. A market alert looks for the good's name, its short Dashboard label, or its numeric resource id (Copper.png, Copper.png, 2.png), then falls back to default.png. Other alerts look for messages/news/report/4chan. Case does not matter; png, jpg and gif work, ico does not. Set to null for no icons.",
+    "app_id": null,
+    "_app_id_help": "Leave null to file toasts under Windows PowerShell, which needs no setup but heads the toast with PowerShell's name and icon. Set it to a Start Menu shortcut's AppUserModelID to have toasts read CLOP monitor instead."
   },
   "reports": {
     "_ignore_help": "Each entry below is one thing you can silence. Tick is the whole two-hourly tick report: internally the monitor removes all of its routine bookkeeping but still alerts on warnings inside that tick. Action: matches the recipe name and silences that completed action as one report, including its spent/paid/gained lines. The remaining entries are advanced per-line patterns for standalone report families. Matching ignores case; % stands for any run of characters. An entry starting with # is switched off: delete the # to switch it on.",

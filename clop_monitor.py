@@ -33,6 +33,60 @@ DEFAULT_STATE_PATH = Path(__file__).resolve().parent / ".state" / "clop-monitor.
 DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
 DEFAULT_WAV_PATH = Path(__file__).resolve().parent / "sounds" / "twilight-clock-is-ticking.wav"
 DEFAULT_ENV_PATH = Path(__file__).resolve().parent / ".env"
+DEFAULT_ICON_DIR = Path(__file__).resolve().parent / "icons"
+#: The AppUserModelID a toast is filed under. Windows attributes every toast to an installed
+#: application, and an unrecognised ID is silently dropped, so the default borrows PowerShell's
+#: own registered ID: it is present on every Windows box and needs no install step. The cost is
+#: that the toast is headed "Windows PowerShell". Register an ID of your own under
+#: HKCU\SOFTWARE\Classes\AppUserModelId and name it in notifications.app_id to have the toast
+#: read "CLOP monitor" instead -- the README has the one-off PowerShell for it.
+DEFAULT_TOAST_APP_ID = (
+    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe"
+)
+#: Toast styles the file accepts for notifications.style.
+NOTIFICATION_STYLES = ("toast", "dialog")
+#: Image suffixes Windows will render inside a toast, lowercase. ICO is deliberately absent:
+#: the toast renderer does not accept it, and a sprite pack full of them would fail silently.
+TOAST_ICON_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif")
+#: A toast body is clipped to about three lines on screen and again in Action Center, so a long
+#: report preview is trimmed here rather than handed over to be cut mid-word. The terminal line
+#: and the webhook still carry the whole thing.
+TOAST_BODY_LIMIT = 300
+#: Toasts queue and display one after another, so a poll that raises one per watched good would
+#: hold the corner of the screen for a minute. Past this many, the rest become one summary toast.
+MAX_TOASTS_PER_POLL = 6
+#: A link on a line of its own at the end of an alert, which becomes what clicking the toast opens.
+TRAILING_URL_RE = re.compile(r"https?://\S+")
+#: Shown toasts through PowerShell's WinRT bindings, which every Windows 10/11 box has without
+#: anything being installed. The alerts arrive as JSON in CLOP_TOAST_PAYLOAD rather than as
+#: arguments so that a report quoting the game's own punctuation cannot break the command line,
+#: and each field is XML-escaped before it goes near the toast document for the same reason.
+TOAST_SCRIPT = """
+$ErrorActionPreference = 'Stop'
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime]
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:CLOP_TOAST_APP_ID)
+$audio = ''
+if ($env:CLOP_TOAST_SILENT -eq '1') { $audio = "<audio silent='true'/>" }
+foreach ($item in (ConvertFrom-Json $env:CLOP_TOAST_PAYLOAD)) {
+    $title = [System.Security.SecurityElement]::Escape($item.title)
+    $body = [System.Security.SecurityElement]::Escape($item.body)
+    $image = ''
+    if ($item.icon) {
+        $src = [System.Security.SecurityElement]::Escape($item.icon)
+        $image = "<image placement='appLogoOverride' hint-crop='none' src='$src'/>"
+    }
+    $launch = ''
+    if ($item.launch) {
+        $url = [System.Security.SecurityElement]::Escape($item.launch)
+        $launch = " activationType='protocol' launch='$url'"
+    }
+    $doc = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $doc.LoadXml("<toast duration='long'$launch><visual><binding template='ToastGeneric'><text>$title</text><text>$body</text>$image</binding></visual>$audio</toast>")
+    $notifier.Show((New-Object Windows.UI.Notifications.ToastNotification $doc))
+    Start-Sleep -Milliseconds 200
+}
+"""
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 COUNT_RE = re.compile(r"\(\s*(\d+)\s*\)")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -114,8 +168,44 @@ class AlertCategorySettings:
 @dataclass(frozen=True)
 class SoundSettings:
     wav_path: Optional[Path] = None
+    #: Only a dialog can be "open": it blocks until dismissed, which is what bounds the loop.
+    #: Toast alerts play the clip once, because nothing on screen would ever stop it.
     loop_while_popup_open: bool = False
     repeat_interval_seconds: float = 10.0
+
+
+@dataclass(frozen=True)
+class NotificationSettings:
+    """How an alert reaches the screen on Windows.
+
+    ``style`` governs alerts only. A monitor *failure* is always the blocking dialog: it is the
+    one message that means alerts are not arriving, and a toast can be swallowed without trace
+    by Focus Assist, by notifications being switched off for the app, or by a full-screen game.
+    """
+
+    style: str = "toast"
+    #: Folder of sprite images looked up per alert; see ``resolve_alert_icon``.
+    icon_dir: Optional[Path] = None
+    app_id: str = DEFAULT_TOAST_APP_ID
+
+
+class Alert(str):
+    """One alert line, remembering which icon belongs with it.
+
+    A ``str`` subclass rather than a dataclass because everything downstream of ``build_alerts``
+    treats an alert as its text -- joining them into one message, printing that, posting it to a
+    webhook -- and only the toast path has any use for the icon. Subclassing keeps every one of
+    those readings working unchanged, and an alert still compares equal to the text it carries.
+    """
+
+    #: A good's ``game_name`` for a market alert, otherwise a category name like ``"news"``.
+    #: Empty means "no particular subject", which resolves to the fallback icon.
+    icon_key: str
+
+    def __new__(cls, text: str, icon_key: str = "") -> "Alert":
+        alert = super().__new__(cls, text)
+        alert.icon_key = icon_key
+        return alert
 
 
 @dataclass(frozen=True)
@@ -135,6 +225,7 @@ class FourChanThreadSettings:
 class MonitorSettings:
     alerts: AlertCategorySettings = AlertCategorySettings()
     sound: SoundSettings = SoundSettings()
+    notifications: NotificationSettings = NotificationSettings()
     cache: CacheSettings = CacheSettings()
     fourchan_thread: Optional[FourChanThreadSettings] = None
     #: Dotted names of the settings that the file left out, in the order they are documented.
@@ -340,12 +431,16 @@ def load_settings(path: Path) -> MonitorSettings:
     alerts_value = value.get("alerts", {})
     sound_value = value.get("sound", {})
     cache_value = value.get("cache", {})
+    notifications_value = value.get("notifications", {})
     if (
         not isinstance(alerts_value, dict)
         or not isinstance(sound_value, dict)
         or not isinstance(cache_value, dict)
+        or not isinstance(notifications_value, dict)
     ):
-        raise MonitorError("The alerts, sound, and cache settings must be JSON objects")
+        raise MonitorError(
+            "The alerts, sound, cache, and notifications settings must be JSON objects"
+        )
 
     defaults_used: List[str] = []
 
@@ -406,6 +501,45 @@ def load_settings(path: Path) -> MonitorSettings:
         loop_while_popup_open=loop_while_popup_open,
         repeat_interval_seconds=repeat_interval,
     )
+    if "style" not in notifications_value:
+        defaults_used.append("notifications.style")
+        style = "toast"
+    else:
+        raw_style = notifications_value["style"]
+        if not isinstance(raw_style, str) or raw_style.strip().casefold() not in NOTIFICATION_STYLES:
+            raise MonitorError(
+                "Setting notifications.style must be one of: " + ", ".join(NOTIFICATION_STYLES)
+            )
+        style = raw_style.strip().casefold()
+
+    icon_dir: Optional[Path] = None
+    if "icon_dir" not in notifications_value:
+        defaults_used.append("notifications.icon_dir")
+        # Same shape as the bundled WAV: use the folder if it is there, and run without icons
+        # if it is not. A sprite pack is something the user drops in, not something shipped.
+        icon_dir = DEFAULT_ICON_DIR if DEFAULT_ICON_DIR.is_dir() else None
+    elif notifications_value["icon_dir"] is not None:
+        raw_icon_dir = notifications_value["icon_dir"]
+        if not isinstance(raw_icon_dir, str) or not raw_icon_dir.strip():
+            raise MonitorError("Setting notifications.icon_dir must be null or a non-empty string")
+        expanded_dir = Path(os.path.expandvars(os.path.expanduser(raw_icon_dir.strip())))
+        icon_dir = expanded_dir if expanded_dir.is_absolute() else path.parent / expanded_dir
+        icon_dir = icon_dir.resolve()
+        if not icon_dir.is_dir():
+            raise MonitorError(f"Configured notification icon folder was not found: {icon_dir}")
+
+    if "app_id" not in notifications_value:
+        defaults_used.append("notifications.app_id")
+        app_id = DEFAULT_TOAST_APP_ID
+    elif notifications_value["app_id"] is None:
+        app_id = DEFAULT_TOAST_APP_ID
+    else:
+        raw_app_id = notifications_value["app_id"]
+        if not isinstance(raw_app_id, str) or not raw_app_id.strip():
+            raise MonitorError("Setting notifications.app_id must be null or a non-empty string")
+        app_id = raw_app_id.strip()
+
+    notifications = NotificationSettings(style=style, icon_dir=icon_dir, app_id=app_id)
     cache = CacheSettings(
         persist_to_file=boolean_setting(cache_value, "cache", "persist_to_file", True),
     )
@@ -443,6 +577,7 @@ def load_settings(path: Path) -> MonitorSettings:
     return MonitorSettings(
         alerts=alerts,
         sound=sound,
+        notifications=notifications,
         cache=cache,
         fourchan_thread=fourchan_thread,
         defaults_used=tuple(defaults_used),
@@ -1668,23 +1803,38 @@ def market_order_alerts(
     return ticks == "N/A"
 
 
+def canonical_good_name(name: str) -> str:
+    """The game's own spelling of a good, for a name typed into settings.json in any case."""
+    from goods import BY_GAME_NAME
+
+    folded = name.casefold()
+    for game_name in BY_GAME_NAME:
+        if game_name.casefold() == folded:
+            return game_name
+    return name
+
+
 def build_alerts(
     previous: Optional[Snapshot],
     current: Snapshot,
     settings: AlertCategorySettings = AlertCategorySettings(),
-) -> List[str]:
-    alerts: List[str] = []
+) -> List[Alert]:
+    alerts: List[Alert] = []
     if settings.user_messages and current.user_messages > 0:
-        alerts.append(f"{current.user_messages} unread user message(s) pending")
+        alerts.append(
+            Alert(f"{current.user_messages} unread user message(s) pending", "messages")
+        )
     if settings.alliance_messages and current.alliance_messages > 0:
-        alerts.append(f"{current.alliance_messages} unread alliance message(s) pending")
+        alerts.append(
+            Alert(f"{current.alliance_messages} unread alliance message(s) pending", "messages")
+        )
 
     if settings.news and previous is not None and current.latest_news != previous.latest_news:
         if current.latest_news is not None:
             message, posted = current.latest_news
-            alerts.append(f"Newest news changed ({posted}): {message}")
+            alerts.append(Alert(f"Newest news changed ({posted}): {message}", "news"))
         else:
-            alerts.append("The news feed is now empty")
+            alerts.append(Alert("The news feed is now empty", "news"))
     if settings.reports and previous is not None and previous.reports_checked:
         # A snapshot restored from the state file carries only the marker, and the older
         # single-report snapshots carried nothing else either.
@@ -1698,8 +1848,11 @@ def build_alerts(
             body = "\n".join(surviving)
             preview = body if len(body) <= 800 else body[:797] + "..."
             alerts.append(
-                f"New CLOP report ({posted}): {preview}\n"
-                "https://4clop.org/reports.php"
+                Alert(
+                    f"New CLOP report ({posted}): {preview}\n"
+                    "https://4clop.org/reports.php",
+                    "report",
+                )
             )
     # No previous to compare against, unlike the branches above: a standing buy order is a
     # current fact, not an event, so it alerts every poll for as long as it is pending.
@@ -1719,10 +1872,16 @@ def build_alerts(
             and market_order_alerts(order, good, current.stockpiles)
         ]
         if lines:
+            # The icon key is the game's canonical spelling rather than good.name, which is
+            # whatever was typed into settings.json: a sprite named Copper.png has to be found
+            # for someone who wrote "copper" in the file.
             alerts.append(
-                f"Buy orders for {good.name}:\n"
-                + "\n".join(lines)
-                + "\nhttps://4clop.org/buyermarketplace.php"
+                Alert(
+                    f"Buy orders for {good.name}:\n"
+                    + "\n".join(lines)
+                    + "\nhttps://4clop.org/buyermarketplace.php",
+                    canonical_good_name(good.name),
+                )
             )
     if (
         current.fourchan_post is not None
@@ -1735,11 +1894,73 @@ def build_alerts(
         posted = datetime.fromtimestamp(post.posted_at, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         comment = post.comment if len(post.comment) <= 800 else post.comment[:797] + "..."
         alerts.append(
-            f"New 4chan /{urllib.parse.urlsplit(post.thread_url).path.split('/')[1]}/ "
-            f"post #{post.number} by {post.name} ({posted}): {comment}\n"
-            f"{post.thread_url}#p{post.number}"
+            Alert(
+                f"New 4chan /{urllib.parse.urlsplit(post.thread_url).path.split('/')[1]}/ "
+                f"post #{post.number} by {post.name} ({posted}): {comment}\n"
+                f"{post.thread_url}#p{post.number}",
+                "4chan",
+            )
         )
     return alerts
+
+
+#: Icon names looked for when an alert is not about a particular good. A sprite pack is a pile
+#: of resources, so these will usually be missing and fall through to ``ICON_FALLBACK_STEM``.
+#: The suite holds ``build_alerts`` to this list, because these are what the README tells
+#: people to name their files and an alert keyed to anything else would look for a sprite
+#: nobody was ever told to draw.
+CATEGORY_ICON_KEYS = ("messages", "news", "report", "4chan")
+#: The name an icon takes to stand in for every alert that matched nothing more specific.
+ICON_FALLBACK_STEM = "default"
+
+
+def icon_candidate_stems(icon_key: str) -> Tuple[str, ...]:
+    """The filenames to look for, most specific first, for one alert's ``icon_key``.
+
+    A good is offered under every name the sprite pack might have used: the game's spelling, the
+    short Dashboard label, and the numeric ``resource_id`` from the game's own seed data. That
+    way a folder of ``2.png`` files and a folder of ``Copper.png`` files both just work, and
+    neither has to be renamed to match the other.
+    """
+    from goods import BY_GAME_NAME
+
+    stems: List[str] = [icon_key] if icon_key else []
+    good = BY_GAME_NAME.get(icon_key)
+    if good is not None:
+        stems.append(good.dashboard_label)
+        stems.append(str(good.resource_id))
+    stems.append(ICON_FALLBACK_STEM)
+    seen: List[str] = []
+    for stem in stems:
+        if stem and stem not in seen:
+            seen.append(stem)
+    return tuple(seen)
+
+
+def resolve_alert_icon(icon_dir: Optional[Path], icon_key: str) -> Optional[Path]:
+    """The sprite for one alert, or None to let the toast show the app's own icon.
+
+    Matching ignores case and extension, because a sprite pack lifted out of a game is named
+    however that game named it and renaming 31 files by hand is exactly the chore this avoids.
+    """
+    if icon_dir is None:
+        return None
+    try:
+        entries = sorted(icon_dir.iterdir())
+    except OSError:
+        # A folder that has gone away is not worth an alert of its own: the toast still
+        # arrives, just wearing the app icon, and the alert text is what matters.
+        return None
+    by_stem: Dict[str, Path] = {}
+    for entry in entries:
+        if entry.suffix.lower() not in TOAST_ICON_SUFFIXES or not entry.is_file():
+            continue
+        by_stem.setdefault(entry.stem.casefold(), entry)
+    for stem in icon_candidate_stems(icon_key):
+        match = by_stem.get(stem.casefold())
+        if match is not None:
+            return match
+    return None
 
 
 class Notifier:
@@ -1748,10 +1969,12 @@ class Notifier:
         desktop: bool = True,
         webhook_url: Optional[str] = None,
         sound: SoundSettings = SoundSettings(),
+        notifications: NotificationSettings = NotificationSettings(),
     ) -> None:
         self.desktop = desktop
         self.webhook_url = webhook_url
         self.sound = sound
+        self.notifications = notifications
         self._in_channel_fallback = False
 
     def _report_channel_failure(self, message: str, *, via_desktop: bool) -> None:
@@ -1777,21 +2000,41 @@ class Notifier:
         finally:
             self._in_channel_fallback = False
 
-    def notify(self, message: str) -> bool:
-        """Send an alert and return whether a desktop dialog blocked until dismissal."""
+    def notify(self, message: str, alerts: Optional[Sequence[Alert]] = None) -> bool:
+        """Send an alert and return whether a desktop dialog blocked until dismissal.
+
+        ``message`` is the whole alert as one block of text, which is what the terminal and the
+        webhook want. ``alerts`` is that same content still in pieces, which is what the toast
+        path wants: one toast each, so each can carry the icon for what it is about. A toast
+        never blocks, so this returns False whenever the toasts are what went out.
+        """
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         print(f"\a[{timestamp}] CLOP: {message}", flush=True)
         if self.webhook_url:
             self._webhook_notification(message)
-        if self.desktop:
-            return self._desktop_notification(message)
-        return False
+        if not self.desktop:
+            return False
+        if self._use_toasts():
+            self._toast_alerts(alerts if alerts else [Alert(message)])
+            return False
+        return self._desktop_notification(message)
+
+    def _use_toasts(self) -> bool:
+        """Whether alerts go out as toasts rather than as the blocking dialog.
+
+        Windows-only: elsewhere ``_desktop_notification`` already reaches notify-send, which is
+        the same sleek thing by another name.
+        """
+        return sys.platform == "win32" and self.notifications.style == "toast"
 
     def notify_failure(self, message: str) -> bool:
         """Report a failure through the same channels as an alert.
 
-        A failure is never terminal-only: it uses the same blocking dialog, so polling
-        pauses until it is acknowledged rather than continuing to fail unnoticed.
+        A failure is never terminal-only, and it is always the blocking dialog whatever
+        ``notifications.style`` says: polling pauses until it is acknowledged rather than
+        continuing to fail unnoticed. A toast would not do, because Focus Assist, a
+        full-screen game, or notifications being switched off for the app all drop one without
+        a trace -- and this is the one message that means alerts are not arriving.
         """
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         print(f"\a[{timestamp}] CLOP monitor problem: {message}", file=sys.stderr, flush=True)
@@ -1802,6 +2045,138 @@ class Notifier:
                 message, title="CLOP monitor problem", error=True
             )
         return False
+
+    def _toast_alerts(self, alerts: Sequence[Alert]) -> None:
+        """Raise one Windows toast per alert, each wearing the icon for what it is about.
+
+        One toast each rather than one for everything, because that is what makes the icons
+        worth having: a buy order for copper arrives under the copper sprite, next to but
+        separate from the unread-messages toast. Past ``MAX_TOASTS_PER_POLL`` the tail becomes a
+        single summary, so a poll that trips every watched good cannot occupy the screen corner
+        for a minute; the terminal line above still lists all of them.
+        """
+        shown = list(alerts[:MAX_TOASTS_PER_POLL])
+        remaining = len(alerts) - len(shown)
+        payload = [self._toast_payload(alert) for alert in shown]
+        if remaining > 0:
+            payload.append(
+                {
+                    "title": "CLOP monitor",
+                    "body": f"...and {remaining} more alert(s); the terminal has them all.",
+                    "icon": self._toast_icon(""),
+                    "launch": "",
+                }
+            )
+        # The clip plays once. A dialog can loop a sound because dismissing it is what stops
+        # the loop; a toast is gone in seconds and leaves nothing to stop it, so
+        # sound.loop_while_popup_open has nothing to act on here.
+        self._play_alert_sound_once()
+        self._send_toasts(payload)
+
+    def _toast_payload(self, alert: Alert) -> Dict[str, str]:
+        """One alert as the title/body/icon/link a toast is built from.
+
+        The first line becomes the bold heading, because every alert that has more than one
+        line leads with what it is ("Buy orders for Copper:") and follows with the detail. A
+        link the alert ends with is lifted out of the body and becomes what clicking the toast
+        opens: a bare URL is dead weight on screen, and one click to the buyer's marketplace is
+        the whole reason that alert exists.
+        """
+        text = str(alert)
+        heading, separator, rest = text.partition("\n")
+        if not separator:
+            heading, rest = "CLOP monitor", text
+        lines = rest.strip().splitlines()
+        launch = ""
+        if lines and TRAILING_URL_RE.fullmatch(lines[-1].strip()):
+            launch = lines.pop().strip()
+        body = "\n".join(lines).strip()
+        if len(body) > TOAST_BODY_LIMIT:
+            body = body[: TOAST_BODY_LIMIT - 3].rstrip() + "..."
+        return {
+            "title": heading.rstrip(":").strip() or "CLOP monitor",
+            "body": body,
+            "icon": self._toast_icon(alert.icon_key),
+            "launch": launch,
+        }
+
+    def _toast_icon(self, icon_key: str) -> str:
+        """The ``file:///`` URI of an alert's sprite, or "" to keep the app's own icon.
+
+        A URI rather than a path because an unpackaged toast will not load a bare Windows path,
+        and a sprite that silently fails to render is worse than one that was never configured.
+        """
+        icon = resolve_alert_icon(self.notifications.icon_dir, icon_key)
+        if icon is None:
+            return ""
+        try:
+            return icon.as_uri()
+        except ValueError:
+            return ""
+
+    def _play_alert_sound_once(self) -> None:
+        """Play the configured WAV alongside a toast, without waiting for it."""
+        if self.sound.wav_path is None:
+            return
+        try:
+            import winsound
+
+            winsound.PlaySound(
+                str(self.sound.wav_path), winsound.SND_FILENAME | winsound.SND_ASYNC
+            )
+        except (ImportError, RuntimeError) as error:
+            # via_desktop=False for the same reason as the dialog's sound thread: the toast
+            # itself is arriving, and what has been lost is the noise that makes it noticeable
+            # when nobody is looking at the screen.
+            self._report_channel_failure(
+                f"The alert sound is not playing: {error}. Alerts still appear on screen, "
+                "but they will not make a noise.",
+                via_desktop=False,
+            )
+
+    def _send_toasts(self, payload: Sequence[Dict[str, str]]) -> None:
+        """Hand the built toasts to Windows through PowerShell's WinRT bindings."""
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            self._report_channel_failure(
+                "Toast notifications need powershell.exe and it was not found on PATH. "
+                'Set notifications.style to "dialog" to go back to the pop-up box.',
+                via_desktop=False,
+            )
+            return
+        environment = os.environ.copy()
+        environment.pop("CLOP_PASSWORD", None)
+        environment.pop("CLOP_WEBHOOK_URL", None)
+        environment["CLOP_TOAST_PAYLOAD"] = json.dumps(list(payload))
+        environment["CLOP_TOAST_APP_ID"] = self.notifications.app_id
+        # A configured WAV is played above, so the toast must not also fire the system chime.
+        environment["CLOP_TOAST_SILENT"] = "1" if self.sound.wav_path is not None else "0"
+        try:
+            completed = subprocess.run(
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT],
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except OSError as error:
+            self._report_channel_failure(
+                f"Toast notifications are not working: {error}. "
+                "Alerts are being raised but you are not seeing them.",
+                via_desktop=False,
+            )
+            return
+        if completed.returncode != 0:
+            detail = (completed.stderr or b"").decode("utf-8", "replace").strip()
+            self._report_channel_failure(
+                f"Toast notifications are not working (exit code {completed.returncode})."
+                + (f" {detail}" if detail else "")
+                + " Alerts are being raised but you are not seeing them. Check that "
+                "notifications are switched on for the app in Windows Settings, or set "
+                'notifications.style to "dialog".',
+                via_desktop=False,
+            )
 
     def _desktop_notification(
         self, message: str, title: str = "CLOP monitor", error: bool = False
@@ -2071,7 +2446,13 @@ def check_and_notify(
     persist_state: bool = True,
     stockpiles: Optional[Stockpiles] = None,
 ) -> Tuple[Snapshot, bool]:
-    """Poll once, pausing for a Windows dialog and refreshing state after dismissal."""
+    """Poll once, pausing for a Windows dialog and refreshing state after dismissal.
+
+    Toast alerts never pause: nothing blocks, so ``paused_for_alert`` stays False and the
+    refresh below is skipped. That is the honest reading -- a toast appearing is not evidence
+    anybody read the messages, so the unread counts have not gone stale the way a dismissed
+    dialog says they have.
+    """
     current = (
         client.snapshot(stockpiles=stockpiles)
         if stockpiles is not None
@@ -2080,7 +2461,7 @@ def check_and_notify(
     alerts = build_alerts(previous, current, alert_settings)
     paused_for_alert = False
     if alerts:
-        paused_for_alert = notifier.notify("\n\n".join(alerts))
+        paused_for_alert = notifier.notify("\n\n".join(alerts), alerts)
         if paused_for_alert:
             # The counts are re-read because dismissing the popup is when messages get read.
             # The news, report, and 4chan markers deliberately stay at what was alerted on:
@@ -2131,6 +2512,8 @@ def settings_changes(previous: MonitorSettings, current: MonitorSettings) -> Tup
         changes.append("market.goods")
     if previous.sound != current.sound:
         changes.append("sound")
+    if previous.notifications != current.notifications:
+        changes.append("notifications")
     if previous.cache != current.cache:
         changes.append("cache")
     if previous.fourchan_thread != current.fourchan_thread:
@@ -2143,7 +2526,7 @@ def reload_settings(
     loaded: LoadedSettings,
     client: ClopClient,
     notifier: Notifier,
-    build_notifier: Callable[[SoundSettings], Notifier],
+    build_notifier: Callable[[MonitorSettings], Notifier],
 ) -> Tuple[LoadedSettings, Notifier]:
     """Re-read settings.json for the coming poll, applying it in full or not at all.
 
@@ -2250,8 +2633,8 @@ def reload_settings(
         # The thread's current last post becomes the baseline, exactly as at startup, so the
         # swap does not alert for a post that was already there when it was configured.
         client.initial_fourchan_post = fourchan_post
-    if reloaded.sound != settings.sound:
-        notifier = build_notifier(reloaded.sound)
+    if reloaded.sound != settings.sound or reloaded.notifications != settings.notifications:
+        notifier = build_notifier(reloaded)
     # A confirmation rather than a warning, so it stays terminal output: popups are reserved
     # for things that are wrong. What a preflight resolved follows in the words startup uses,
     # because the alliance it found and the post it baselined are decisions the reader cannot
@@ -2331,15 +2714,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     webhook_url = os.environ.get("CLOP_WEBHOOK_URL") or env_file.get("CLOP_WEBHOOK_URL")
 
-    def build_notifier(sound: SoundSettings) -> Notifier:
-        """The notifier for a set of sound settings, which a reload may replace."""
+    def build_notifier(reloaded: MonitorSettings) -> Notifier:
+        """The notifier for a set of sound and notification settings, which a reload replaces."""
         return Notifier(
             desktop=not args.no_desktop_notifications,
             webhook_url=webhook_url,
-            sound=sound,
+            sound=reloaded.sound,
+            notifications=reloaded.notifications,
         )
 
-    notifier = build_notifier(settings.sound)
+    notifier = build_notifier(settings)
     if args.test_notification:
         notifier.notify("Test notification")
         return 0

@@ -17,7 +17,8 @@ This is a small, read-only monitor for the hosted game at `https://4clop.org`. I
   satisfaction, both faction relationships, GDP, funds and a last-updated stamp;
 - saves the last observed counts, newest news entry, newest report, and configured 4chan post in
   `.state/clop-monitor.json`;
-- alerts in the terminal, opens a persistent Windows dialog, and can optionally call a webhook.
+- alerts in the terminal, raises a Windows toast notification — which can carry a resource sprite
+  per alert — and can optionally call a webhook.
 
 It does not store the password or session cookie, mark messages as read, post anything, or perform
 game actions. This is deliberately form-aware scraping rather than a claim that the site has an API.
@@ -130,6 +131,12 @@ choose alert categories and sound behaviour:
     "loop_while_popup_open": false,
     "repeat_interval_seconds": 10
   },
+  "notifications": {
+    "style": "toast",
+    "_style_help": "toast for the Windows notification that slides in and stays in Action Center, or dialog for the old blocking pop-up box.",
+    "icon_dir": "icons",
+    "app_id": null
+  },
   "reports": {
     "_ignore_help": "A report matching any pattern below raises no alert. Matching ignores case and looks anywhere in the message; % stands for any run of characters. A pattern starting with # is switched off: delete the # to switch it on.",
     "ignore": [
@@ -233,6 +240,105 @@ popup, sound, or webhook call. `market_orders` is the one exception: disabling i
 work rather than discarding its result, because that work costs a request per watched good on every
 poll.
 
+### How alerts appear
+
+`notifications.style` chooses what an alert looks like on Windows.
+
+**`"toast"` (the default)** is the ordinary Windows notification: it slides in at the bottom-right,
+stays for about twenty-five seconds, and then remains in Action Center so an alert you were not at
+the desk for is still there when you come back. It never steals focus, so it will not pull you out
+of a full-screen game.
+
+**`"dialog"`** is the original grey pop-up box with an **OK** button. It blocks: polling stops until
+you click it, and dismissing it is treated as the moment you went and read your messages, so the
+monitor re-reads the unread counts immediately afterwards. Nothing about a toast can imply that, so
+under `"toast"` the counts are simply re-read on the next ordinary poll.
+
+The one thing worth knowing before switching: **a toast can be swallowed without a trace.** Focus
+Assist / Do Not Disturb, a full-screen exclusive game, or notifications being switched off for the
+app in Windows Settings will all silently drop it. A dialog always gets through. That is why
+**monitor failures always use the dialog regardless of this setting** — see [Failures](#failures).
+The choice here only governs ordinary alerts.
+
+Under `"toast"` each alert gets its own notification rather than all of them arriving in one block,
+which is what makes the icons below worth having. Past six in a single poll the rest are collapsed
+into one "…and N more alert(s)" toast, so a poll that trips every watched good cannot occupy the
+corner of the screen for a minute; the terminal line always lists all of them in full. A toast body
+is also trimmed to 300 characters, because Windows clips it to roughly three lines either way — the
+terminal and the webhook still carry the whole report.
+
+An alert that ends in a link — a buy order, a report, a 4chan post — puts that link on the toast
+rather than in it: the URL is dropped from the text and clicking the notification opens it. One
+click from the copper toast to the buyer's marketplace is the whole reason that alert exists.
+
+A configured `sound.wav_path` still plays alongside a toast, once. `sound.loop_while_popup_open`
+does nothing under `"toast"`: a dialog can loop a sound because clicking it is what stops the loop,
+and a toast leaves nothing to stop it.
+
+#### Icons
+
+`notifications.icon_dir` names a folder of images, and each toast wears the one that matches what it
+is about — a buy order for copper arrives under the copper sprite. Drop your sprites in
+[`icons/`](./icons) and they are picked up; `icons/README.md` is the same naming table as below.
+
+A file is matched by its name without the extension, ignoring case. A **market alert** tries three
+names in order, so a sprite pack keeps whatever naming it arrived with:
+
+| Tried | Example for Machinery Parts |
+| --- | --- |
+| The game's own name (`resourcedefs.name`) | `Machinery Parts.png` |
+| The short `Dashboard-Stockpile` label | `M Parts.png` |
+| The numeric `resource_id` | `10.png` |
+
+[`goods.py`](./goods.py) is the full table of all 31 goods under each of those names. Every other
+alert looks for one name: `messages.png`, `news.png`, `report.png`, or `4chan.png`. Anything
+unmatched falls back to `default.png`, and an alert with no `default.png` to fall back on simply
+arrives without a sprite.
+
+`.png`, `.jpg`, `.jpeg` and `.gif` work. **`.ico` does not** — Windows drops the image silently
+rather than reporting it, so convert those to PNG first. Square images look best; they are shown
+uncropped in a small square beside the text, scaled down from roughly 64×64 or larger.
+
+Set `icon_dir` to `null` for no icons. A folder that is *named* and is not there is refused at
+startup rather than ignored, on the same reasoning as everything else here: sprites that silently
+never appear would leave you wondering for weeks.
+
+#### Colours
+
+**Windows toasts cannot be coloured.** There is no colour attribute in the toast format for an
+unpackaged app like this one: the toast renders in whatever light or dark theme the machine is set
+to, and the accent stripe comes from the identity of the app it is filed under rather than from the
+notification. The icon above is the colour channel — a red-tinted sprite for something urgent and a
+plain one for routine is how you get alerts to read differently at a glance.
+
+#### Whose name is on the toast
+
+Windows attributes every toast to an installed application, and it silently drops toasts from an
+identity it does not recognise. With `app_id` left as `null` the monitor files them under
+PowerShell's own registered ID, which is on every Windows machine and needs no setup — at the cost
+of each toast being headed **Windows PowerShell** with PowerShell's icon. Your per-alert sprites
+still show.
+
+To have them read **CLOP monitor** instead, register your own AppUserModelID under
+`HKCU\SOFTWARE\Classes\AppUserModelId`. In PowerShell, once:
+
+```powershell
+$appId = "Clop.Monitor"
+$key = "HKCU:\SOFTWARE\Classes\AppUserModelId\$appId"
+New-Item -Path $key -Force | Out-Null
+New-ItemProperty -Path $key -Name DisplayName -Value "CLOP monitor" -PropertyType String -Force | Out-Null
+# Optional: the small icon Windows puts in the toast's header, beside the name above.
+New-ItemProperty -Path $key -Name IconUri -Value "C:\path\to\clop-alerts\icons\default.png" -PropertyType String -Force | Out-Null
+```
+
+Then set `"app_id": "Clop.Monitor"` in `settings.json`, and the next alert is headed with that name
+and icon. This writes to your own user hive only — nothing system-wide, and no installer.
+
+`IconUri` is the *app's* icon in the toast header; the per-alert sprite from `icon_dir` is a
+separate, larger image beside the text, and both appear at once. If toasts stop arriving after you
+change `app_id`, the ID is not registered — check the spelling matches the key exactly, or set it
+back to `null`.
+
 ### Ignoring routine reports
 
 Most reports are the game's own bookkeeping — trades you made, the two-hourly tick, a building you
@@ -330,9 +436,12 @@ relative to `settings.json`. Use forward slashes in JSON Windows paths, for exam
 must refer to an existing `.wav` file. Set it to `null` to use the normal Windows system notification
 sound instead. `_wav_path_help` is explanatory and is ignored by the monitor.
 
-A configured WAV plays once when the popup opens by default. Set `loop_while_popup_open` to `true`
-to replay it for as long as the popup remains open; `repeat_interval_seconds` controls the delay
-between play requests. Closing the popup stops the sound. Test the current sound settings with:
+A configured WAV plays once with each alert by default. `loop_while_popup_open` and
+`repeat_interval_seconds` apply only under `"style": "dialog"` — see
+[How alerts appear](#how-alerts-appear). Set `loop_while_popup_open` to `true` to replay the clip
+for as long as the dialog remains open, with `repeat_interval_seconds` as the delay between play
+requests; closing the dialog stops the sound. A toast has nothing to stop a loop, so it plays the
+clip once whatever these say. Test the current sound settings with:
 
 ```powershell
 python .\clop_monitor.py --test-notification
@@ -576,10 +685,15 @@ matches.
 
 ## Failures
 
-A failure is never terminal-only. Anything that goes wrong raises the same blocking dialog as an
-alert, titled **CLOP monitor problem**, so polling pauses until you acknowledge it instead of
-continuing to fail where you cannot see it. Failures are never retried silently: a monitor that
-cannot read the game is not monitoring it.
+A failure is never terminal-only. Anything that goes wrong raises a blocking dialog titled **CLOP
+monitor problem**, so polling pauses until you acknowledge it instead of continuing to fail where
+you cannot see it. Failures are never retried silently: a monitor that cannot read the game is not
+monitoring it.
+
+**Failures always use the dialog, whatever `notifications.style` says** — see
+[How alerts appear](#how-alerts-appear). A toast can be dropped without a trace by Focus Assist, by
+a full-screen game, or by notifications being switched off for the app, and the one message that
+must not go unseen is the one telling you that alerts are not arriving.
 
 This holds everywhere, not just in the polling loop, because a printed failure is a failure nobody
 sees — and a monitor that is quietly doing nothing is indistinguishable from one with nothing to
@@ -590,9 +704,10 @@ report. So it also covers:
 - **The two hand-run scripts.** `python .\stockpiles.py` and `python .\buildings.py` raise the
   dialog too, not just terminal output — they are what the monitor's own dialogs tell you to run.
 - **A broken notification channel.** If the webhook stops accepting alerts you get a dialog; if the
-  dialogs themselves stop working you get a webhook message. Each is reported on the other, because
-  a channel cannot announce its own silence. If both are down, the terminal is genuinely all that
-  is left.
+  toasts or dialogs themselves stop working you get a webhook message. Each is reported on the
+  other, because a channel cannot announce its own silence. If both are down, the terminal is
+  genuinely all that is left. A toast that Windows refuses — an `app_id` naming an identity it does
+  not know, notifications switched off for the app — is reported this way, and names both causes.
 
 `NoTerminalOnlyFailuresTests` in `test_clop_monitor.py` enforces this by scanning the source: a new
 failure that writes to the terminal without a dialog behind it fails the test suite.

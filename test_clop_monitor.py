@@ -15,12 +15,15 @@ from unittest import mock
 import clop_monitor
 from goods import Stockpiles
 from clop_monitor import (
+    DEFAULT_TOAST_APP_ID,
     DEFAULT_WAV_PATH,
+    Alert,
     AlertCategorySettings,
     ArchivedThreadError,
     ClopClient,
     FourChanPost,
     MonitorError,
+    NotificationSettings,
     Notifier,
     Snapshot,
     build_alerts,
@@ -37,6 +40,7 @@ from clop_monitor import (
     parse_latest_news,
     parse_latest_report,
     parse_pending_counts,
+    resolve_alert_icon,
     save_snapshot,
 )
 
@@ -440,7 +444,7 @@ class StateTests(unittest.TestCase):
             def __init__(self):
                 self.messages = []
 
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 self.messages.append(message)
                 return True
 
@@ -467,7 +471,7 @@ class StateTests(unittest.TestCase):
                 return observed
 
         class FailingNotifier:
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 raise AssertionError(f"Unexpected alert: {message}")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -621,6 +625,11 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "wav_path": None,
                             "loop_while_popup_open": False,
                         },
+                        "notifications": {
+                            "style": "toast",
+                            "icon_dir": None,
+                            "app_id": None,
+                        },
                         "fourchan": {"thread_url": None},
                     }
                 ),
@@ -650,6 +659,11 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "wav_path": None,
                             "loop_while_popup_open": False,
                             "repeat_interval_seconds": 10,
+                        },
+                        "notifications": {
+                            "style": "toast",
+                            "icon_dir": None,
+                            "app_id": None,
                         },
                         "cache": {"persist_to_file": True},
                         "reports": {"ignore": []},
@@ -1033,9 +1047,10 @@ class ReportIgnorePatternTests(unittest.TestCase):
     def test_uncommenting_a_shipped_pattern_switches_it_on(self):
         value = shipped_example()
         value["reports"]["ignore"] = ["Action: Burn Oil"]
-        # The bundled WAV is reached by a path relative to the settings file, which a temp
-        # directory has no copy of; the sound is irrelevant here.
+        # The bundled WAV and the icons folder are reached by paths relative to the settings
+        # file, which a temp directory has no copy of; neither matters here.
         value["sound"]["wav_path"] = None
+        value["notifications"]["icon_dir"] = None
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
@@ -1673,7 +1688,7 @@ class ReportsDuringAnAlertTests(unittest.TestCase):
                 return self.snapshots.pop(0)
 
         class BlockingNotifier(Notifier):
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 del message
                 return True
 
@@ -1714,7 +1729,7 @@ class MarkerCarryOverTests(unittest.TestCase):
                 return self.snapshots.pop(0)
 
         class BlockingNotifier(Notifier):
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 del message
                 return True
 
@@ -1773,7 +1788,7 @@ class CombinedAlertTests(unittest.TestCase):
         messages = []
 
         class RecordingNotifier(Notifier):
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 messages.append(message)
                 return False
 
@@ -1825,7 +1840,7 @@ class FailureNotificationTests(unittest.TestCase):
         failures = []
 
         class RecordingNotifier(Notifier):
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 return False
 
             def notify_failure(self, message):
@@ -2221,9 +2236,10 @@ class ShippedMarketGoodsTests(unittest.TestCase):
             (key[2:] if key == "# Machinery Parts" else key): good
             for key, good in value["market"]["goods"].items()
         }
-        # The bundled WAV is reached by a path relative to the settings file, which a temp
-        # directory has no copy of; the sound is irrelevant here.
+        # The bundled WAV and the icons folder are reached by paths relative to the settings
+        # file, which a temp directory has no copy of; neither matters here.
         value["sound"]["wav_path"] = None
+        value["notifications"]["icon_dir"] = None
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
@@ -3250,7 +3266,7 @@ class MarketDuringAnAlertTests(unittest.TestCase):
                 return Snapshot(1, 0, None, None, None, False, (), ())
 
         class FakeNotifier:
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 del message
                 return True
 
@@ -3349,7 +3365,7 @@ class MarketThroughAPollTests(unittest.TestCase):
         def __init__(self):
             self.messages = []
 
-        def notify(self, message):
+        def notify(self, message, alerts=None):
             self.messages.append(message)
             return False
 
@@ -3396,9 +3412,10 @@ class MarketThroughAPollTests(unittest.TestCase):
         value["market"]["goods"] = {
             "Machinery Parts": {"friends": True, "alliance": True, "always": [], "never": []}
         }
-        # The bundled WAV is reached relative to the settings file, which a temp directory
-        # has no copy of; the sound is irrelevant here.
+        # The bundled WAV and the icons folder are reached relative to the settings file,
+        # which a temp directory has no copy of; neither matters here.
         value["sound"]["wav_path"] = None
+        value["notifications"]["icon_dir"] = None
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             path.write_text(json.dumps(value), encoding="utf-8")
@@ -3537,6 +3554,7 @@ class SettingsChangeCompletenessTests(unittest.TestCase):
     COMPARED = {
         "alerts": AlertCategorySettings(news=False),
         "sound": clop_monitor.SoundSettings(loop_while_popup_open=True),
+        "notifications": clop_monitor.NotificationSettings(style="dialog"),
         "cache": clop_monitor.CacheSettings(persist_to_file=False),
         "fourchan_thread": parse_fourchan_thread_url(
             "https://boards.4chan.org/mlp/thread/1"
@@ -3588,9 +3606,9 @@ class SettingsReloadTests(unittest.TestCase):
         # No file yet, which is what main pairs with the built-in defaults.
         self.loaded = clop_monitor.LoadedSettings(clop_monitor.MonitorSettings(), None)
 
-    def build_notifier(self, sound):
-        self.built.append(sound)
-        return ReloadNotifier(sound)
+    def build_notifier(self, reloaded):
+        self.built.append(reloaded)
+        return ReloadNotifier(reloaded.sound)
 
     def write(self, value):
         self.path.write_text(json.dumps(value), encoding="utf-8")
@@ -3780,7 +3798,7 @@ class SettingsReloadTests(unittest.TestCase):
         self.write({"sound": {"loop_while_popup_open": True}})
         client, _ = market_client({}, goods=())
         reloaded, notifier, output = self.reload(settings, client)
-        self.assertEqual(self.built, [reloaded.sound])
+        self.assertEqual(self.built, [reloaded])
         self.assertIsNot(notifier, self.notifier)
         self.assertEqual(notifier.sound, reloaded.sound)
         self.assertEqual(output, "Settings reloaded: sound.\n")
@@ -4143,7 +4161,7 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
                 self.failures = []
                 built.append(self)
 
-            def notify(self, message):
+            def notify(self, message, alerts=None):
                 self.messages.append(message)
                 return False
 
@@ -4625,6 +4643,397 @@ class OpenTransportFailureTests(unittest.TestCase):
         with self.assertRaises(clop_monitor.MonitorError) as caught:
             client._open("overview.php")
         self.assertIn("Could not reach", str(caught.exception))
+
+
+class AlertIconKeyTests(unittest.TestCase):
+    """Every alert says what it is about, so a toast can put the right sprite on it."""
+
+    def test_an_alert_is_still_its_text(self):
+        # The whole point of the str subclass: nothing downstream had to learn a new type.
+        alert = Alert("3 unread user message(s) pending", "messages")
+        self.assertEqual(alert, "3 unread user message(s) pending")
+        self.assertEqual("\n\n".join([alert, alert]), alert + "\n\n" + alert)
+
+    def test_message_and_news_alerts_carry_their_category(self):
+        previous = Snapshot(0, 0, ("Old", "2026-08-17 01:02:03"))
+        current = Snapshot(3, 2, ("New", "2026-08-17 02:02:03"))
+        keys = [alert.icon_key for alert in build_alerts(previous, current)]
+        self.assertEqual(keys, ["messages", "messages", "news"])
+
+    def test_a_market_alert_carries_the_good_it_is_about(self):
+        order = clop_monitor.MarketOrder("Copper", 1, "Luna Sueno", 12, 5000, is_friend=True)
+        settings = AlertCategorySettings(
+            market_goods=(clop_monitor.WatchedGood("Copper", friends=True),)
+        )
+        current = Snapshot(
+            0, 0, None, market_orders=(order,), stockpiles=Stockpiles({"Copper": 100})
+        )
+        alerts = build_alerts(None, current, settings)
+        self.assertEqual([alert.icon_key for alert in alerts], ["Copper"])
+
+    def test_a_good_typed_in_the_wrong_case_still_names_the_games_spelling(self):
+        # settings.json takes the name as typed, but a sprite pack is named after the game.
+        order = clop_monitor.MarketOrder("Copper", 1, "Luna Sueno", 12, 5000, is_friend=True)
+        settings = AlertCategorySettings(
+            market_goods=(clop_monitor.WatchedGood("copper", friends=True),)
+        )
+        current = Snapshot(
+            0, 0, None, market_orders=(order,), stockpiles=Stockpiles({"Copper": 100})
+        )
+        alerts = build_alerts(None, current, settings)
+        self.assertEqual([alert.icon_key for alert in alerts], ["Copper"])
+
+
+    def test_every_alert_is_keyed_to_a_good_or_a_documented_category(self):
+        """No alert may ask for a sprite the README never told anyone to draw.
+
+        The icon keys are a contract with the folder the user fills in, so a new alert that
+        invents a key of its own would look for a file that cannot exist. Scanning the source
+        makes that an obligation the suite enforces rather than one a reviewer must remember.
+        """
+        from goods import BY_GAME_NAME
+
+        source = ast.parse(Path("clop_monitor.py").read_text(encoding="utf-8"))
+        build = next(
+            node
+            for node in ast.walk(source)
+            if isinstance(node, ast.FunctionDef) and node.name == "build_alerts"
+        )
+        keys = set()
+        for node in ast.walk(build):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Alert"):
+                continue
+            self.assertEqual(len(node.args), 2, "every alert must name an icon key")
+            key = node.args[1]
+            if isinstance(key, ast.Constant):
+                keys.add(key.value)
+            else:
+                # canonical_good_name(good.name): keyed to a good, which is covered by the
+                # tests above rather than readable from the source.
+                self.assertEqual(getattr(key.func, "id", None), "canonical_good_name")
+        allowed = set(clop_monitor.CATEGORY_ICON_KEYS) | set(BY_GAME_NAME)
+        self.assertTrue(keys, "build_alerts raised no alerts to check")
+        self.assertEqual(keys - allowed, set())
+
+
+class AlertIconResolutionTests(unittest.TestCase):
+    """A sprite pack is found under whichever of the game's names it happens to use."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.icons = Path(directory.name)
+
+    def write(self, *names):
+        for name in names:
+            (self.icons / name).write_bytes(b"")
+
+    def test_no_folder_configured_means_no_icon(self):
+        self.assertIsNone(resolve_alert_icon(None, "Copper"))
+
+    def test_a_good_is_found_under_the_games_name(self):
+        self.write("Copper.png")
+        self.assertEqual(resolve_alert_icon(self.icons, "Copper"), self.icons / "Copper.png")
+
+    def test_a_good_is_found_under_its_resource_id(self):
+        self.write("2.png")
+        self.assertEqual(resolve_alert_icon(self.icons, "Copper"), self.icons / "2.png")
+
+    def test_a_good_is_found_under_its_dashboard_label(self):
+        self.write("M Parts.jpg")
+        self.assertEqual(
+            resolve_alert_icon(self.icons, "Machinery Parts"), self.icons / "M Parts.jpg"
+        )
+
+    def test_the_games_name_wins_over_the_resource_id(self):
+        self.write("Copper.png", "2.png")
+        self.assertEqual(resolve_alert_icon(self.icons, "Copper"), self.icons / "Copper.png")
+
+    def test_matching_ignores_case(self):
+        self.write("copper.PNG")
+        self.assertEqual(resolve_alert_icon(self.icons, "Copper"), self.icons / "copper.PNG")
+
+    def test_anything_unmatched_falls_back_to_default(self):
+        self.write("default.png")
+        self.assertEqual(resolve_alert_icon(self.icons, "Gems"), self.icons / "default.png")
+        self.assertEqual(resolve_alert_icon(self.icons, "news"), self.icons / "default.png")
+
+    def test_nothing_matched_and_no_default_means_no_icon(self):
+        self.write("Copper.png")
+        self.assertIsNone(resolve_alert_icon(self.icons, "Gems"))
+
+    def test_an_ico_is_not_offered_to_windows(self):
+        # A toast silently drops one, which would read as the folder being wrong.
+        self.write("Copper.ico")
+        self.assertIsNone(resolve_alert_icon(self.icons, "Copper"))
+
+    def test_a_folder_that_went_away_costs_the_icon_and_nothing_else(self):
+        self.assertIsNone(resolve_alert_icon(self.icons / "gone", "Copper"))
+
+
+class ToastNotificationTests(unittest.TestCase):
+    """What actually reaches PowerShell when alerts go out as toasts."""
+
+    def notifier(self, **kwargs):
+        settings = NotificationSettings(**kwargs)
+        return Notifier(notifications=settings, sound=clop_monitor.SoundSettings())
+
+    @contextlib.contextmanager
+    def capture(self, notifier, returncode=0):
+        """Run one notify with Windows and PowerShell faked, yielding the captured payload."""
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs["env"]
+            return subprocess_result(returncode)
+
+        class subprocess_result:
+            def __init__(self, code):
+                self.returncode = code
+                self.stderr = b""
+
+        with mock.patch.object(clop_monitor.sys, "platform", "win32"), mock.patch.object(
+            clop_monitor.shutil, "which", return_value="powershell.exe"
+        ), mock.patch.object(clop_monitor.subprocess, "run", side_effect=fake_run), io.StringIO() as sink, contextlib.redirect_stdout(sink):
+            yield captured
+
+    def payload(self, captured):
+        return json.loads(captured["env"]["CLOP_TOAST_PAYLOAD"])
+
+    def test_a_toast_does_not_block_so_nothing_is_refetched(self):
+        notifier = self.notifier()
+        with self.capture(notifier):
+            paused = notifier.notify("something happened")
+        self.assertFalse(paused)
+
+    def test_each_alert_becomes_its_own_toast(self):
+        notifier = self.notifier()
+        alerts = [Alert("2 unread user message(s) pending", "messages"), Alert("News", "news")]
+        with self.capture(notifier) as captured:
+            notifier.notify("\n\n".join(alerts), alerts)
+        self.assertEqual(len(self.payload(captured)), 2)
+
+    def test_the_first_line_becomes_the_heading(self):
+        notifier = self.notifier()
+        alerts = [Alert("Buy orders for Copper:\n  Luna wants 12 at 5,000 bits each", "Copper")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        toast = self.payload(captured)[0]
+        self.assertEqual(toast["title"], "Buy orders for Copper")
+        self.assertEqual(toast["body"], "Luna wants 12 at 5,000 bits each")
+
+    def test_a_single_line_alert_keeps_the_monitors_name_as_its_heading(self):
+        notifier = self.notifier()
+        alerts = [Alert("2 unread user message(s) pending", "messages")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        toast = self.payload(captured)[0]
+        self.assertEqual(toast["title"], "CLOP monitor")
+        self.assertEqual(toast["body"], "2 unread user message(s) pending")
+
+    def test_a_long_body_is_trimmed_rather_than_cut_by_windows(self):
+        notifier = self.notifier()
+        alerts = [Alert("New CLOP report:\n" + "x" * 900, "report")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        body = self.payload(captured)[0]["body"]
+        self.assertEqual(len(body), clop_monitor.TOAST_BODY_LIMIT)
+        self.assertTrue(body.endswith("..."))
+
+    def test_a_flood_of_alerts_ends_in_one_summary(self):
+        notifier = self.notifier()
+        alerts = [Alert(f"Alert {index}", "news") for index in range(20)]
+        with self.capture(notifier) as captured:
+            notifier.notify("\n\n".join(alerts), alerts)
+        payload = self.payload(captured)
+        self.assertEqual(len(payload), clop_monitor.MAX_TOASTS_PER_POLL + 1)
+        self.assertIn(
+            f"{20 - clop_monitor.MAX_TOASTS_PER_POLL} more alert(s)", payload[-1]["body"]
+        )
+
+    def test_a_trailing_link_becomes_what_clicking_the_toast_opens(self):
+        notifier = self.notifier()
+        alerts = [
+            Alert(
+                "Buy orders for Copper:\n  Luna wants 12\nhttps://4clop.org/buyermarketplace.php",
+                "Copper",
+            )
+        ]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        toast = self.payload(captured)[0]
+        self.assertEqual(toast["launch"], "https://4clop.org/buyermarketplace.php")
+        self.assertEqual(toast["body"], "Luna wants 12")
+
+    def test_an_alert_with_no_link_has_nothing_to_open(self):
+        notifier = self.notifier()
+        alerts = [Alert("2 unread user message(s) pending", "messages")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        self.assertEqual(self.payload(captured)[0]["launch"], "")
+
+    def test_a_link_inside_the_text_is_left_where_it_is(self):
+        # Only a link on its own at the end is the alert's subject; one quoted mid-report is
+        # part of what the report said.
+        notifier = self.notifier()
+        alerts = [Alert("New CLOP report:\nsee https://4clop.org/x for why\nand then some", "report")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        toast = self.payload(captured)[0]
+        self.assertEqual(toast["launch"], "")
+        self.assertIn("https://4clop.org/x", toast["body"])
+
+    def test_an_icon_reaches_windows_as_a_file_uri(self):
+        with tempfile.TemporaryDirectory() as directory:
+            icons = Path(directory)
+            (icons / "Copper.png").write_bytes(b"")
+            notifier = self.notifier(icon_dir=icons)
+            alerts = [Alert("Buy orders for Copper:\n  Luna wants 12", "Copper")]
+            with self.capture(notifier) as captured:
+                notifier.notify(alerts[0], alerts)
+            icon = self.payload(captured)[0]["icon"]
+        self.assertTrue(icon.startswith("file://"), icon)
+        self.assertTrue(icon.endswith("Copper.png"), icon)
+
+    def test_no_matching_sprite_leaves_the_app_icon_in_place(self):
+        notifier = self.notifier(icon_dir=None)
+        alerts = [Alert("News", "news")]
+        with self.capture(notifier) as captured:
+            notifier.notify(alerts[0], alerts)
+        self.assertEqual(self.payload(captured)[0]["icon"], "")
+
+    def test_the_app_id_is_the_one_the_settings_name(self):
+        notifier = self.notifier(app_id="Acme.Clop")
+        with self.capture(notifier) as captured:
+            notifier.notify("something happened")
+        self.assertEqual(captured["env"]["CLOP_TOAST_APP_ID"], "Acme.Clop")
+        self.assertEqual(NotificationSettings().app_id, DEFAULT_TOAST_APP_ID)
+
+    def test_credentials_never_reach_the_powershell_process(self):
+        notifier = self.notifier()
+        with mock.patch.dict(
+            clop_monitor.os.environ,
+            {"CLOP_PASSWORD": "hunter2", "CLOP_WEBHOOK_URL": "https://example.invalid/hook"},
+        ):
+            with self.capture(notifier) as captured:
+                notifier.notify("something happened")
+        self.assertNotIn("CLOP_PASSWORD", captured["env"])
+        self.assertNotIn("CLOP_WEBHOOK_URL", captured["env"])
+
+    def test_a_configured_wav_silences_the_toasts_own_chime(self):
+        notifier = Notifier(
+            notifications=NotificationSettings(),
+            sound=clop_monitor.SoundSettings(wav_path=DEFAULT_WAV_PATH),
+        )
+        with mock.patch.object(clop_monitor.Notifier, "_play_alert_sound_once"):
+            with self.capture(notifier) as captured:
+                notifier.notify("something happened")
+        self.assertEqual(captured["env"]["CLOP_TOAST_SILENT"], "1")
+
+    def test_no_wav_leaves_the_toast_to_make_the_usual_noise(self):
+        notifier = self.notifier()
+        with self.capture(notifier) as captured:
+            notifier.notify("something happened")
+        self.assertEqual(captured["env"]["CLOP_TOAST_SILENT"], "0")
+
+    def test_a_failed_toast_is_reported_on_the_other_channel(self):
+        notifier = self.notifier()
+        notifier.webhook_url = "https://example.invalid/hook"
+        posted = []
+        with mock.patch.object(
+            clop_monitor.Notifier, "_webhook_notification", lambda self, text: posted.append(text)
+        ):
+            with self.capture(notifier, returncode=1), contextlib.redirect_stderr(io.StringIO()):
+                notifier.notify("something happened")
+        self.assertTrue(any("Toast notifications are not working" in text for text in posted))
+
+    def test_the_dialog_style_keeps_the_blocking_box(self):
+        notifier = self.notifier(style="dialog")
+        with mock.patch.object(
+            clop_monitor.Notifier, "_desktop_notification", return_value=True
+        ) as dialog, mock.patch.object(clop_monitor.sys, "platform", "win32"), io.StringIO() as sink, contextlib.redirect_stdout(sink):
+            self.assertTrue(notifier.notify("something happened"))
+        dialog.assert_called_once()
+
+    def test_a_failure_is_always_the_dialog_even_under_the_toast_style(self):
+        # A toast can be swallowed by Focus Assist, and the one message that must not go
+        # unseen is the one saying alerts are not arriving.
+        notifier = self.notifier(style="toast")
+        with mock.patch.object(
+            clop_monitor.Notifier, "_desktop_notification", return_value=True
+        ) as dialog, mock.patch.object(clop_monitor.sys, "platform", "win32"), io.StringIO() as sink, contextlib.redirect_stderr(sink):
+            self.assertTrue(notifier.notify_failure("the monitor is broken"))
+        dialog.assert_called_once()
+
+
+class NotificationSettingsTests(unittest.TestCase):
+    """The notifications section of settings.json."""
+
+    @contextlib.contextmanager
+    def settings_file(self, value):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            yield path
+
+    def test_the_default_is_the_toast(self):
+        with self.settings_file({}) as path:
+            self.assertEqual(load_settings(path).notifications.style, "toast")
+
+    def test_the_dialog_can_be_asked_for_by_name(self):
+        with self.settings_file({"notifications": {"style": "dialog"}}) as path:
+            self.assertEqual(load_settings(path).notifications.style, "dialog")
+
+    def test_the_style_is_read_case_insensitively(self):
+        with self.settings_file({"notifications": {"style": "Dialog"}}) as path:
+            self.assertEqual(load_settings(path).notifications.style, "dialog")
+
+    def test_an_unknown_style_is_refused_by_name(self):
+        with self.settings_file({"notifications": {"style": "banner"}}) as path:
+            with self.assertRaises(MonitorError) as caught:
+                load_settings(path)
+        self.assertIn("notifications.style", str(caught.exception))
+
+    def test_an_icon_folder_is_resolved_beside_the_settings_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sprites").mkdir()
+            path = root / "settings.json"
+            path.write_text(
+                json.dumps({"notifications": {"icon_dir": "sprites"}}), encoding="utf-8"
+            )
+            self.assertEqual(
+                load_settings(path).notifications.icon_dir, (root / "sprites").resolve()
+            )
+
+    def test_a_missing_icon_folder_is_refused_rather_than_ignored(self):
+        # Cosmetic or not, a folder that was named and is not there means sprites silently
+        # never appear, and this monitor exists because nobody is watching the terminal.
+        with self.settings_file({"notifications": {"icon_dir": "sprites"}}) as path:
+            with self.assertRaises(MonitorError) as caught:
+                load_settings(path)
+        self.assertIn("icon folder was not found", str(caught.exception))
+
+    def test_icons_can_be_switched_off(self):
+        with self.settings_file({"notifications": {"icon_dir": None}}) as path:
+            self.assertIsNone(load_settings(path).notifications.icon_dir)
+
+    def test_a_null_app_id_falls_back_to_powershells_own(self):
+        with self.settings_file({"notifications": {"app_id": None}}) as path:
+            self.assertEqual(load_settings(path).notifications.app_id, DEFAULT_TOAST_APP_ID)
+
+    def test_the_section_must_be_an_object(self):
+        with self.settings_file({"notifications": "toast"}) as path:
+            with self.assertRaises(MonitorError):
+                load_settings(path)
+
+    def test_a_changed_style_is_named_as_a_reloaded_section(self):
+        changes = clop_monitor.settings_changes(
+            clop_monitor.MonitorSettings(),
+            clop_monitor.MonitorSettings(notifications=NotificationSettings(style="dialog")),
+        )
+        self.assertIn("notifications", changes)
 
 
 if __name__ == "__main__":
