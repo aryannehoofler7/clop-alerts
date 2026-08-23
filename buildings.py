@@ -204,6 +204,7 @@ def sanity_check(
 def _standalone() -> int:
     """Login, fetch overview, run the sanity check read-only, and report. Returns an exit code."""
     import os
+    import sys
 
     from clop_monitor import ClopClient, DEFAULT_BASE_URL, load_env_file
     from sheets import DEFAULT_ENV_PATH, startup_check
@@ -212,7 +213,7 @@ def _standalone() -> int:
     username = os.environ.get("CLOP_USERNAME") or env.get("CLOP_USERNAME")
     password = os.environ.get("CLOP_PASSWORD") or env.get("CLOP_PASSWORD")
     if not username or not password:
-        print("CLOP_USERNAME / CLOP_PASSWORD are not set (see .env).")
+        print("CLOP_USERNAME / CLOP_PASSWORD are not set (see .env).", file=sys.stderr)
         return 1
 
     sheet, nation = startup_check()

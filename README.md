@@ -821,11 +821,9 @@ Two details that will otherwise confuse you:
   either fix the cause or stop the monitor with `Ctrl+C` — do not just keep clicking OK, because you
   will stop reading it.
 
-One known gap, not yet fixed: if an HTTP response is cut off *mid-transfer* (as opposed to the game
-sending a short page, which the checks above catch), the monitor exits with a Python traceback in the
-terminal and **no dialog**. If the monitor is ever simply gone with no popup, that is the thing to
-suspect — look at the terminal for `IncompleteRead`. It is written up under "Known issues, not fixed
-here" in `docs/superpowers/specs/2026-08-23-stockpile-snapshot-design.md`.
+A response cut off *mid-transfer* — as opposed to the game sending a short page, which the checks
+above catch — used to end the monitor with a Python traceback and no dialog at all. It now raises
+**`The response from ... broke off part-way`** through the normal dialog, and polling continues.
 
 ## Tests
 

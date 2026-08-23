@@ -292,35 +292,29 @@ apostrophe, which is consumed on entry; re-verified live, `W10` reads back ident
 stamp. `python stockpiles.py` prints the sheet's stamp beside the game's so the two can be compared
 by eye, because the monitor writes that cell without ever reading it back.
 
-## Known issues, not fixed here
+## A truncated response no longer kills the monitor
 
-**A truncated HTTP response kills the monitor with no dialog.** Found while reviewing this work;
-pre-existing, out of scope for this change, and recorded so it is not lost.
+Found while reviewing this work and fixed here, because a monitor that has silently exited is the
+one failure a user cannot notice: its only symptom is the absence of alerts.
 
-`ClopClient._open` (`clop_monitor.py`, ~line 1150) reads the body inside a `try` that catches
-`urllib.error.HTTPError` and `urllib.error.URLError`, converting both to `MonitorError`. A response
-whose body is genuinely cut short mid-transfer — a `Content-Length` the server never delivers — makes
-`response.read()` raise `http.client.IncompleteRead`, which subclasses `HTTPException` and is neither
-of those. So it is not converted, and nothing downstream catches it either: not
-`sync_sheet_step`'s `except (MonitorError, OverviewError, SheetError, BuildingError,
-StockpileError)`, not the poll loop's `except MonitorError`, not `main`'s. It reaches the top and
-terminates the monitor with a traceback on stderr and **no dialog at all**.
+`ClopClient._open` read the body inside a `try` catching `urllib.error.HTTPError` and
+`urllib.error.URLError`. A response whose body is cut short mid-transfer — a `Content-Length` the
+server never delivers — makes `response.read()` raise `http.client.IncompleteRead`, which subclasses
+`HTTPException` and is neither of those. Nothing downstream caught it either: not `sync_sheet_step`'s
+`except` tuple, not the poll loop's `except MonitorError`, not `main`'s. It reached the top and
+terminated the monitor with a traceback and **no dialog at all**, breaking both `sync_sheet_step`'s
+own promise that "sheet sync must never take the monitor down" and the rule that every warning is a
+popup.
 
-That breaks two rules this project holds:
+`_open` now also catches `http.client.HTTPException` and re-raises it as `MonitorError`, so it
+routes into the existing blocking dialog and the poll loop carries on. `OpenTransportFailureTests`
+in `test_clop_monitor.py` pins all three transport failures — `IncompleteRead`, a malformed status
+line, and a plain `URLError` — as arriving in the form the callers know how to report.
 
-- `sync_sheet_step`'s own docstring — "sheet sync must never take the monitor down".
-- Every warning must be a popup. A monitor that has silently exited is the one failure a user cannot
-  notice, because its symptom is the absence of alerts.
-
-Note that this is *not* what the `</html>` completeness check above catches. That check handles a
-response that arrives intact but was cut short server-side (PHP died mid-page, the connection closed
-cleanly); `IncompleteRead` is the transport itself failing to deliver a body it promised, and the
-string never reaches `require_valid_overview`.
-
-The fix is small — add `http.client.IncompleteRead` (or `http.client.HTTPException`) to `_open`'s
-handlers and raise `MonitorError` from it, which routes it into the existing dialog path — but it
-touches the shared client used by every poll, not just the sheet sync, so it belongs in its own
-change with its own test.
+This is *not* what the `</html>` completeness check above catches. That check handles a response
+that arrives intact but was cut short server-side (PHP died mid-page, the connection closed
+cleanly); `IncompleteRead` is the transport failing to deliver a body it promised, and the string
+never reaches `require_valid_overview` at all.
 
 ## Out of scope
 

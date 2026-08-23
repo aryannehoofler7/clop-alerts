@@ -1,12 +1,14 @@
 import ast
 import contextlib
 import dataclasses
+import http.client
 import inspect
 import io
 import json
 import tempfile
 import textwrap
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -4290,6 +4292,44 @@ class SettingsReloadThroughMainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("archived", notifiers[1].failures[0])
         self.assertIn("The monitor has stopped", notifiers[1].failures[0])
+
+
+class OpenTransportFailureTests(unittest.TestCase):
+    """Every way a fetch can fail must arrive as MonitorError, which the callers know to report.
+
+    Anything else escapes their handlers and kills the monitor with a traceback and no dialog --
+    the one outcome this tool must never produce, since a silent death looks exactly like a quiet
+    game.
+    """
+
+    def _client_raising(self, error):
+        client = clop_monitor.ClopClient("https://example.test/", "u", "p")
+
+        class Opener:
+            def open(self, request, timeout=None):
+                raise error
+
+        client.opener = Opener()
+        return client
+
+    def test_incomplete_read_becomes_a_monitor_error(self):
+        # A response that dies mid-body. IncompleteRead is an HTTPException, and is neither an
+        # HTTPError nor a URLError, so it used to escape uncaught.
+        client = self._client_raising(http.client.IncompleteRead(b"half a page"))
+        with self.assertRaises(clop_monitor.MonitorError) as caught:
+            client._open("overview.php")
+        self.assertIn("broke off part-way", str(caught.exception))
+
+    def test_other_http_exceptions_become_a_monitor_error(self):
+        client = self._client_raising(http.client.BadStatusLine("garbage"))
+        with self.assertRaises(clop_monitor.MonitorError):
+            client._open("overview.php")
+
+    def test_url_error_still_becomes_a_monitor_error(self):
+        client = self._client_raising(urllib.error.URLError("no route"))
+        with self.assertRaises(clop_monitor.MonitorError) as caught:
+            client._open("overview.php")
+        self.assertIn("Could not reach", str(caught.exception))
 
 
 if __name__ == "__main__":

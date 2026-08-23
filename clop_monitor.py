@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import http.cookiejar
 import json
 import os
@@ -1159,6 +1160,14 @@ class ClopClient:
             raise MonitorError(f"HTTP {error.code} from {url}") from error
         except urllib.error.URLError as error:
             raise MonitorError(f"Could not reach {url}: {error.reason}") from error
+        except http.client.HTTPException as error:
+            # A response that dies mid-body raises IncompleteRead, which is an HTTPException and
+            # neither an HTTPError nor a URLError. Uncaught it escapes every handler above this
+            # and kills the monitor with a traceback and no dialog -- silence being the one
+            # outcome this tool must never produce. This flaky host makes it a live possibility.
+            raise MonitorError(
+                f"The response from {url} broke off part-way ({type(error).__name__})"
+            ) from error
 
     def _latest_fourchan_post(self) -> Optional[FourChanPost]:
         if self.fourchan_thread is None:
