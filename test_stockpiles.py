@@ -112,6 +112,17 @@ class ParseResourcesTests(unittest.TestCase):
         html = '<div class="panel-heading">Resources</div><table class="table"><tbody></tbody></table>'
         self.assertEqual(parse_overview_resources(html), {})
 
+    def test_trailing_garbage_in_a_quantity_raises(self):
+        # fullmatch, not match: "226 x" must not silently read as 226.
+        html = """
+<div class="panel-heading">Resources</div>
+<table class="table"><tbody>
+  <tr><td style="text-align: right;">Apples</td><td><span>226 x</span></td></tr>
+</tbody></table>
+"""
+        with self.assertRaises(StockpileError):
+            parse_overview_resources(html)
+
     def test_negative_quantity_accepted(self):
         html = """
 <div class="panel-heading">Resources</div>

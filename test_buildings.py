@@ -104,6 +104,17 @@ def building_writes(sheet):
 
 
 class ParserTests(unittest.TestCase):
+    def test_unreadable_count_raises_rather_than_dropping_the_row(self):
+        # Dropping it would reconcile the building to 0, overwrite a correct cell, and report it
+        # as an ordinary correction -- a silent wrong write dressed up as routine.
+        html = ('<div class="panel-heading">Buildings</div>'
+                '<table class="table"><tbody>'
+                '<tr><td style="text-align: right;">Bakery</td><td><span>N/A</span></td></tr>'
+                '</tbody></table>')
+        with self.assertRaises(BuildingError) as caught:
+            parse_overview_buildings(html)
+        self.assertIn("Bakery", str(caught.exception))
+
     def test_only_buildings_panel_parsed(self):
         result = parse_overview_buildings(OVERVIEW_HTML)
         self.assertEqual(set(result), {"Bakery", "Basic Copper Mine", "Gem Mine"})

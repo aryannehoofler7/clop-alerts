@@ -60,8 +60,13 @@ def cell_int(value: Any) -> int:
     """Normalise a value the sheet handed back into an integer; an empty cell is zero.
 
     The sheet returns real numbers as ``int``/``float`` and everything else as text, so a cell
-    somebody typed ``1,204`` into arrives as a string. Anything that is not a whole number -- a
-    label, a formula error, ``1.5`` -- reads as zero, because these cells are all counts.
+    somebody typed ``1,204`` into arrives as a string. Text that is not a whole number -- a label,
+    a formula error, the string ``"1.5"`` -- reads as zero, because these cells are all counts.
+
+    A cell holding a real *number* is truncated rather than zeroed, so a numeric ``1.5`` gives
+    ``1``. Nothing here writes a fraction, so this only arises if a person types one in; truncating
+    it means the next reconcile quietly corrects the cell instead of flagging it, which is the
+    milder of the two wrong answers available.
     """
     if value is None or value == "":
         return 0

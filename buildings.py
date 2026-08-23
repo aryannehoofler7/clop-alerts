@@ -58,12 +58,22 @@ class Regions:
 
 
 def parse_overview_buildings(html: str) -> Dict[str, Tuple[int, int]]:
-    """Return ``{overview_name: (have, disabled)}`` for the owned buildings on overview.php."""
+    """Return ``{overview_name: (have, disabled)}`` for the owned buildings on overview.php.
+
+    Raises ``BuildingError`` if a row's count is unreadable. Skipping the row would be far worse:
+    ``desired_counts`` starts every building at zero, so a dropped row reconciles to 0, overwrites a
+    correct cell, and is reported as an ordinary "Building counts corrected" popup -- indis-
+    tinguishable from the player actually having demolished the lot. ``sanity_check`` cannot catch
+    it either, because the row is already gone before it looks. This is the same rule
+    ``stockpiles.parse_overview_resources`` follows for the Resources panel.
+    """
     result: Dict[str, Tuple[int, int]] = {}
     for name, count_text in parse_panel(html, "Buildings"):
         match = _COUNT_RE.match(count_text)
-        if not match:
-            continue
+        if not match or not match.group(1):
+            raise BuildingError(
+                f"building {name!r} has an unreadable count {count_text!r} on overview.php"
+            )
         have = int(match.group(1).replace(",", ""))
         disabled = int(match.group(2)) if match.group(2) else 0
         result[name] = (have, disabled)

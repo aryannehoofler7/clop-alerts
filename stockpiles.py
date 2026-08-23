@@ -212,7 +212,11 @@ def _standalone() -> int:
               sheet.read(nation, VALUE_RANGE)]
     stored += [""] * (len(STOCK_ROWS) - len(stored))
 
-    print(f"Server time: {parse_server_time(html)}")
+    # Show the sheet's stamp beside the game's. They should read identically: if the sheet's has
+    # turned into a date, or kept a literal leading apostrophe, that is visible here and nowhere
+    # else -- the monitor writes W10 without ever reading it back. See as_sheet_text.
+    print(f"{'server time (game)':<20}{parse_server_time(html)}")
+    print(f"{TIMESTAMP_CELL + ' (sheet)':<20}{sheet.read_cell(nation, TIMESTAMP_CELL)}")
     if problems:
         print(f"\nStock label check FAILED for {nation!r}:")
         for problem in problems:

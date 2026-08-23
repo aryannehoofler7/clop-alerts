@@ -156,7 +156,7 @@ The policy lives in `overview.py`, not in `buildings.py` or `stockpiles.py`, for
 expressed entirely in this module's vocabulary — panels, headings, whether the page finished — and
 both callers need it while [neither may depend on the other](#modules). A copy in each would drift.
 
-Four checks, each closing one way a broken page could pass for an empty nation.
+Three checks, each closing one way a broken page could pass for an empty nation.
 
 **Both panel headings are present.** `overview.php` emits `<div class="panel-heading">Resources</div>`
 and its Buildings counterpart from unconditional heredocs: no branch in the PHP can omit them, so
@@ -274,10 +274,23 @@ any label problems, with a matching exit code. It performs **no writes** — the
   reporting a reordered, renamed, and blank one; `snapshot` writing `R11:R16` and `W10` against a
   stubbed `GoogleSheet`, including when the values already match; `STOCK_ROWS` naming
   six distinct goods that all exist in the game's non-building `resourcedefs` names.
-- `test_buildings.py` continues to pass unchanged after the parser extraction (its assertions are
-  about `parse_overview_buildings`, not the parser class).
-- Live: run once against `LePone(Z)` — expect `R11:R16` to become `226, 40, 29, 0, 0, 6` from the
-  observed overview, and `W10` to hold the server time from that same page load.
+- `test_overview.py` covers the trust gate directly, including the two decisions that look like
+  brittleness and are not: the exact `panel-heading` comparison and the ends-with test for a
+  finished page. Its `GameSourceAssumptionsTests` reads the game's own PHP — checked out beside
+  this repo — to assert the three facts the gate rests on, and skips where it is not. Drift on the
+  game side therefore fails here rather than silently letting a broken page through.
+
+**Outcome of the first live run** (2026-08-23, `LePone(Z)`): `R11:R16` became `198, 30, 27, 0, 0, 12`
+from the observed overview, the sheet's `BUY` and `TICKS` formulas recalculated off them, and `W10`
+took the server stamp from that same page load.
+
+That run is also how the `W10` text problem surfaced. Written bare, `2026-08-23 07:12:30` came back
+from the sheet as `2026-08-23T07:12:30.000Z`: Sheets had parsed it into a date value, which reads
+the game's clock as being in the *spreadsheet's* timezone — the single assumption this design
+refuses to make. `stockpiles.as_sheet_text` now prefixes Sheets' own force-text marker, an
+apostrophe, which is consumed on entry; re-verified live, `W10` reads back identical to the header
+stamp. `python stockpiles.py` prints the sheet's stamp beside the game's so the two can be compared
+by eye, because the monitor writes that cell without ever reading it back.
 
 ## Known issues, not fixed here
 
