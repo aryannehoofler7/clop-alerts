@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse a named panel out of an overview.php page.
+"""Read the overview.php page: parse a named panel out of it, and decide whether to trust it.
 
 overview.php renders several panels -- Resources, Buildings, Weapons, Armor -- and they share one
 row shape: a right-aligned name cell followed by a cell whose ``<span>`` holds the value.
@@ -17,12 +17,19 @@ by special cases:
   contain further ``<span>``s, but they arrive after the value span has been captured and so are
   ignored.
 
+The trust half lives here rather than in its own module because the policy is expressed entirely
+in the vocabulary of this one -- panels, headings, whether the page finished -- and because
+``buildings.py`` and ``stockpiles.py`` both need it while neither may depend on the other.
+
 The ``panel-heading`` class is compared exactly, not by token. overview.php renders favourite
 actions on this same page as ``class="panel-heading h4"`` with a user-chosen label, so a looser
 match would let a favourite action named "Resources" pass for the Resources panel. Failing closed
 is the point: keep the comparison exact.
 
 ``buildings.py`` and ``stockpiles.py`` both read overview through this; neither depends on the other.
+
+``require_valid_overview`` is meant to be called before anything is written anywhere: its messages
+tell the reader nothing has been. Keep it that way -- call it as soon as the page is fetched.
 """
 
 from __future__ import annotations
@@ -109,13 +116,10 @@ def parse_panel(html: str, heading: str) -> List[Tuple[str, str]]:
 
 
 def panel_present(html: str, heading: str) -> bool:
-    """Whether the page carries the panel headed ``heading`` at all.
+    """Whether the page carries a panel headed ``heading`` at all.
 
-    The distinction matters more than it looks. overview.php renders every panel heading
-    unconditionally, so a heading with an empty table means the nation genuinely has nothing of
-    that kind -- but a *missing* heading means this is not an overview page: a PHP fatal after the
-    header flushed, a maintenance page, a truncated response. ``parse_panel`` returns an empty list
-    for both, and a caller that reads the second as "holds nothing" would happily zero the sheet.
+    Distinct from ``parse_panel`` returning no rows, which only means the panel is empty. See
+    ``require_valid_overview`` for why that difference decides whether the page can be trusted.
     """
     parser = PanelParser(heading)
     parser.feed(html)
@@ -139,17 +143,26 @@ def require_valid_overview(html: str) -> None:
     expose.
 
     * **Both panel headings present.** ``overview.php`` emits them from unconditional heredocs
-      (lines 111 and 214), so a missing heading proves this is not an overview page at all -- a PHP
-      fatal after ``header.php`` flushed, a maintenance page, a redirect somewhere else. Checked in
-      page order, so the first complaint tells you how far the response actually got.
+      (grep ``<div class="panel-heading">Resources</div>``), so a missing heading proves this is
+      not an overview page at all -- a PHP fatal after ``header.php`` flushed, a maintenance page,
+      a redirect somewhere else. Checked in page order, so the first complaint tells you how far
+      the response actually got.
     * **The page finished.** ``footer.php`` ends every page with ``</html>``. Without it the
       response was cut off -- and a cut *after* the Buildings heading passes the check above while
       losing every building row, which would zero them and report it as a routine correction.
+      The test is deliberately *ends-with* rather than *contains*, so that a ``</html>`` inside a
+      comment or an attribute cannot make a truncated page look finished. The cost is that anything
+      appended after ``footer.php`` -- a PHP notice from a shutdown handler, something a proxy
+      injects -- also fails it. If you are staring at a complete-looking page and this keeps
+      firing, that is what to look for.
     * **Not both panels empty.** ``backend_overview.php`` fills buildings and resources from a
       single query, and on PHP 5.4 a failed query makes ``mysqli_fetch_array`` warn rather than
       fatal, so the page renders whole with both tables empty. Either panel may legitimately be
       empty on its own -- a new nation owns no buildings -- but both at once is that one query
       having failed.
+      One case this refuses is legitimate: a brand-new nation before its first tick has no
+      ``resources`` rows and owns nothing, so its page really is doubly empty. It would be blocked
+      until the first tick gives it something. That is the accepted cost of catching a dead query.
     """
     for heading in REQUIRED_PANELS:
         if not panel_present(html, heading):
@@ -162,6 +175,8 @@ def require_valid_overview(html: str) -> None:
             "overview.php stopped part-way, so the response was cut off before the page finished. "
             "Nothing was written to the sheet."
         )
+    # Deliberately names the two panels rather than looping REQUIRED_PANELS: this check is about
+    # those two specifically sharing one query, so a third required panel must not join it.
     if not parse_panel(html, "Resources") and not parse_panel(html, "Buildings"):
         raise OverviewError(
             "overview.php lists no resources and no buildings at all. On this game that is what a "

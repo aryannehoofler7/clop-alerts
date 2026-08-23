@@ -459,6 +459,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(sheet.blocks, [])
         self.assertEqual(notifier.alerts, [])
         self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("cut off", notifier.failures[0])
 
     def test_both_panels_empty_writes_nothing(self):
         from clop_monitor import sync_sheet_step
@@ -480,11 +481,12 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(sheet.writes, [])
         self.assertEqual(sheet.blocks, [])
         self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("no resources and no buildings", notifier.failures[0])
 
     def test_resources_panel_absent_writes_nothing(self):
         from clop_monitor import sync_sheet_step
 
-        # The Buildings-only case: exercises the second iteration of the panel loop.
+        # Resources is checked first, so this is the earliest the guard can refuse a page.
         no_resources = LOGGED_IN_OVERVIEW.replace(
             '<div class="panel-heading">Resources</div>', '<div class="panel-heading">Other</div>'
         )
@@ -495,6 +497,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(sheet.writes, [])
         self.assertEqual(sheet.blocks, [])
         self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("no Resources panel", notifier.failures[0])
 
     def test_nation_with_no_buildings_still_syncs(self):
         from clop_monitor import sync_sheet_step

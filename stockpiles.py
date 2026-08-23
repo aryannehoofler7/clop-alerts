@@ -226,11 +226,12 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
+    from clop_monitor import MonitorError
     from overview import OverviewError
     from sheets import SheetError
 
     try:
         sys.exit(_standalone())
-    except (StockpileError, OverviewError, SheetError) as error:
+    except (StockpileError, MonitorError, OverviewError, SheetError) as error:
         print(f"Stock check failed: {error}", file=sys.stderr)
         sys.exit(1)

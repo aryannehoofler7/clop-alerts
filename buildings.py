@@ -225,11 +225,12 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
+    from clop_monitor import MonitorError
     from overview import OverviewError
     from sheets import SheetError
 
     try:
         sys.exit(_standalone())
-    except (BuildingError, OverviewError, SheetError) as error:
+    except (BuildingError, MonitorError, OverviewError, SheetError) as error:
         print(f"Building check failed: {error}", file=sys.stderr)
         sys.exit(1)
