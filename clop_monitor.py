@@ -1740,7 +1740,7 @@ def sync_sheet_step(
     # Imported here, not at module scope: sheets.py imports load_env_file from this module, so a
     # top-level import would be a cycle. Do not "tidy" these up to the top of the file.
     from buildings import BuildingError, parse_overview_buildings, reconcile, sanity_check
-    from overview import panel_present
+    from overview import OverviewError, require_valid_overview
     from sheets import SheetError
     from stockpiles import (
         StockpileError,
@@ -1759,15 +1759,9 @@ def sync_sheet_step(
             if not is_logged_in(overview_html):
                 raise MonitorError("not logged in when reading overview.php")
 
-        # Both panel headings are rendered unconditionally by overview.php, so a missing one means
-        # the page is not a real overview -- not that the nation owns nothing. Checked before any
-        # write, together with the server-time stamp, so a broken page cannot zero the tab.
-        for panel in ("Buildings", "Resources"):
-            if not panel_present(overview_html, panel):
-                raise MonitorError(
-                    f"overview.php has no {panel} panel, so it is not a normal overview page. "
-                    "Nothing was written to the sheet."
-                )
+        # Validate the whole page before trusting any of it: a broken overview read as "owns
+        # nothing, holds nothing" would zero the tab and stamp it freshly verified.
+        require_valid_overview(overview_html)
         server_time = parse_server_time(overview_html)
         resources = parse_overview_resources(overview_html)
 
@@ -1802,7 +1796,7 @@ def sync_sheet_step(
             )
         else:
             snapshot(sheet, nation, resources, server_time)
-    except (MonitorError, SheetError, BuildingError, StockpileError) as error:
+    except (MonitorError, OverviewError, SheetError, BuildingError, StockpileError) as error:
         notifier.notify_failure(
             f"Sheet sync failed during {phase}: {error}\n\nThe monitor continues polling."
         )

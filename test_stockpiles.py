@@ -100,8 +100,9 @@ class ParseResourcesTests(unittest.TestCase):
             parse_overview_resources(html)
         self.assertIn("Apples", str(caught.exception))
 
-    def test_missing_resources_panel_is_empty_not_an_error(self):
-        # A nation can legitimately hold nothing; an absent panel is not a malformed page.
+    def test_missing_resources_panel_yields_no_rows(self):
+        # The parser itself stays permissive and just reports no rows. Deciding that an absent
+        # panel means a broken page is the caller's job -- see overview.require_valid_overview.
         self.assertEqual(parse_overview_resources("<html></html>"), {})
 
     def test_present_panel_with_no_rows_is_empty(self):

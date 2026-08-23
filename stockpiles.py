@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-from overview import parse_panel
+from overview import parse_panel, require_valid_overview
 from sheets import GoogleSheet
 
 #: Sheet STOCK label (column Q) -> game resource name, **in sheet row order**: the list index is the
@@ -185,6 +185,7 @@ def _standalone() -> int:
     client = ClopClient(DEFAULT_BASE_URL, username, password)
     client.login()
     html = client._open("overview.php")
+    require_valid_overview(html)
     wanted = desired_stock(parse_overview_resources(html))
     problems = check_labels(sheet, nation)
 
@@ -225,10 +226,11 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
+    from overview import OverviewError
     from sheets import SheetError
 
     try:
         sys.exit(_standalone())
-    except (StockpileError, SheetError) as error:
-        print(f"Stock check failed: {error}")
+    except (StockpileError, OverviewError, SheetError) as error:
+        print(f"Stock check failed: {error}", file=sys.stderr)
         sys.exit(1)

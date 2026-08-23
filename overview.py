@@ -17,6 +17,11 @@ by special cases:
   contain further ``<span>``s, but they arrive after the value span has been captured and so are
   ignored.
 
+The ``panel-heading`` class is compared exactly, not by token. overview.php renders favourite
+actions on this same page as ``class="panel-heading h4"`` with a user-chosen label, so a looser
+match would let a favourite action named "Resources" pass for the Resources panel. Failing closed
+is the point: keep the comparison exact.
+
 ``buildings.py`` and ``stockpiles.py`` both read overview through this; neither depends on the other.
 """
 
@@ -115,3 +120,51 @@ def panel_present(html: str, heading: str) -> bool:
     parser = PanelParser(heading)
     parser.feed(html)
     return parser.found
+
+
+class OverviewError(RuntimeError):
+    """The page is not a complete, normal render of overview.php."""
+
+
+#: The panels overview.php always renders, in the order they appear on the page.
+REQUIRED_PANELS = ("Resources", "Buildings")
+
+
+def require_valid_overview(html: str) -> None:
+    """Raise ``OverviewError`` unless ``html`` is a complete, normal overview.php page.
+
+    Every check here closes one way a broken page could be mistaken for a nation that simply owns
+    and holds nothing. That mistake is the worst outcome available to this tool: it zeroes the
+    shared sheet and stamps it freshly verified, hiding the very failure the timestamp exists to
+    expose.
+
+    * **Both panel headings present.** ``overview.php`` emits them from unconditional heredocs
+      (lines 111 and 214), so a missing heading proves this is not an overview page at all -- a PHP
+      fatal after ``header.php`` flushed, a maintenance page, a redirect somewhere else. Checked in
+      page order, so the first complaint tells you how far the response actually got.
+    * **The page finished.** ``footer.php`` ends every page with ``</html>``. Without it the
+      response was cut off -- and a cut *after* the Buildings heading passes the check above while
+      losing every building row, which would zero them and report it as a routine correction.
+    * **Not both panels empty.** ``backend_overview.php`` fills buildings and resources from a
+      single query, and on PHP 5.4 a failed query makes ``mysqli_fetch_array`` warn rather than
+      fatal, so the page renders whole with both tables empty. Either panel may legitimately be
+      empty on its own -- a new nation owns no buildings -- but both at once is that one query
+      having failed.
+    """
+    for heading in REQUIRED_PANELS:
+        if not panel_present(html, heading):
+            raise OverviewError(
+                f"overview.php has no {heading} panel, so this is not a normal overview page. "
+                "Nothing was written to the sheet."
+            )
+    if not html.rstrip().endswith("</html>"):
+        raise OverviewError(
+            "overview.php stopped part-way, so the response was cut off before the page finished. "
+            "Nothing was written to the sheet."
+        )
+    if not parse_panel(html, "Resources") and not parse_panel(html, "Buildings"):
+        raise OverviewError(
+            "overview.php lists no resources and no buildings at all. On this game that is what a "
+            "failed database query looks like, not an empty nation. Nothing was written to the "
+            "sheet."
+        )

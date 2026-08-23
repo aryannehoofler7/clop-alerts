@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from building_map import GAME_TO_SHEET, SHEET_BUILDINGS
-from overview import parse_panel
+from overview import parse_panel, require_valid_overview
 from sheets import GoogleSheet, cell_int
 
 #: Column A of a nation tab spans two regions inside these rows; read a little past the disabled
@@ -208,7 +208,9 @@ def _standalone() -> int:
     sheet, nation = startup_check()
     client = ClopClient(DEFAULT_BASE_URL, username, password)
     client.login()
-    overview = parse_overview_buildings(client._open("overview.php"))
+    html = client._open("overview.php")
+    require_valid_overview(html)
+    overview = parse_overview_buildings(html)
     problems = sanity_check(sheet, nation, overview)
     if problems:
         print(f"Building mapping sanity check FAILED for {nation!r}:")
@@ -223,4 +225,11 @@ def _standalone() -> int:
 if __name__ == "__main__":
     import sys
 
-    sys.exit(_standalone())
+    from overview import OverviewError
+    from sheets import SheetError
+
+    try:
+        sys.exit(_standalone())
+    except (BuildingError, OverviewError, SheetError) as error:
+        print(f"Building check failed: {error}", file=sys.stderr)
+        sys.exit(1)

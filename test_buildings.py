@@ -272,6 +272,7 @@ class MappingIntegrityTests(unittest.TestCase):
 LOGGED_IN_OVERVIEW = (
     '<a href="logout.php">Logout</a><li><a>Server time: 2026-08-23 03:23:44</a></li>'
     + OVERVIEW_HTML
+    + "</html>"
 )
 LOGGED_OUT_OVERVIEW = '<a href="login.php">Login</a>' + OVERVIEW_HTML
 
@@ -443,6 +444,79 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(sheet.writes, [])           # but never wrote
         self.assertEqual(sheet.blocks, [])
         self.assertEqual(len(notifier.failures), 1)
+
+    def test_truncated_page_writes_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        # Cut off inside the Buildings panel: both headings arrived, so the panel check passes,
+        # but the building rows are missing and would be read as "you own nothing".
+        cut = LOGGED_IN_OVERVIEW[:LOGGED_IN_OVERVIEW.index("Basic Copper Mine")]
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(cut), sheet, "T", notifier)
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+        self.assertEqual(notifier.alerts, [])
+        self.assertEqual(len(notifier.failures), 1)
+
+    def test_both_panels_empty_writes_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        # One query fills both panels, and on PHP 5.4 a failed query warns instead of fatalling,
+        # so the page renders whole with both tables empty. That is a broken query, not a nation
+        # that owns and holds nothing -- and the silent snapshot would zero R11:R16 under a fresh
+        # W10 with no popup at all.
+        empty = ('<a href="logout.php">Logout</a>'
+                 '<li><a>Server time: 2026-08-23 03:23:44</a></li>'
+                 '<div class="panel-heading">Resources</div>'
+                 '<table class="table"><tbody></tbody></table>'
+                 '<div class="panel-heading">Buildings</div>'
+                 '<table class="table"><tbody></tbody></table></html>')
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(empty), sheet, "T", notifier)
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+        self.assertEqual(len(notifier.failures), 1)
+
+    def test_resources_panel_absent_writes_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        # The Buildings-only case: exercises the second iteration of the panel loop.
+        no_resources = LOGGED_IN_OVERVIEW.replace(
+            '<div class="panel-heading">Resources</div>', '<div class="panel-heading">Other</div>'
+        )
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(no_resources), sheet, "T", notifier)
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+        self.assertEqual(len(notifier.failures), 1)
+
+    def test_nation_with_no_buildings_still_syncs(self):
+        from clop_monitor import sync_sheet_step
+
+        # The false-positive guard. A new nation owns no buildings but holds resources; that is a
+        # legitimate page and must still sync. This is the property the checks above trade against.
+        no_buildings = ('<a href="logout.php">Logout</a>'
+                        '<li><a>Server time: 2026-08-23 03:23:44</a></li>'
+                        '<div class="panel-heading">Resources</div>'
+                        '<table class="table"><tbody>'
+                        '<tr><td style="text-align: right;">Apples</td>'
+                        '<td><span class="text-success">7</span></td></tr>'
+                        '</tbody></table>'
+                        '<div class="panel-heading">Buildings</div>'
+                        '<table class="table"><tbody></tbody></table></html>')
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(no_buildings), sheet, "T", notifier)
+        self.assertEqual(notifier.failures, [])
+        self.assertEqual(sheet.blocks, [("R11:R16", [[7], [0], [0], [0], [0], [0]])])
+        self.assertIn(("W10", "2026-08-23 03:23:44"), sheet.writes)
 
 
 if __name__ == "__main__":
