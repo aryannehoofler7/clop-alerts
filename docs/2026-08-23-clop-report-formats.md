@@ -242,6 +242,31 @@ revision and is unchanged (`test_no_shipped_pattern_silences_a_notable_line`). I
 collapsing above is safe: every pattern was widened only until it still failed to match any Notable
 sentence.
 
+### What the two properties do not prove
+
+Worth being exact, because "covers everything with no false positives" is stronger than what is
+actually established here.
+
+- **Both tests are only as good as the corpus.** `ROUTINE_REPORTS` and `NOTABLE_REPORTS` were read
+  by hand from all 38 `INSERT INTO reports` sites and transcribed into the test file. They are not
+  mechanically extracted from the PHP, so a sentence missed in the reading is missed by both tests.
+  The corpus is the thing to extend when a report turns up that neither list predicted.
+- **One routine family is deliberately left alerting.** `You received 5 Oil.` is written to the
+  nation that *accepted* a deal (`backend_deals.php:260`), and `You received 5 Oil as part of your
+  deal.` to the nation somebody else acted on (`:251`). No pattern can separate them, so neither is
+  silenced and the routine one still alerts. The set therefore trades a known false alert for the
+  certainty of never hiding the other — the same choice made for `You sold …`.
+- **The eighteen Major Action lines are uncovered by choice**, so 18 of the 38 insert sites have no
+  pattern at all. That is a decision about what is worth seeing, not coverage.
+- **Nation names are player-supplied free text**, and every pattern is a substring rule. A nation
+  named after a pattern — say one calling itself `A satisfied population is hard to keep` — would
+  make `This nation received 20 Apples from …` match and be silenced. This is inherent to substring
+  matching rather than new here, it is not defended against, and short patterns carry more of the
+  risk than long ones. It is the one argument for a longer pattern than the shortest that works.
+- **Verification is unit tests over fixtures.** The monitor has not been run against the live game
+  with this list, so the fixtures being faithful to the pages the game actually renders rests on the
+  same hand-reading as the corpus.
+
 ## `Change in Satisfaction:` — the trap that per-line judging removed
 
 That phrase appears in every tick report, which makes it an attractive pattern. While the monitor

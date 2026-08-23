@@ -891,6 +891,11 @@ NOTABLE_REPORTS = [
     "Your First Cavalry lost 3 size!",
     "Your Second Cavalry (size 10) were hit by Sombra's Shadow Guard (size 12) "
     "for 40 damage (3 hits)",
+    # frequent.php:1296/:1302 writes the attacker's half too, and it is the only combat line
+    # that reports something going right, which is exactly why it needs guarding: it reads
+    # more like bookkeeping than the other three.
+    "Your First Cavalry (size 10) hit Sombra's Shadow Guard (size 12) "
+    "for 40 damage (3 hits)",
     "Your satisfaction is below the minimum - your ponies are revolting! (You gain 30 sat "
     "among the rest of your nation as the subversives stop participating in it.)",
     "The Solar Empire hates you enough to send an airstrike and you don't have enough "
