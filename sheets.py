@@ -28,7 +28,7 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 # Reuse the monitor's KEY=VALUE .env reader and default path so the nation name is resolved with the
 # exact same rules as the credentials (process environment wins, then the .env file). Importing it
@@ -76,6 +76,50 @@ def cell_int(value: Any) -> int:
         return int(value)
     text = str(value).strip().replace(",", "")
     return int(text) if re.fullmatch(r"-?\d+", text) else 0
+
+
+def column_letter(index: int) -> str:
+    """Convert a 0-based column index to its A1 letter: ``0 -> "A"``, ``26 -> "AA"``.
+
+    Past ``Z`` matters here: the Dashboard is one column per nation, so the alliance growing walks
+    it toward ``AA``. A single-letter shortcut would fail silently on the tenth nation.
+    """
+    if index < 0:
+        raise ValueError(f"column index must be >= 0, got {index}")
+    letters = ""
+    index += 1
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def find_in_row(row: Sequence[Any], text: str) -> Optional[int]:
+    """Return the 0-based index of the cell in ``row`` equal to ``text``, or ``None``.
+
+    Compared exactly after stripping both sides. A substring match would let ``LePone`` resolve to
+    the ``LePone(Z)`` column, and the tab name is the whole cell or nothing.
+    """
+    wanted = text.strip()
+    for index, cell in enumerate(row):
+        if cell is not None and str(cell).strip() == wanted:
+            return index
+    return None
+
+
+def index_column(grid: Grid) -> Dict[str, List[int]]:
+    """Map each non-empty column-A label to the **1-based** rows it occupies.
+
+    Every occurrence is returned, not just the first: reporting duplicates is what lets a caller
+    refuse to write a sheet where a label has been pasted twice and the right row is ambiguous.
+    """
+    found: Dict[str, List[int]] = {}
+    for number, row in enumerate(grid, 1):
+        cell = row[0] if len(row) > 0 else None
+        label = "" if cell is None else str(cell).strip()
+        if label:
+            found.setdefault(label, []).append(number)
+    return found
 
 
 class SheetError(RuntimeError):

@@ -17,6 +17,9 @@ from sheets import (
     GoogleSheet,
     SheetError,
     _as_grid,
+    column_letter,
+    find_in_row,
+    index_column,
     nation_from_env,
     startup_check,
 )
@@ -265,6 +268,62 @@ class CellIntTests(unittest.TestCase):
     def test_non_numeric_text_is_zero(self):
         self.assertEqual(sheets.cell_int("n/a"), 0)
         self.assertEqual(sheets.cell_int("1.5"), 0)
+
+
+class ColumnLetterTests(unittest.TestCase):
+    def test_first_columns(self):
+        self.assertEqual(column_letter(0), "A")
+        self.assertEqual(column_letter(2), "C")
+        self.assertEqual(column_letter(25), "Z")
+
+    def test_past_z(self):
+        # The Dashboard has eleven populated columns today, but nothing may assume it stays
+        # single-letter: a tenth nation joining walks it toward AA.
+        self.assertEqual(column_letter(26), "AA")
+        self.assertEqual(column_letter(27), "AB")
+        self.assertEqual(column_letter(51), "AZ")
+        self.assertEqual(column_letter(52), "BA")
+
+    def test_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            column_letter(-1)
+
+
+class FindInRowTests(unittest.TestCase):
+    def test_exact_match(self):
+        row = ["READ ONLY", "TOTAL", "LePone(Z)", "quaity(P)"]
+        self.assertEqual(find_in_row(row, "LePone(Z)"), 2)
+
+    def test_surrounding_whitespace_ignored_on_both_sides(self):
+        self.assertEqual(find_in_row(["  LePone(Z) "], " LePone(Z)"), 0)
+
+    def test_not_found_is_none(self):
+        self.assertIsNone(find_in_row(["TOTAL", "#N/A"], "LePone(Z)"))
+
+    def test_substring_does_not_match(self):
+        # "LePone" must not resolve to the "LePone(Z)" column: the tab name is the whole cell.
+        self.assertIsNone(find_in_row(["LePone(Z)"], "LePone"))
+
+    def test_none_cells_skipped(self):
+        self.assertEqual(find_in_row([None, "", "SE"], "SE"), 2)
+
+
+class IndexColumnTests(unittest.TestCase):
+    def test_rows_are_one_based(self):
+        grid = [["Energy"], ["Apples"], ["Coffee"]]
+        self.assertEqual(index_column(grid), {"Energy": [1], "Apples": [2], "Coffee": [3]})
+
+    def test_blank_rows_skipped_not_numbered_away(self):
+        grid = [["Sat"], [""], ["GDP"]]
+        self.assertEqual(index_column(grid), {"Sat": [1], "GDP": [3]})
+
+    def test_duplicates_all_reported(self):
+        # Returning every occurrence is what lets the caller refuse to write an ambiguous sheet.
+        grid = [["Gems"], ["Oil"], ["Gems"]]
+        self.assertEqual(index_column(grid)["Gems"], [1, 3])
+
+    def test_short_and_empty_rows_tolerated(self):
+        self.assertEqual(index_column([[], ["Oil"], [None]]), {"Oil": [2]})
 
 
 if __name__ == "__main__":
