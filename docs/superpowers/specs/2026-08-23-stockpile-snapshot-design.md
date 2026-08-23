@@ -99,10 +99,18 @@ argument — `buildings.parse_overview_buildings` keeps its signature and its re
 - `STOCK_ROWS: list[tuple[str, str]]`, `STOCK_FIRST_ROW = 11`, `TIMESTAMP_CELL = "W10"` — the table
   above as data.
 - `parse_overview_resources(html) -> dict[str, int]` — `{resource_name: qty}` from the Resources
-  panel via `PanelParser("Resources")`, stripping commas.
+  panel via `PanelParser("Resources")`, stripping commas. Raises `StockpileError` if any row's Qty
+  is not a plain integer. Dropping it silently would be worse: the good would fall through to `0`
+  and be written to the sheet as "you hold none", stamped fresh — the same false-zero the read side
+  is guarded against below. The game renders every Qty through its integer `commas()` helper, so
+  anything else means the page changed and a human should look.
 - `parse_server_time(html) -> str` — the `Server time: YYYY-MM-DD HH:MM:SS` string from the header.
   Raises `StockpileError` if it is absent: a missing timestamp means the page is not what we think it
   is, and a snapshot with no staleness marker is worse than no snapshot.
+
+  Both parsers raising `StockpileError` on a page that does not look right is the module's single
+  error-handling rule: **surface it, never absorb it.** `check_labels` is the same rule applied to
+  the sheet end. Every one of them ends in a blocking popup with nothing written.
 - `desired_stock(resources) -> list[int]` — the six quantities in row order; a good absent from the
   panel is `0`.
 - `check_labels(sheet, nation) -> list[str]` — one read of `Q11:Q16`; returns the list of problems
