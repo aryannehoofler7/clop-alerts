@@ -115,7 +115,8 @@ a real run would write.
 Three different orders are in play; do not assume any one of them matches another.
 
 1. **`Dashboard!A10:A42`** — this table. Hand-arranged by topic (fuels and food, then parts, then
-   the endgame/DNA block), not alphabetical.
+   the endgame/DNA block), not alphabetical. Nothing in the code depends on it: rows are found by
+   looking each label up, so this is the sheet's order, not the script's.
 2. **The `overview.php` Resources panel** — `backend_overview.php` selects `ORDER BY rd.name`, but
    that order is discarded: the rows go into a name-keyed PHP array which `overview.php` then
    `ksort()`s. The result is *byte-order* alphabetical (case-sensitive ASCII), so e.g. all
@@ -123,6 +124,8 @@ Three different orders are in play; do not assume any one of them matches anothe
    (uppercase `N` precedes lowercase `r`). Only goods the nation actually holds a `resources` row
    for are rendered, plus any padded in from the required/affected maps — a good at zero with no
    production or consumption is simply absent from the page.
-3. **A nation tab's `Q11:Q16` STOCK block** — a six-row subset with its own lowercase labels
-   (`apple`, `oil`, `coffee`, `mpart`, `vpart`, `gems`), defined by `STOCK_ROWS` in `stockpiles.py`.
-   These labels are **not** the Dashboard's labels; the two lists were written separately.
+3. **A nation tab's `STOCK` block** (rows 11–16 today) — a six-row subset with its own lowercase
+   labels: `apple`, `oil`, `coffee`, `mpart`, `vpart`, `gems`. These are **not** the Dashboard's
+   labels. Both sets live together in `goods.py`'s `Good` records (`stock_label` and
+   `dashboard_label`), so there is one table to keep right rather than two lists to keep in step.
+   That block's order does not matter either — its rows are looked up by label as well.
