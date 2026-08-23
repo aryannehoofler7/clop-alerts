@@ -1,307 +1,422 @@
 #!/usr/bin/env python3
-"""Offline unit tests for stockpiles.py -- no network."""
+"""Offline unit tests for stockpiles.py -- no network.
+
+These exist to prove "lookup, not hardcode" is real. Each test moves something on the fake sheet
+that a hardcoded address would have got wrong.
+
+The overview parsing these used to cover now lives in test_goods.py and test_nation.py.
+"""
 
 import unittest
 
+from goods import Stockpiles
+from nation import NationStatus, Reading
 from stockpiles import (
+    DASHBOARD_LABELS,
+    DASHBOARD_TAB,
+    STATUS_LABELS,
+    DashboardBlock,
+    NationBlock,
+    Report,
     as_sheet_text,
-    STOCK_FIRST_ROW,
-    STOCK_ROWS,
-    TIMESTAMP_CELL,
-    VALUE_RANGE,
-    StockpileError,
-    check_labels,
-    desired_stock,
-    parse_overview_resources,
-    parse_server_time,
+    contiguous_runs,
+    locate_dashboard_block,
+    locate_nation_block,
     snapshot,
+    status_values,
 )
 
 
-# A minimal overview.php: the Resources panel (with icon cells, comma formatting and the trailing
-# centred columns), plus decoy panels that share its exact row shape.
-OVERVIEW_HTML = """
-<li><a>Server time: 2026-08-23 03:23:44</a></li>
-<div class="panel-heading">Resources</div>
-<table class="table"><tbody>
-  <tr>
-    <td style="width: 16px;"><img src="images/icons/Apples.png"/></td>
-    <td style="text-align: right;">Apples</td>
-    <td><span class="text-success">1,226</span></td>
-    <td style="text-align: center;"><span class="text-success">0</span></td>
-    <td style="text-align: center;"><span class="text-danger">14</span></td>
-  </tr>
-  <tr>
-    <td style="width: 16px;"><img src="images/icons/Coffee.png"/></td>
-    <td style="text-align: right;">Coffee</td>
-    <td><span class="text-success">29</span></td>
-    <td style="text-align: center;"><span class="text-danger">1</span></td>
-  </tr>
-  <tr>
-    <td style="text-align: right;">Gems</td>
-    <td><span class="text-success">6</span></td>
-  </tr>
-</tbody></table>
-<div class="panel-heading">Buildings</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Gem Mine</td><td><span>3</span></td></tr>
-</tbody></table>
-<div class="panel-heading">Weapons</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Oil</td><td><span>999</span></td></tr>
-</tbody></table>
-"""
+# Column Q onward of a nation tab, as read by NATION_SCAN_RANGE ("Q1:W60"). Index 0 is Q.
+def nation_grid(header_row=10, have_at=1, labels=None, stamp="2026-08-23 11:42:12", tail=True):
+    """Build the Q..W grid: blank rows, a STOCK header, the label run, then the COST block."""
+    labels = ["apple", "oil", "coffee", "mpart", "vpart", "gems"] if labels is None else labels
+    grid = [["", "", "", "", "", "", ""] for _ in range(header_row - 1)]
+    header = ["STOCK", "", "", "", "", "", ""]
+    header[have_at] = "HAVE"
+    header[6] = stamp
+    grid.append(header)
+    for label in labels:
+        grid.append([label, "0", "", "", "", "", ""])
+    if tail:
+        grid.append(["", "", "", "", "", "", ""])
+        grid.append(["", "", "", "", "", "", ""])
+        grid.append(["COST", "Bits", "", "", "", "", ""])
+        grid.append(["Copper", "200", "", "", "", "", ""])
+        grid.append(["M Part", "10", "", "", "", "", ""])
+    return grid
 
 
-EXPECTED_LABELS = ["apple", "oil", "coffee", "mpart", "vpart", "gems"]
+GOODS_LABELS = [
+    "Energy", "Apples", "Coffee", "Oil", "Gas", "Gems", "Cider", "Pies", "Toys",
+    "Tungsten", "Plastics",
+    "",  # spacer, row 21
+    "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites",
+    "",  # spacer, row 28
+    "Forbidden Research", "Apotheosis Serum",
+    "DNA - Burro - Central", "DNA - Burro - North", "DNA - Burro - South",
+    "DNA - Prze - Central", "DNA - Prze - North", "DNA - Prze - South",
+    "DNA - Saddle - Central", "DNA - Saddle - North", "DNA - Saddle - South",
+    "DNA - Zebrica - Central", "DNA - Zebrica - North", "DNA - Zebrica - South",
+]
+
+NATIONS = ["READ ONLY", "TOTAL", "LePone(Z)", "quaity(P)", "Pure Apple Acres(B)", "#N/A"]
+
+
+def dashboard_grid(nations=None, labels=None, offset=0):
+    """The Dashboard as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels.
+
+    ``offset`` inserts that many blank rows below row 1, moving the whole block down.
+    """
+    nations = NATIONS if nations is None else nations
+    labels = GOODS_LABELS if labels is None else labels
+    grid = [list(nations)]
+    grid.extend([[""] for _ in range(offset)])
+    grid.append(["Active"])
+    grid.append(["Sat"])
+    grid.append(["NLR"])
+    grid.append(["SE"])
+    grid.append([""])          # spacer row 6
+    grid.append(["GDP"])
+    grid.append(["Bits"])
+    grid.append([""])          # spacer row 9
+    grid.extend([[label] for label in labels])
+    return grid
+
+
+class LocateNationBlockTests(unittest.TestCase):
+    def test_todays_layout(self):
+        block, problems = locate_nation_block(nation_grid())
+        self.assertEqual(problems, [])
+        self.assertEqual(block.header_row, 10)
+        self.assertEqual(block.value_column, "R")
+        self.assertEqual(block.timestamp_cell, "W10")
+        self.assertEqual(
+            block.rows,
+            {"apple": 11, "oil": 12, "coffee": 13, "mpart": 14, "vpart": 15, "gems": 16},
+        )
+
+    def test_inserted_row_shifts_the_block(self):
+        # Somebody adds a row above the STOCK header. A hardcoded Q11:Q16 would now write apples
+        # into the oil row; the lookup just returns different rows.
+        block, problems = locate_nation_block(nation_grid(header_row=12))
+        self.assertEqual(problems, [])
+        self.assertEqual(block.header_row, 12)
+        self.assertEqual(block.rows["apple"], 13)
+        self.assertEqual(block.timestamp_cell, "W12")
+
+    def test_have_column_moved(self):
+        # HAVE is found in the header row, so moving it moves the values with it.
+        block, problems = locate_nation_block(nation_grid(have_at=3))
+        self.assertEqual(problems, [])
+        self.assertEqual(block.value_column, "T")
+
+    def test_cost_block_below_is_not_picked_up(self):
+        block, _ = locate_nation_block(nation_grid())
+        self.assertNotIn("Copper", block.rows)
+        self.assertNotIn("M Part", block.rows)
+        self.assertNotIn("COST", block.rows)
+
+    def test_missing_stock_header(self):
+        grid = [["", "", "", "", "", "", ""] for _ in range(5)]
+        block, problems = locate_nation_block(grid)
+        self.assertIsNone(block)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("STOCK", problems[0])
+
+    def test_missing_have_header(self):
+        grid = nation_grid()
+        grid[9][1] = ""
+        block, problems = locate_nation_block(grid)
+        self.assertIsNone(block)
+        self.assertIn("HAVE", problems[0])
+
+    def test_missing_stock_label(self):
+        block, problems = locate_nation_block(
+            nation_grid(labels=["apple", "oil", "coffee", "mpart", "vpart"])
+        )
+        self.assertIsNone(block)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("gems", problems[0])
+
+    def test_all_missing_labels_reported_not_just_the_first(self):
+        block, problems = locate_nation_block(nation_grid(labels=["apple", "oil"]))
+        self.assertIsNone(block)
+        self.assertEqual(len(problems), 4)
+
+    def test_duplicate_label_in_the_run(self):
+        block, problems = locate_nation_block(
+            nation_grid(labels=["apple", "apple", "oil", "coffee", "mpart", "vpart", "gems"])
+        )
+        self.assertIsNone(block)
+        self.assertTrue(any("apple" in problem and "twice" in problem for problem in problems))
+
+    def test_run_ending_at_the_grid_edge(self):
+        # No COST block below and no trailing blank: the run must end at the last row, not raise.
+        block, problems = locate_nation_block(nation_grid(tail=False))
+        self.assertEqual(problems, [])
+        self.assertEqual(block.rows["gems"], 16)
+
+
+class ContiguousRunsTests(unittest.TestCase):
+    def test_single_run(self):
+        self.assertEqual(
+            contiguous_runs({"a": 11, "b": 12, "c": 13}),
+            [[(11, "a"), (12, "b"), (13, "c")]],
+        )
+
+    def test_gaps_split_runs(self):
+        self.assertEqual(
+            contiguous_runs({"a": 2, "b": 3, "c": 7, "d": 8}),
+            [[(2, "a"), (3, "b")], [(7, "c"), (8, "d")]],
+        )
+
+    def test_lone_row_is_its_own_run(self):
+        self.assertEqual(contiguous_runs({"a": 5}), [[(5, "a")]])
+
+    def test_unordered_input_sorted(self):
+        self.assertEqual(contiguous_runs({"b": 3, "a": 2}), [[(2, "a"), (3, "b")]])
+
+    def test_empty(self):
+        self.assertEqual(contiguous_runs({}), [])
+
+
+class LocateDashboardBlockTests(unittest.TestCase):
+    def test_todays_layout(self):
+        block, problems = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        self.assertEqual(problems, [])
+        self.assertEqual(block.column, "C")
+        self.assertEqual(block.rows["Active"], 2)
+        self.assertEqual(block.rows["Bits"], 8)
+        self.assertEqual(block.rows["Energy"], 10)
+        self.assertEqual(block.rows["Plastics"], 20)
+        self.assertEqual(block.rows["Drugs"], 22)
+        self.assertEqual(block.rows["Composites"], 27)
+        self.assertEqual(block.rows["Forbidden Research"], 29)
+        self.assertEqual(block.rows["DNA - Zebrica - South"], 42)
+
+    def test_all_thirty_seven_labels_located(self):
+        block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        self.assertEqual(len(block.rows), 37)
+        self.assertEqual(set(block.rows), set(DASHBOARD_LABELS))
+
+    def test_another_nations_column(self):
+        block, _ = locate_dashboard_block(dashboard_grid(), "quaity(P)")
+        self.assertEqual(block.column, "D")
+
+    def test_inserted_row_shifts_every_row(self):
+        block, problems = locate_dashboard_block(dashboard_grid(offset=3), "LePone(Z)")
+        self.assertEqual(problems, [])
+        self.assertEqual(block.rows["Active"], 5)
+        self.assertEqual(block.rows["Energy"], 13)
+
+    def test_nation_not_found_names_row_one(self):
+        block, problems = locate_dashboard_block(dashboard_grid(), "Nowhere(X)")
+        self.assertIsNone(block)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Nowhere(X)", problems[0])
+        self.assertIn("LePone(Z)", problems[0])   # row 1's contents are shown
+
+    def test_a_real_nation_never_resolves_to_the_na_spare(self):
+        block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        self.assertEqual(block.column, "C")       # not F, where the "#N/A" sits
+
+    def test_missing_label(self):
+        labels = list(GOODS_LABELS)
+        labels[labels.index("Toys")] = ""
+        block, problems = locate_dashboard_block(dashboard_grid(labels=labels), "LePone(Z)")
+        self.assertIsNone(block)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Toys", problems[0])
+
+    def test_duplicate_label(self):
+        labels = list(GOODS_LABELS)
+        labels[labels.index("Cider")] = "Gems"
+        block, problems = locate_dashboard_block(dashboard_grid(labels=labels), "LePone(Z)")
+        self.assertIsNone(block)
+        self.assertTrue(any("Gems" in problem for problem in problems))
+        self.assertTrue(any("Cider" in problem for problem in problems))
+
+    def test_spacer_rows_are_not_labels(self):
+        block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        located = set(block.rows.values())
+        for spacer in (6, 9, 21, 28):
+            self.assertNotIn(spacer, located)
+
+    def test_runs_from_todays_layout_skip_the_spacers(self):
+        block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        spans = [(run[0][0], run[-1][0]) for run in contiguous_runs(block.rows)]
+        self.assertEqual(spans, [(2, 5), (7, 8), (10, 20), (22, 27), (29, 42)])
+
+
+STATUS = NationStatus(
+    government="Loose Despotism",
+    economy="Poorly Defined",
+    satisfaction=Reading(218, -5),
+    se=Reading(-120, 3),
+    nlr=Reading(1500, "Ascending"),
+    gdp=60900,
+    funds=1234567,
+    server_time="2026-08-23 11:42:12",
+)
+
+STOCK = Stockpiles({"Apples": 1226, "Oil": 80, "Gems": 6, "Toys": 4})
 
 
 class FakeSheet:
-    """Stand-in for GoogleSheet: serves the Q label column and records every write."""
+    """Stand-in for GoogleSheet: serves a canned grid per tab and records every write."""
 
-    def __init__(self, labels=None):
-        self.labels = list(labels) if labels is not None else list(EXPECTED_LABELS)
-        self.blocks = []   # (a1, values) from write()
-        self.cells = []    # (a1, value) from write_cell()
+    def __init__(self, nation_tab="LePone(Z)", nation=None, dashboard=None):
+        self.grids = {
+            nation_tab: nation if nation is not None else nation_grid(),
+            DASHBOARD_TAB: dashboard if dashboard is not None else dashboard_grid(),
+        }
+        self.blocks = []   # (tab, a1, values) from write()
+        self.cells = []    # (tab, a1, value) from write_cell()
 
     def read(self, tab, a1):
-        return [[label] for label in self.labels]
+        return self.grids[tab]
 
     def write(self, tab, a1, values):
-        self.blocks.append((a1, values))
+        self.blocks.append((tab, a1, values))
         return values
 
     def write_cell(self, tab, a1, value):
-        self.cells.append((a1, value))
+        self.cells.append((tab, a1, value))
         return value
 
 
-class ParseResourcesTests(unittest.TestCase):
-    def test_only_resources_panel_parsed(self):
-        result = parse_overview_resources(OVERVIEW_HTML)
-        self.assertEqual(set(result), {"Apples", "Coffee", "Gems"})
-        self.assertNotIn("Gem Mine", result)     # buildings panel ignored
-        self.assertEqual(result.get("Oil"), None)  # the weapons-panel decoy is not picked up
+class StatusValuesTests(unittest.TestCase):
+    def test_every_status_label_covered(self):
+        self.assertEqual(set(status_values(STATUS)), set(STATUS_LABELS))
 
-    def test_commas_stripped(self):
-        self.assertEqual(parse_overview_resources(OVERVIEW_HTML)["Apples"], 1226)
+    def test_active_is_the_server_time_forced_to_text(self):
+        self.assertEqual(status_values(STATUS)["Active"], as_sheet_text("2026-08-23 11:42:12"))
 
-    def test_row_without_icon_cell_parsed(self):
-        # hideicons drops the leading <td>; the name is then the first cell.
-        self.assertEqual(parse_overview_resources(OVERVIEW_HTML)["Gems"], 6)
+    def test_readings_rendered_with_the_per_tick_in_parentheses(self):
+        values = status_values(STATUS)
+        self.assertEqual(values["Sat"], "218 (-5)")
+        self.assertEqual(values["SE"], "-120 (3)")
+        self.assertEqual(values["NLR"], "1500 (Ascending)")
 
-    def test_unparseable_quantity_raises(self):
-        html = """
-<div class="panel-heading">Resources</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Apples</td><td><span>N/A</span></td></tr>
-</tbody></table>
-"""
-        with self.assertRaises(StockpileError) as caught:
-            parse_overview_resources(html)
-        self.assertIn("Apples", str(caught.exception))
-
-    def test_missing_resources_panel_yields_no_rows(self):
-        # The parser itself stays permissive and just reports no rows. Deciding that an absent
-        # panel means a broken page is the caller's job -- see overview.require_valid_overview.
-        self.assertEqual(parse_overview_resources("<html></html>"), {})
-
-    def test_present_panel_with_no_rows_is_empty(self):
-        # A nation that holds nothing renders the heading with an empty table. That is valid;
-        # it is a *missing* heading that means a broken page, and sync_sheet_step guards that.
-        html = '<div class="panel-heading">Resources</div><table class="table"><tbody></tbody></table>'
-        self.assertEqual(parse_overview_resources(html), {})
-
-    def test_trailing_garbage_in_a_quantity_raises(self):
-        # fullmatch, not match: "226 x" must not silently read as 226.
-        html = """
-<div class="panel-heading">Resources</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Apples</td><td><span>226 x</span></td></tr>
-</tbody></table>
-"""
-        with self.assertRaises(StockpileError):
-            parse_overview_resources(html)
-
-    def test_negative_quantity_accepted(self):
-        html = """
-<div class="panel-heading">Resources</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Apples</td><td><span>-5</span></td></tr>
-</tbody></table>
-"""
-        self.assertEqual(parse_overview_resources(html), {"Apples": -5})
-
-
-class DesiredStockTests(unittest.TestCase):
-    def test_row_order_matches_the_sheet(self):
-        self.assertEqual(
-            [label for label, _ in STOCK_ROWS],
-            ["apple", "oil", "coffee", "mpart", "vpart", "gems"],
-        )
-        self.assertEqual(STOCK_FIRST_ROW, 11)
-
-    def test_absent_good_is_zero(self):
-        # The nation holds no machinery or vehicle parts, so they are absent from the page.
-        self.assertEqual(desired_stock({}), [0, 0, 0, 0, 0, 0])
-
-    def test_quantities_in_row_order(self):
-        resources = parse_overview_resources(OVERVIEW_HTML)
-        # apple, oil, coffee, mpart, vpart, gems
-        self.assertEqual(desired_stock(resources), [1226, 0, 29, 0, 0, 6])
-
-
-class ServerTimeTests(unittest.TestCase):
-    def test_stamp_returned_verbatim(self):
-        self.assertEqual(parse_server_time(OVERVIEW_HTML), "2026-08-23 03:23:44")
-
-    def test_stamp_found_in_the_real_header_markup(self):
-        html = '<li><a>Server time: 2026-01-02 09:05:00</a></li><li><a>Next tick: 0:36:16</a></li>'
-        self.assertEqual(parse_server_time(html), "2026-01-02 09:05:00")
-
-    def test_missing_stamp_raises(self):
-        with self.assertRaises(StockpileError) as caught:
-            parse_server_time("<html><body>Please log in.</body></html>")
-        self.assertIn("Server time", str(caught.exception))
-
-
-class CheckLabelsTests(unittest.TestCase):
-    def test_expected_labels_have_no_problems(self):
-        self.assertEqual(check_labels(FakeSheet(), "T"), [])
-
-    def test_labels_are_case_and_space_insensitive(self):
-        problems = check_labels(FakeSheet(labels=[" Apple ", "OIL", "coffee",
-                                                  "mpart", "vpart", "gems"]), "T")
-        self.assertEqual(problems, [])
-
-    def test_reordered_labels_flagged_with_their_cell(self):
-        problems = check_labels(FakeSheet(labels=["oil", "apple", "coffee",
-                                                  "mpart", "vpart", "gems"]), "T")
-        self.assertEqual(len(problems), 2)
-        self.assertIn("Q11", problems[0])
-        self.assertIn("'apple'", problems[0])
-        self.assertIn("'oil'", problems[0])
-
-    def test_renamed_label_flagged(self):
-        problems = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
-                                                  "mpart", "vpart", "diamonds"]), "T")
-        self.assertEqual(len(problems), 1)
-        self.assertIn("Q16", problems[0])
-
-    def test_short_grid_flagged_rather_than_crashing(self):
-        problems = check_labels(FakeSheet(labels=["apple", "oil"]), "T")
-        self.assertEqual(len(problems), 4)     # rows 13-16 read as blank
-
-    def test_reads_only_the_label_column(self):
-        # The R values are deliberately not read: they are overwritten regardless.
-        class RecordingSheet(FakeSheet):
-            def read(self, tab, a1):
-                self.read_range = a1
-                return super().read(tab, a1)
-
-        sheet = RecordingSheet()
-        check_labels(sheet, "T")
-        self.assertEqual(sheet.read_range, "Q11:Q16")
-
-    def test_blank_cell_is_reported_as_empty_not_as_none(self):
-        class NoneCellSheet(FakeSheet):
-            def read(self, tab, a1):
-                return [[None] for _ in self.labels]
-
-        problems = check_labels(NoneCellSheet(), "T")
-        self.assertEqual(len(problems), 6)
-        self.assertNotIn("None", problems[0])
-        self.assertIn("''", problems[0])
-
-    def test_empty_grid_flags_every_row(self):
-        # A brand-new tab can come back with nothing at all.
-        self.assertEqual(len(check_labels(FakeSheet(labels=[]), "T")), 6)
-
-    def test_middle_row_mismatch_names_its_own_cell(self):
-        problems = check_labels(FakeSheet(labels=["apple", "oil", "coffee",
-                                                  "widgets", "vpart", "gems"]), "T")
-        self.assertEqual(len(problems), 1)
-        self.assertIn("Q14", problems[0])
+    def test_gdp_and_bits_are_numbers_so_total_can_sum_them(self):
+        values = status_values(STATUS)
+        self.assertEqual(values["GDP"], 60900)
+        self.assertEqual(values["Bits"], 1234567)
+        self.assertIsInstance(values["GDP"], int)
+        self.assertIsInstance(values["Bits"], int)
 
 
 class SnapshotTests(unittest.TestCase):
-    def _resources(self):
-        return parse_overview_resources(OVERVIEW_HTML)   # Apples 1226, Coffee 29, Gems 6
+    def run_snapshot(self, sheet):
+        return snapshot(sheet, "LePone(Z)", STOCK, STATUS)
 
-    def test_writes_the_value_block_and_the_timestamp(self):
+    def test_no_problems_on_todays_layout(self):
         sheet = FakeSheet()
-        written = snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
+        _report, problems = self.run_snapshot(sheet)
+        self.assertEqual(problems, [])
+
+    def test_nation_tab_values_in_sheet_row_order(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        nation_blocks = [block for block in sheet.blocks if block[0] == "LePone(Z)"]
+        self.assertEqual(len(nation_blocks), 1)
+        _tab, a1, values = nation_blocks[0]
+        self.assertEqual(a1, "R11:R16")
+        # apple, oil, coffee, mpart, vpart, gems -- the sheet's order, not the goods table's
+        self.assertEqual(values, [[1226], [80], [0], [0], [0], [6]])
+
+    def test_timestamp_written_after_the_values(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        self.assertEqual(sheet.cells, [("LePone(Z)", "W10", as_sheet_text(STATUS.server_time))])
+
+    def test_dashboard_written_as_five_runs(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        ranges = [block[1] for block in sheet.blocks if block[0] == DASHBOARD_TAB]
+        self.assertEqual(ranges, ["C2:C5", "C7:C8", "C10:C20", "C22:C27", "C29:C42"])
+
+    def test_dashboard_status_run_payload(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
         self.assertEqual(
-            sheet.blocks,
-            [(VALUE_RANGE, [[1226], [0], [29], [0], [0], [6]])],
+            payload["C2:C5"],
+            [
+                [as_sheet_text("2026-08-23 11:42:12")],
+                ["218 (-5)"],
+                ["1500 (Ascending)"],
+                ["-120 (3)"],
+            ],
         )
-        # Apostrophe-prefixed: Sheets consumes it and stores the stamp as text rather than
-        # parsing it into a date in the spreadsheet's timezone. See as_sheet_text.
-        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "'2026-08-23 03:23:44")])
+        self.assertEqual(payload["C7:C8"], [[60900], [1234567]])
+
+    def test_dashboard_goods_run_payload(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
+        # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
         self.assertEqual(
-            written,
-            [("apple", 1226), ("oil", 0), ("coffee", 29),
-             ("mpart", 0), ("vpart", 0), ("gems", 6)],
+            payload["C10:C20"],
+            [[0], [1226], [0], [80], [0], [6], [0], [0], [4], [0], [0]],
         )
 
-    def test_a_good_no_longer_held_is_written_back_to_zero(self):
+    def test_absent_good_written_as_zero(self):
         sheet = FakeSheet()
-        snapshot(sheet, "T", {}, "2026-08-23 03:23:44")
-        self.assertEqual(sheet.blocks, [(VALUE_RANGE, [[0], [0], [0], [0], [0], [0]])])
+        self.run_snapshot(sheet)
+        payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
+        self.assertEqual(payload["C29:C42"], [[0]] * 14)
 
-    def test_nothing_is_read(self):
-        # The snapshot overwrites unconditionally, so it must not depend on the sheet's contents.
-        class NoReadSheet(FakeSheet):
-            def read(self, tab, a1):
-                raise AssertionError("snapshot must not read the sheet")
-
-        snapshot(NoReadSheet(), "T", self._resources(), "2026-08-23 03:23:44")
-
-    def test_timestamp_written_last(self):
-        # W10 claims the numbers beside it are fresh, so it must never land before they do.
+    def test_spacer_rows_never_written(self):
         sheet = FakeSheet()
-        order = []
-        sheet.write = lambda tab, a1, values: order.append("values")
-        sheet.write_cell = lambda tab, a1, value: order.append("stamp")
-        snapshot(sheet, "T", self._resources(), "2026-08-23 03:23:44")
-        self.assertEqual(order, ["values", "stamp"])
+        self.run_snapshot(sheet)
+        touched = set()
+        for _tab, a1, _values in sheet.blocks:
+            first, last = a1.split(":")
+            touched.update(range(int(first[1:]), int(last[1:]) + 1))
+        for spacer in (6, 9, 21, 28):
+            self.assertNotIn(spacer, touched)
 
+    def test_dashboard_problem_does_not_stop_the_nation_tab(self):
+        sheet = FakeSheet(dashboard=dashboard_grid(nations=["READ ONLY", "TOTAL"]))
+        _report, problems = self.run_snapshot(sheet)
+        self.assertTrue(problems)
+        self.assertTrue(any(block[0] == "LePone(Z)" for block in sheet.blocks))
+        self.assertFalse(any(block[0] == DASHBOARD_TAB for block in sheet.blocks))
 
-class AsSheetTextTests(unittest.TestCase):
-    """The stamp must reach the sheet as text, not as a date.
+    def test_nation_problem_does_not_stop_the_dashboard(self):
+        sheet = FakeSheet(nation=nation_grid(labels=["apple", "oil"]))
+        _report, problems = self.run_snapshot(sheet)
+        self.assertTrue(problems)
+        self.assertFalse(any(block[0] == "LePone(Z)" for block in sheet.blocks))
+        self.assertTrue(any(block[0] == DASHBOARD_TAB for block in sheet.blocks))
 
-    Verified against the live sheet: written bare, ``2026-08-23 07:12:30`` came back as
-    ``2026-08-23T07:12:30.000Z`` -- Sheets had parsed it into a date value, reinterpreting the
-    game's clock in the spreadsheet's timezone. That is exactly the assumption this feature
-    refuses to make anywhere else, so it must not make it here either.
-    """
+    def test_nation_problem_withholds_the_timestamp_too(self):
+        # A fresh stamp over stale numbers is worse than an obviously stale one.
+        sheet = FakeSheet(nation=nation_grid(labels=["apple", "oil"]))
+        self.run_snapshot(sheet)
+        self.assertEqual(sheet.cells, [])
 
-    def test_prefixes_with_the_force_text_marker(self):
-        self.assertEqual(as_sheet_text("2026-08-23 07:12:30"), "'2026-08-23 07:12:30")
+    def test_junk_in_the_timestamp_cell_blocks_the_whole_nation_tab(self):
+        sheet = FakeSheet(nation=nation_grid(stamp="NEED BY"))
+        _report, problems = self.run_snapshot(sheet)
+        self.assertTrue(any("W10" in problem for problem in problems))
+        self.assertFalse(any(block[0] == "LePone(Z)" for block in sheet.blocks))
+        self.assertEqual(sheet.cells, [])
 
-    def test_snapshot_uses_it(self):
+    def test_empty_timestamp_cell_is_fine(self):
+        sheet = FakeSheet(nation=nation_grid(stamp=""))
+        _report, problems = self.run_snapshot(sheet)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(sheet.cells), 1)
+
+    def test_report_records_what_was_written(self):
         sheet = FakeSheet()
-        snapshot(sheet, "T", {}, "2026-08-23 07:12:30")
-        self.assertEqual(sheet.cells, [(TIMESTAMP_CELL, "'2026-08-23 07:12:30")])
-
-
-class MappingIntegrityTests(unittest.TestCase):
-    def test_six_distinct_goods(self):
-        self.assertEqual(len(STOCK_ROWS), 6)
-        self.assertEqual(len({label for label, _ in STOCK_ROWS}), 6)
-        self.assertEqual(len({game for _, game in STOCK_ROWS}), 6)
-
-    def test_game_names_are_real_resourcedefs_names(self):
-        # The non-building resourcedefs names, hand-copied from clop/tables with data.sql. This
-        # guards against a typo in STOCK_ROWS, not against the game renaming a resource -- that
-        # would only show up on a live run.
-        known = {
-            "Oil", "Copper", "Apples", "Energy", "Vehicle Parts", "Machinery Parts", "Pies",
-            "Cider", "Coffee", "Gasoline", "Gems", "Tungsten", "Plastics", "Precision Parts",
-            "Composites", "Drugs", "Toys", "Forbidden Research", "Apotheosis Serum",
-        }
-        for _, game_name in STOCK_ROWS:
-            self.assertIn(game_name, known)
+        report, _problems = self.run_snapshot(sheet)
+        self.assertEqual(report.timestamp, "2026-08-23 11:42:12")
+        self.assertEqual(len(report.nation_writes), 1)
+        self.assertEqual(len(report.dashboard_writes), 5)
 
 
 if __name__ == "__main__":

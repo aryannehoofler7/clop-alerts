@@ -1,142 +1,132 @@
 #!/usr/bin/env python3
-"""Snapshot the nation's stockpiles for six goods onto the shared sheet.
+"""Snapshot the nation's stockpiles and status onto the shared sheet -- both tabs, one page fetch.
 
-The flow, run in the same step as the building reconciliation and off the same overview.php fetch:
+Two regions are written from one read of ``overview.php``:
 
-1. read the overview "Resources" panel into ``{resource_name: qty}`` (a good the nation holds none
-   of is simply absent from the page, and reads as zero);
-2. read the CLOP **server** time out of the page header;
-3. verify the sheet's ``Q11:Q16`` still names the six goods, in order;
-4. write ``R11:R16`` and stamp ``W10`` with the server time.
+1. the player's own **nation tab** -- the six goods in the ``STOCK`` block's ``HAVE`` column, plus
+   the timestamp beside the header;
+2. the alliance-wide **Dashboard tab** -- the nation's own column: all 31 goods and six status rows
+   (``Active``, ``Sat``, ``NLR``, ``SE``, ``GDP``, ``Bits``).
 
-Unlike ``buildings.py`` this is a **snapshot, not a reconciliation**: the values already in the sheet
-are replaced rather than diffed and corrected, and a routine write is not an event worth alerting
-on. Both cells are written on every run, even when nothing changed -- see ``snapshot``.
+The parsing lives elsewhere and happens once: ``goods.Stockpiles`` and ``nation.NationStatus`` are
+handed in already built, so nothing here re-fetches or re-parses the page.
 
-Rows are addressed by position, so ``check_labels`` runs first every time: if ``Q11:Q16`` has been
-reordered or relabelled, nothing is written at all -- not even ``W10``, because a fresh timestamp
-over stale numbers is worse than an obviously stale one.
+**Every target cell is found by looking a label up.** No row number or column letter is hardcoded:
+the nation tab's block is found from its ``STOCK`` header and the value column from the ``HAVE``
+header beside it; the Dashboard's column is found from the nation's name in row 1 and its rows from
+the labels in column A. The one exception is the nation tab's timestamp cell, which has no label to
+anchor on -- its *row* is looked up and its column ``W`` is convention, so the write is guarded (see
+``timestamp_problem``).
+
+This is a **snapshot, not a reconciliation**: values in the sheet are replaced rather than diffed
+and corrected, and a routine write is not an event worth alerting on. An earlier draft compared
+against the sheet first and skipped unchanged blocks, but an unreadable cell (``#REF!``, a stray
+label) normalises to ``0`` and so compares equal for a good the nation holds none of -- leaving the
+garbage in place while the timestamp declared the row freshly verified. Overwriting always costs one
+call per run and removes that hole.
+
+The two regions are **independent**: a layout problem on one is reported and skipped without
+stopping the other. A transport failure is not a layout problem and aborts both, deliberately -- it
+means the shared connection is down, so retrying the other half would only produce a second popup
+about the same outage.
 
 This module never acts on the game -- it only reads overview.php and writes the sheet.
 
-See ``docs/superpowers/specs/2026-08-23-stockpile-snapshot-design.md``.
+See ``docs/superpowers/specs/2026-08-23-dashboard-sync-design.md`` and, for the goods table,
+``docs/2026-08-23-dashboard-goods-map.md``.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-from overview import parse_panel, require_valid_overview
-from sheets import GoogleSheet
+from goods import (  # re-exported: clop_monitor and the diagnostics import them from here
+    BY_STOCK_LABEL,
+    GOODS,
+    StockpileError,
+    Stockpiles,
+    parse_overview_resources,
+)
+from nation import (  # re-exported for the same reason
+    NationStatus,
+    NationStatusError,
+    Reading,
+    parse_server_time,
+)
+from sheets import GoogleSheet, column_letter, find_in_row, index_column
 
-#: Sheet STOCK label (column Q) -> game resource name, **in sheet row order**: the list index is the
-#: offset from ``STOCK_FIRST_ROW``, so the order is data, not decoration.
-#:
-#: The game names are ``resourcedefs.name`` for the non-building rows, from the game's seed data
-#: (``clop/tables with data.sql``). The two that are not guessable from the sheet's abbreviation are
-#: ``mpart`` -> ``Machinery Parts`` (resource_id 10) and ``vpart`` -> ``Vehicle Parts`` (id 9); they
-#: are the only two candidates in the table.
-STOCK_ROWS: List[Tuple[str, str]] = [
-    ("apple", "Apples"),
-    ("oil", "Oil"),
-    ("coffee", "Coffee"),
-    ("mpart", "Machinery Parts"),
-    ("vpart", "Vehicle Parts"),
-    ("gems", "Gems"),
-]
+#: Column Q onward of a nation tab. Q holds the labels, the header row holds HAVE/NEED/BUY, and W
+#: holds the timestamp; read to row 60 so a longer sheet is still covered.
+NATION_SCAN_RANGE = "Q1:W60"
 
-#: The stock block sits at rows 11-16 of a nation tab: Q = label, R = HAVE.
-STOCK_FIRST_ROW = 11
-STOCK_LAST_ROW = STOCK_FIRST_ROW + len(STOCK_ROWS) - 1
+#: 0-based index of column Q, so an offset within a scanned row converts back to a column letter.
+NATION_FIRST_COLUMN = 16
 
-LABEL_RANGE = f"Q{STOCK_FIRST_ROW}:Q{STOCK_LAST_ROW}"
-VALUE_RANGE = f"R{STOCK_FIRST_ROW}:R{STOCK_LAST_ROW}"
+STOCK_HEADER = "STOCK"
+HAVE_HEADER = "HAVE"
 
-#: Where the "when was this taken" stamp goes. Empty in the sheet's layout; beside the STOCK header.
-TIMESTAMP_CELL = "W10"
+#: The timestamp's column. Its row is looked up; this is the one address left to convention,
+#: because the cell has no label. ``timestamp_problem`` guards the write because of that.
+TIMESTAMP_COLUMN = "W"
 
-_SERVER_TIME_RE = re.compile(r"Server time:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+#: 0-based offset of column W within a NATION_SCAN_RANGE row (Q=0, R=1, ... W=6).
+_TIMESTAMP_OFFSET = 6
+
+DASHBOARD_TAB = "Dashboard"
+
+#: Row 1 holds the nation names, column A the row labels; 60 rows covers the block with room.
+DASHBOARD_SCAN_RANGE = "A1:Z60"
+
+#: The Dashboard's non-goods rows, in the order they appear. ``Active`` holds a last-updated
+#: timestamp despite its label -- the sheet owner's instruction, recorded so it is not "fixed".
+STATUS_LABELS: Tuple[str, ...] = ("Active", "Sat", "NLR", "SE", "GDP", "Bits")
+
+#: Every label this module expects to find in the Dashboard's column A: 6 status + 31 goods.
+DASHBOARD_LABELS: Tuple[str, ...] = STATUS_LABELS + tuple(
+    good.dashboard_label for good in GOODS
+)
+
+_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 
-class StockpileError(RuntimeError):
-    """The overview page is not what the snapshot expects.
+@dataclass(frozen=True)
+class NationBlock:
+    """Where the nation tab's STOCK block turned out to be."""
 
-    Raised for a missing server-time stamp or an unreadable quantity. Both mean the same thing to
-    the caller: do not write anything to the sheet, and tell someone.
+    header_row: int             # 1-based row of the STOCK header
+    value_column: str           # A1 letter of the HAVE column
+    rows: Dict[str, int]        # stock_label -> 1-based row
+    timestamp_cell: str         # e.g. "W10"
+
+
+@dataclass(frozen=True)
+class DashboardBlock:
+    """Where the nation's column and the labelled rows turned out to be on the Dashboard."""
+
+    column: str                 # A1 letter of this nation's column
+    rows: Dict[str, int]        # dashboard label -> 1-based row
+
+
+def _column_index(letters: str) -> int:
+    """Inverse of ``sheets.column_letter``: ``"A" -> 0``, ``"AA" -> 26``.
+
+    Used only by the diagnostic, to read back the column the ``HAVE`` lookup resolved to.
     """
+    index = 0
+    for character in letters:
+        index = index * 26 + (ord(character) - ord("A") + 1)
+    return index - 1
 
 
-def parse_overview_resources(html: str) -> Dict[str, int]:
-    """Return ``{resource_name: qty}`` from the overview "Resources" panel.
-
-    Only resources the nation has a row for are rendered, so a good it holds none of is absent from
-    the result rather than present as zero; ``desired_stock`` is what turns that into a zero.
-
-    Raises ``StockpileError`` if a row's Qty is not a plain integer. Skipping such a row would be
-    the more dangerous choice: the good would fall through to zero and be written to the sheet as
-    "you hold none", stamped freshly verified. The game formats every Qty with its integer
-    ``commas()`` helper, so anything else means the page changed and a human should look.
-    """
-    result: Dict[str, int] = {}
-    for name, value_text in parse_panel(html, "Resources"):
-        text = value_text.replace(",", "").strip()
-        if not re.fullmatch(r"-?\d+", text):
-            raise StockpileError(
-                f"resource {name!r} has an unreadable quantity {value_text!r} on overview.php"
-            )
-        result[name] = int(text)
-    return result
-
-
-def desired_stock(resources: Dict[str, int]) -> List[int]:
-    """Return the six quantities in sheet row order; a good absent from overview is zero."""
-    return [resources.get(game_name, 0) for _, game_name in STOCK_ROWS]
-
-
-def parse_server_time(html: str) -> str:
-    """Return the ``YYYY-MM-DD HH:MM:SS`` stamp from the page header, exactly as rendered.
-
-    This is the game server's own clock (``date("Y-m-d H:i:s")`` in ``clop/header.php``), shown on
-    every logged-in page. It goes into the sheet unparsed and unconverted, so the sheet shows the
-    same wall-clock the game shows and no timezone has to be assumed anywhere.
-
-    Raises ``StockpileError`` when the stamp is absent: a page without it is not the page we think
-    it is, and a snapshot with no staleness marker is worse than no snapshot.
-    """
-    match = _SERVER_TIME_RE.search(html)
-    if not match:
-        raise StockpileError(
-            "no 'Server time:' stamp on the page -- this is not a normal CLOP page "
-            "(an error or maintenance page, or a truncated response?)"
-        )
-    return match.group(1)
-
-
-def check_labels(sheet: GoogleSheet, nation: str) -> List[str]:
-    """Confirm ``Q11:Q16`` still names the six goods, in order.
-
-    Returns the list of problems; empty means the block is safe to write. A non-empty list names
-    each offending cell and must stop **all** writing, ``W10`` included -- the rows are addressed by
-    position, so a moved label means this module no longer knows which row is which.
-
-    Every problem is reported, not just the first, so one popup shows a person everything they need
-    to put right.
-
-    Only the labels are read. The current ``R`` values are deliberately not consulted: they are
-    overwritten unconditionally, so there is nothing to compare them against.
-    """
-    grid = sheet.read(nation, LABEL_RANGE)
-    problems: List[str] = []
-    for index, (label, _) in enumerate(STOCK_ROWS):
-        row = grid[index] if index < len(grid) else []
-        cell = row[0] if len(row) > 0 else None
-        found = "" if cell is None else str(cell).strip()
-        if found.lower() != label.lower():
-            problems.append(
-                f"Q{STOCK_FIRST_ROW + index} should read {label!r} but reads {found!r}"
-            )
-    return problems
+def _cell(grid: List[List[Any]], row_index: int, column_index: int) -> Any:
+    """Read one cell out of a ragged grid, tolerating short or missing rows."""
+    if 0 <= row_index < len(grid):
+        row = grid[row_index]
+        if 0 <= column_index < len(row):
+            return row[column_index]
+    return None
 
 
 def as_sheet_text(value: str) -> str:
@@ -154,40 +144,260 @@ def as_sheet_text(value: str) -> str:
     return "'" + value
 
 
+def timestamp_problem(cell: str, current: Any) -> Optional[str]:
+    """Return a problem string if ``cell`` holds something that is not a timestamp.
+
+    The timestamp cell is the one address not fully looked up -- only its row is. This guard is what
+    makes that safe: if the sheet has been rearranged so column ``W`` of the header row now means
+    something else, the write is refused instead of clobbering it.
+    """
+    text = "" if current is None else str(current).strip()
+    if text and not _TIMESTAMP_RE.match(text):
+        return f"{cell} should be empty or hold a 'YYYY-MM-DD HH:MM:SS' stamp but reads {text!r}"
+    return None
+
+
+def locate_nation_block(grid: List[List[Any]]) -> Tuple[Optional[NationBlock], List[str]]:
+    """Find the STOCK block in a ``NATION_SCAN_RANGE`` grid. Returns ``(block, problems)``.
+
+    A non-empty ``problems`` means ``block`` is ``None`` and nothing on that tab may be written.
+
+    The label run stops at the first blank row. That is not tidiness -- column Q holds a *second*
+    label block lower down (``COST``, then ``Copper``/``M Part``/``V Part``/``P Part``), so an
+    unbounded search would be ambiguous.
+    """
+    problems: List[str] = []
+
+    header_index: Optional[int] = None
+    for index, row in enumerate(grid):
+        cell = row[0] if len(row) > 0 else None
+        if cell is not None and str(cell).strip() == STOCK_HEADER:
+            header_index = index
+            break
+    if header_index is None:
+        problems.append(f"no {STOCK_HEADER!r} header found in column Q of the nation tab")
+        return None, problems
+
+    offset = find_in_row(grid[header_index], HAVE_HEADER)
+    if offset is None:
+        problems.append(
+            f"no {HAVE_HEADER!r} column found in row {header_index + 1} beside the "
+            f"{STOCK_HEADER!r} header"
+        )
+        return None, problems
+
+    seen: Dict[str, List[int]] = {}
+    for index in range(header_index + 1, len(grid)):
+        cell = _cell(grid, index, 0)
+        label = "" if cell is None else str(cell).strip()
+        if not label:
+            break
+        seen.setdefault(label, []).append(index + 1)
+
+    rows: Dict[str, int] = {}
+    for stock_label in sorted(BY_STOCK_LABEL):
+        places = seen.get(stock_label, [])
+        if not places:
+            problems.append(
+                f"stock label {stock_label!r} is missing from the run under the "
+                f"{STOCK_HEADER!r} header on the nation tab"
+            )
+        elif len(places) > 1:
+            places_text = ", ".join(str(place) for place in places)
+            problems.append(
+                f"stock label {stock_label!r} appears twice or more under the "
+                f"{STOCK_HEADER!r} header on the nation tab (rows {places_text})"
+            )
+        else:
+            rows[stock_label] = places[0]
+
+    if problems:
+        return None, problems
+    return (
+        NationBlock(
+            header_row=header_index + 1,
+            value_column=column_letter(NATION_FIRST_COLUMN + offset),
+            rows=rows,
+            timestamp_cell=f"{TIMESTAMP_COLUMN}{header_index + 1}",
+        ),
+        problems,
+    )
+
+
+def locate_dashboard_block(
+    grid: List[List[Any]], nation: str
+) -> Tuple[Optional[DashboardBlock], List[str]]:
+    """Find this nation's column and all 37 labelled rows. Returns ``(block, problems)``.
+
+    A non-empty ``problems`` means ``block`` is ``None`` and nothing on the Dashboard may be
+    written. Every problem is collected, not just the first, so one dialog shows a person the whole
+    list.
+
+    The nation's name is matched exactly against row 1. The tab is shared, so the failure worth
+    spelling out is "your tab is called something else": the message names the nation and prints
+    row 1, which is where the answer is.
+    """
+    problems: List[str] = []
+
+    header = grid[0] if grid else []
+    offset = find_in_row(header, nation)
+    if offset is None:
+        shown = ", ".join(
+            str(cell).strip() for cell in header if cell is not None and str(cell).strip()
+        )
+        problems.append(
+            f"no column in row 1 of the {DASHBOARD_TAB} tab is named {nation!r}. "
+            f"Row 1 reads: {shown or '(empty)'}"
+        )
+        return None, problems
+
+    found = index_column(grid)
+    rows: Dict[str, int] = {}
+    for label in DASHBOARD_LABELS:
+        places = found.get(label, [])
+        if not places:
+            problems.append(
+                f"label {label!r} is missing from column A of the {DASHBOARD_TAB} tab"
+            )
+        elif len(places) > 1:
+            places_text = ", ".join(str(place) for place in places)
+            problems.append(
+                f"label {label!r} appears {len(places)} times in column A of the "
+                f"{DASHBOARD_TAB} tab (rows {places_text})"
+            )
+        else:
+            rows[label] = places[0]
+
+    if problems:
+        return None, problems
+    return DashboardBlock(column=column_letter(offset), rows=rows), problems
+
+
+def contiguous_runs(rows: Dict[str, int]) -> List[List[Tuple[int, str]]]:
+    """Group ``{label: row}`` into ascending runs of consecutive rows.
+
+    One block write per run is what keeps the sheet's spacer rows untouched: they are not in
+    ``rows``, so they fall between runs rather than inside one.
+    """
+    runs: List[List[Tuple[int, str]]] = []
+    for row, label in sorted((row, label) for label, row in rows.items()):
+        if runs and row == runs[-1][-1][0] + 1:
+            runs[-1].append((row, label))
+        else:
+            runs.append([(row, label)])
+    return runs
+
+
+def status_values(status: NationStatus) -> Dict[str, Any]:
+    """Map the Dashboard's six status labels to the values to write.
+
+    Readings go in as one combined text cell each, exactly as the game displays them -- summing a
+    relationship across nine nations would be meaningless. GDP and Funds go in as real numbers, so
+    the Dashboard's ``TOTAL`` column can add them up.
+
+    ``Active`` holds the server clock despite its label; see ``STATUS_LABELS``.
+    """
+    return {
+        "Active": as_sheet_text(status.server_time),
+        "Sat": status.satisfaction.display(),
+        "NLR": status.nlr.display(),
+        "SE": status.se.display(),
+        "GDP": status.gdp,
+        "Bits": status.funds,
+    }
+
+
+def _write_runs(
+    sheet: GoogleSheet,
+    tab: str,
+    column: str,
+    rows: Dict[str, int],
+    values: Dict[str, Any],
+) -> List[Tuple[str, List[Any]]]:
+    """Write ``values`` into ``column`` at ``rows``, one block per contiguous run.
+
+    Returns ``[(a1, [value, ...]), ...]`` describing what was sent, for the caller's report.
+    """
+    written: List[Tuple[str, List[Any]]] = []
+    for run in contiguous_runs(rows):
+        a1 = f"{column}{run[0][0]}:{column}{run[-1][0]}"
+        block = [values[label] for _row, label in run]
+        sheet.write(tab, a1, [[value] for value in block])
+        written.append((a1, block))
+    return written
+
+
+@dataclass(frozen=True)
+class Report:
+    """What a ``snapshot`` actually wrote, for the standalone diagnostic to print."""
+
+    nation_writes: List[Tuple[str, List[Any]]] = field(default_factory=list)
+    dashboard_writes: List[Tuple[str, List[Any]]] = field(default_factory=list)
+    timestamp: Optional[str] = None
+
+
 def snapshot(
     sheet: GoogleSheet,
     nation: str,
-    resources: Dict[str, int],
-    server_time: str,
-) -> List[Tuple[str, int]]:
-    """Write ``R11:R16`` and the ``W10`` stamp; return the six ``(label, qty)`` pairs recorded.
+    stock: Stockpiles,
+    status: NationStatus,
+) -> Tuple[Report, List[str]]:
+    """Write both sheet regions from one already-parsed page. Returns ``(report, problems)``.
 
-    Both writes are unconditional. An earlier draft compared against the sheet's current values and
-    skipped the block write when they already matched, but an unreadable cell (``#REF!``, a stray
-    label) normalises to ``0`` and so would compare equal for a good the nation holds none of --
-    leaving the garbage in place while ``W10`` declared the row freshly verified. Overwriting always
-    costs one endpoint call and removes that hole.
+    Each region is located, then written only if its lookup was clean. A region with problems is
+    skipped entirely -- for the nation tab that includes its timestamp, because a fresh stamp over
+    stale numbers is worse than an obviously stale one. The other region still runs: they guard
+    different parts of the sheet and one being unwritable says nothing about the other.
 
-    ``W10`` therefore reads as *last verified* rather than *last changed*: an old stamp means the
-    snapshot has stopped running, not merely that nothing has moved. It is written **after** the
-    values, so it can never claim freshness for a block write that failed. The reverse partial
-    failure -- values written, stamp not -- leaves fresh numbers under an old stamp, which
-    understates freshness rather than overstating it, and the next run repairs it.
+    Writes are unconditional; see the module docstring for why diff-and-skip was rejected.
 
-    The caller must have run ``check_labels`` and got no problems. This function trusts the rows.
+    A ``SheetError`` from the endpoint propagates. That is not a layout problem -- it means the
+    connection is down, and the caller aborts rather than retrying the other half.
     """
-    wanted = desired_stock(resources)
-    sheet.write(nation, VALUE_RANGE, [[value] for value in wanted])
-    sheet.write_cell(nation, TIMESTAMP_CELL, as_sheet_text(server_time))
-    return [(label, value) for (label, _), value in zip(STOCK_ROWS, wanted)]
+    problems: List[str] = []
+    nation_writes: List[Tuple[str, List[Any]]] = []
+    dashboard_writes: List[Tuple[str, List[Any]]] = []
+    stamped: Optional[str] = None
+
+    nation_grid = sheet.read(nation, NATION_SCAN_RANGE)
+    block, nation_problems = locate_nation_block(nation_grid)
+    problems.extend(nation_problems)
+    if block is not None:
+        current_stamp = _cell(nation_grid, block.header_row - 1, _TIMESTAMP_OFFSET)
+        stamp_problem = timestamp_problem(block.timestamp_cell, current_stamp)
+        if stamp_problem:
+            problems.append(stamp_problem)
+        else:
+            values = {
+                good.stock_label: stock.get(good.game_name)
+                for good in GOODS
+                if good.stock_label
+            }
+            nation_writes = _write_runs(sheet, nation, block.value_column, block.rows, values)
+            # After the values, never before: it can then never claim freshness for a failed write.
+            sheet.write_cell(nation, block.timestamp_cell, as_sheet_text(status.server_time))
+            stamped = status.server_time
+
+    dashboard_grid = sheet.read(DASHBOARD_TAB, DASHBOARD_SCAN_RANGE)
+    dashboard, dashboard_problems = locate_dashboard_block(dashboard_grid, nation)
+    problems.extend(dashboard_problems)
+    if dashboard is not None:
+        values = status_values(status)
+        for good in GOODS:
+            values[good.dashboard_label] = stock.get(good.game_name)
+        dashboard_writes = _write_runs(
+            sheet, DASHBOARD_TAB, dashboard.column, dashboard.rows, values
+        )
+
+    return Report(nation_writes, dashboard_writes, stamped), problems
 
 
 def _standalone() -> int:
-    """Login, read overview, and report the six quantities and the label check. Writes nothing."""
+    """Login, read overview, and report what a real run would write. Writes nothing."""
     import os
-    import sys
 
     from clop_monitor import ClopClient, DEFAULT_BASE_URL, load_env_file, popup_failure
+    from overview import require_valid_overview
     from sheets import DEFAULT_ENV_PATH, startup_check
 
     env = load_env_file(DEFAULT_ENV_PATH)
@@ -205,50 +415,63 @@ def _standalone() -> int:
     client.login()
     html = client._open("overview.php")
     require_valid_overview(html)
-    wanted = desired_stock(parse_overview_resources(html))
-    problems = check_labels(sheet, nation)
+    stock = Stockpiles.from_overview(html)
+    status = NationStatus.from_overview(html)
 
-    # The snapshot itself never reads these; they are shown here only so a human can see what a run
-    # would change. One extra read is fine in a diagnostic invoked by hand.
-    # Shown as text, not normalised through cell_int: a diagnostic should surface whatever is
-    # actually in the cell (including junk) rather than launder it into a plausible number.
-    stored = [str(row[0]) if row and row[0] is not None else "" for row in
-              sheet.read(nation, VALUE_RANGE)]
-    stored += [""] * (len(STOCK_ROWS) - len(stored))
+    nation_grid = sheet.read(nation, NATION_SCAN_RANGE)
+    block, nation_problems = locate_nation_block(nation_grid)
+    dashboard_grid = sheet.read(DASHBOARD_TAB, DASHBOARD_SCAN_RANGE)
+    dashboard, dashboard_problems = locate_dashboard_block(dashboard_grid, nation)
+    problems = nation_problems + dashboard_problems
 
-    # Show the sheet's stamp beside the game's. They should read identically: if the sheet's has
-    # turned into a date, or kept a literal leading apostrophe, that is visible here and nowhere
-    # else -- the monitor writes W10 without ever reading it back. See as_sheet_text.
-    print(f"{'server time (game)':<20}{parse_server_time(html)}")
-    print(f"{TIMESTAMP_CELL + ' (sheet)':<20}{sheet.read_cell(nation, TIMESTAMP_CELL)}")
+    print(f"{'server time (game)':<22}{status.server_time}")
+
+    # Printing the resolved addresses is the point of this report: when the sheet has been
+    # rearranged, this is what shows a person where the script now thinks each block is.
+    print(f"\n--- nation tab {nation!r} ---")
+    if block is None:
+        print("  could not be located; see the problems below.")
+    else:
+        stamp = _cell(nation_grid, block.header_row - 1, _TIMESTAMP_OFFSET)
+        print(f"  {STOCK_HEADER} header row  {block.header_row}")
+        print(f"  {HAVE_HEADER} column      {block.value_column}")
+        print(f"  timestamp cell     {block.timestamp_cell} = {stamp!r}")
+        value_offset = _column_index(block.value_column) - NATION_FIRST_COLUMN
+        print(f"\n  {'cell':<7}{'label':<10}{'game resource':<20}{'overview':>12}{'sheet':>12}")
+        for stock_label, row in sorted(block.rows.items(), key=lambda item: item[1]):
+            good = BY_STOCK_LABEL[stock_label]
+            stored = _cell(nation_grid, row - 1, value_offset)
+            print(
+                f"  {block.value_column + str(row):<7}{stock_label:<10}"
+                f"{good.game_name:<20}{stock.get(good.game_name):>12}"
+                f"{'' if stored is None else str(stored):>12}"
+            )
+
+    print(f"\n--- {DASHBOARD_TAB} tab ---")
+    if dashboard is None:
+        print("  could not be located; see the problems below.")
+    else:
+        print(f"  column for {nation!r}: {dashboard.column}")
+        values = status_values(status)
+        for good in GOODS:
+            values[good.dashboard_label] = stock.get(good.game_name)
+        print(f"\n  {'cell':<8}{'label':<26}{'would write':>26}")
+        for label, row in sorted(dashboard.rows.items(), key=lambda item: item[1]):
+            cell = f"{dashboard.column}{row}"
+            print(f"  {cell:<8}{label:<26}{str(values[label]):>26}")
+
     if problems:
-        print(f"\nStock label check FAILED for {nation!r}:")
+        print(f"\nProblems ({len(problems)}) -- a real run would skip the affected region:")
         for problem in problems:
             print(f"  - {problem}")
-        print("\nThe row labels below may therefore be pointing at the wrong rows.")
-
-    print(f"\n{'row':<5}{'label':<8}{'game resource':<18}{'overview':>12}{'sheet':>12}")
-    for index, ((label, game_name), want) in enumerate(zip(STOCK_ROWS, wanted)):
-        row = f"R{STOCK_FIRST_ROW + index}"
-        print(f"{row:<5}{label:<8}{game_name:<18}{want:>12}{stored[index]:>12}")
-    # Both columns are printed raw so they line up digit for digit -- comma-formatting one side of a
-    # comparison makes an already-correct row look like a difference.
-    legend = "\n'overview' is what the game reports; 'sheet' is what the sheet holds right now."
-    if not problems:
-        # Only true when the labels check out: a failed check means a real run writes nothing.
-        legend += "\nA difference between them is normal -- it is what a real run would write."
-    print(legend)
-
-    if problems:
         popup_failure(
-            f"The sheet's STOCK labels are wrong on tab {nation!r}, so the monitor will refuse to "
-            "write the stockpile rows. Put Q11:Q16 back to apple, oil, coffee, mpart, vpart, gems "
-            "in that order.\n\n"
+            "The sheet layout is not what the stockpile snapshot expects, so it would skip the "
+            "affected region.\n\n"
             + "\n".join(f"- {problem}" for problem in problems)
         )
         return 1
-    print(f"\nStock label check passed for {nation!r}. "
-          "This is a read-only report -- it never writes to the sheet.")
+
+    print("\nBoth regions located. This is a read-only report -- it never writes to the sheet.")
     return 0
 
 
@@ -261,7 +484,13 @@ if __name__ == "__main__":
 
     try:
         sys.exit(_standalone())
-    except (StockpileError, MonitorError, OverviewError, SheetError) as error:
+    except (
+        StockpileError,
+        NationStatusError,
+        MonitorError,
+        OverviewError,
+        SheetError,
+    ) as error:
         # A dialog, not a terminal line: this script is what the monitor's own popups tell people
         # to run, so it must not fail in a way only a terminal-watcher would notice.
         popup_failure(f"The stock check failed: {error}")
