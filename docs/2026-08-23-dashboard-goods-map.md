@@ -1,0 +1,94 @@
+# Dashboard goods map (`Dashboard!A10:A42` → game resource)
+
+Reference for anything that reads or writes the shared sheet's **`Dashboard`** tab by row position.
+Row order there is data, not decoration — the same rule `stockpiles.py` follows for `Q11:Q16` — so
+this table is what a label check would be written against.
+
+## What the tab looks like
+
+`Dashboard!A1` reads `READ ONLY`: the grid is formula-driven and pulls from the per-nation tabs.
+Row 1 is the header — `A` = row label, `B` = `TOTAL`, and `C` onward one column per nation tab
+(`LePone(Z)`, `quaity(P)`, `Pure Apple Acres(B)`, `Republic(B)`, `Solarium(Z)`, `GLA(S)`,
+`Fish Bucket(S)`, `Vladihoofstock(Z)`, `Buenos Mares(B)`, and an `#N/A` spare in `L`).
+
+Rows 2–8 are nation status (`Active`, `Sat`, `NLR`, `SE`, `GDP`, `Bits`). The **goods block is
+`A10:A42`**. Rows 6, 9, 21 and 28 are blank spacers, and nothing follows row 42.
+
+## The mapping
+
+The "game name" column is `resourcedefs.name` from the game's seed data
+(`clop/tables with data.sql`) — the exact string that appears in the Resources panel of
+`overview.php`, which is what `stockpiles.parse_overview_resources` keys on.
+
+| Cell | Name on sheet | Name in game (overview.php) | `resource_id` |
+|---|---|---|---|
+| A10 | Energy | Energy | 4 |
+| A11 | Apples | Apples | 3 |
+| A12 | Coffee | Coffee | 20 |
+| A13 | Oil | Oil | 1 |
+| A14 | Gas | Gasoline | 25 |
+| A15 | Gems | Gems | 26 |
+| A16 | Cider | Cider | 18 |
+| A17 | Pies | Pies | 13 |
+| A18 | Toys | Toys | 47 |
+| A19 | Tungsten | Tungsten | 27 |
+| A20 | Plastics | Plastics | 28 |
+| A21 | *(blank spacer)* | — | — |
+| A22 | Drugs | Drugs | 42 |
+| A23 | Copper | Copper | 2 |
+| A24 | M Parts | Machinery Parts | 10 |
+| A25 | V Parts | Vehicle Parts | 9 |
+| A26 | P Parts | Precision Parts | 29 |
+| A27 | Composites | Composites | 30 |
+| A28 | *(blank spacer)* | — | — |
+| A29 | Forbidden Research | Forbidden Research | 75 |
+| A30 | Apotheosis Serum | Apotheosis Serum | 77 |
+| A31 | DNA - Burro - Central | DNA - Central Burrozil | 69 |
+| A32 | DNA - Burro - North | DNA - North Burrozil | 68 |
+| A33 | DNA - Burro - South | DNA - South Burrozil | 70 |
+| A34 | DNA - Prze - Central | DNA - Central Przewalskia | 72 |
+| A35 | DNA - Prze - North | DNA - North Przewalskia | 71 |
+| A36 | DNA - Prze - South | DNA - South Przewalskia | 73 |
+| A37 | DNA - Saddle - Central | DNA - Central Saddle Arabia | 63 |
+| A38 | DNA - Saddle - North | DNA - North Saddle Arabia | 62 |
+| A39 | DNA - Saddle - South | DNA - South Saddle Arabia | 64 |
+| A40 | DNA - Zebrica - Central | DNA - Central Zebrica | 66 |
+| A41 | DNA - Zebrica - North | DNA - North Zebrica | 65 |
+| A42 | DNA - Zebrica - South | DNA - South Zebrica | 67 |
+
+**The coverage is exact.** The 31 labelled rows are all 31 rows of `resourcedefs` with
+`is_building = 0` — every good in the game, no omissions, no rows on the sheet that do not
+correspond to a resource. So a reader can treat this block as the complete goods list.
+
+## Notes on the four abbreviations
+
+`Gas`, `M Parts`, `V Parts` and `P Parts` are the only labels that are not the game name verbatim,
+and each has exactly one candidate in `resourcedefs`:
+
+- `Gas` → `Gasoline` (25). The only good whose name begins "Gas"; `Gems` is separately listed at A15.
+- `M Parts` → `Machinery Parts` (10) — the only `* Parts` beginning with M.
+- `V Parts` → `Vehicle Parts` (9) — likewise the only one beginning with V.
+- `P Parts` → `Precision Parts` (29) — the only `* Parts` beginning with P. `Pies` (A17) is a
+  separate row and not a "Parts" good, so there is no clash.
+
+The DNA rows reverse the game's word order (`DNA - <direction> <region>` becomes
+`DNA - <region> - <direction>`) and abbreviate two regions: `Burro` = Burrozil, `Prze` =
+Przewalskia, with `Saddle` = Saddle Arabia and `Zebrica` unabbreviated. The sheet groups them
+region-first then direction, which is *not* the order `overview.php` renders them in (see below).
+
+## Relationship to the other two orderings
+
+Three different orders are in play; do not assume any one of them matches another.
+
+1. **`Dashboard!A10:A42`** — this table. Hand-arranged by topic (fuels and food, then parts, then
+   the endgame/DNA block), not alphabetical.
+2. **The `overview.php` Resources panel** — `backend_overview.php` selects `ORDER BY rd.name`, but
+   that order is discarded: the rows go into a name-keyed PHP array which `overview.php` then
+   `ksort()`s. The result is *byte-order* alphabetical (case-sensitive ASCII), so e.g. all
+   `DNA - …` rows sort Central → North → South within each region and land before `Drugs`
+   (uppercase `N` precedes lowercase `r`). Only goods the nation actually holds a `resources` row
+   for are rendered, plus any padded in from the required/affected maps — a good at zero with no
+   production or consumption is simply absent from the page.
+3. **A nation tab's `Q11:Q16` STOCK block** — a six-row subset with its own lowercase labels
+   (`apple`, `oil`, `coffee`, `mpart`, `vpart`, `gems`), defined by `STOCK_ROWS` in `stockpiles.py`.
+   These labels are **not** the Dashboard's labels; the two lists were written separately.
