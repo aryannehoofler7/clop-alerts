@@ -50,9 +50,9 @@ def nation_grid(header_row=10, have_at=1, labels=None, stamp="2026-08-23 11:42:1
 GOODS_LABELS = [
     "Energy", "Apples", "Coffee", "Oil", "Gas", "Gems", "Cider", "Pies", "Toys",
     "Tungsten", "Plastics",
-    "",  # spacer, row 21
-    "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites",
     "",  # spacer, row 28
+    "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites",
+    "",  # spacer, row 35
     "Forbidden Research", "Apotheosis Serum",
     "DNA - Burro - Central", "DNA - Burro - North", "DNA - Burro - South",
     "DNA - Prze - Central", "DNA - Prze - North", "DNA - Prze - South",
@@ -62,11 +62,16 @@ GOODS_LABELS = [
 
 NATIONS = ["READ ONLY", "TOTAL", "LePone(Z)", "quaity(P)", "Pure Apple Acres(B)", "#N/A"]
 
+#: The blank rows in the live layout. Nothing may ever be written into one of these.
+SPACER_ROWS = (6, 13, 16, 28, 35)
+
 
 def dashboard_grid(nations=None, labels=None, offset=0):
-    """The Dashboard as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels.
+    """The alliance tab as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels.
 
-    ``offset`` inserts that many blank rows below row 1, moving the whole block down.
+    This is the live layout as of 2026-08-24: status rows 2-5, the tick block 7-12, GDP/Bits 14-15,
+    then the goods from 17. ``offset`` inserts that many blank rows below row 1, moving the whole
+    block down -- which nothing should notice, because every row is found by its label.
     """
     nations = NATIONS if nations is None else nations
     labels = GOODS_LABELS if labels is None else labels
@@ -77,9 +82,16 @@ def dashboard_grid(nations=None, labels=None, offset=0):
     grid.append(["NLR"])
     grid.append(["SE"])
     grid.append([""])          # spacer row 6
+    grid.append(["Apple - tick"])
+    grid.append(["Oil - tick"])
+    grid.append(["Coffee - tick"])
+    grid.append(["M Part - tick"])
+    grid.append(["V Part - tick"])
+    grid.append(["Gems - tick"])
+    grid.append([""])          # spacer row 13
     grid.append(["GDP"])
     grid.append(["Bits"])
-    grid.append([""])          # spacer row 9
+    grid.append([""])          # spacer row 16
     grid.extend([[label] for label in labels])
     return grid
 
@@ -187,17 +199,20 @@ class LocateDashboardBlockTests(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(block.column, "C")
         self.assertEqual(block.rows["Active"], 2)
-        self.assertEqual(block.rows["Bits"], 8)
-        self.assertEqual(block.rows["Energy"], 10)
-        self.assertEqual(block.rows["Plastics"], 20)
-        self.assertEqual(block.rows["Drugs"], 22)
-        self.assertEqual(block.rows["Composites"], 27)
-        self.assertEqual(block.rows["Forbidden Research"], 29)
-        self.assertEqual(block.rows["DNA - Zebrica - South"], 42)
+        self.assertEqual(block.rows["Apple - tick"], 7)
+        self.assertEqual(block.rows["Gems - tick"], 12)
+        self.assertEqual(block.rows["GDP"], 14)
+        self.assertEqual(block.rows["Bits"], 15)
+        self.assertEqual(block.rows["Energy"], 17)
+        self.assertEqual(block.rows["Plastics"], 27)
+        self.assertEqual(block.rows["Drugs"], 29)
+        self.assertEqual(block.rows["Composites"], 34)
+        self.assertEqual(block.rows["Forbidden Research"], 36)
+        self.assertEqual(block.rows["DNA - Zebrica - South"], 49)
 
-    def test_all_thirty_seven_labels_located(self):
+    def test_all_forty_three_labels_located(self):
         block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
-        self.assertEqual(len(block.rows), 37)
+        self.assertEqual(len(block.rows), 43)   # 6 status + 6 tick + 31 goods
         self.assertEqual(set(block.rows), set(DASHBOARD_LABELS))
 
     def test_another_nations_column(self):
@@ -208,7 +223,7 @@ class LocateDashboardBlockTests(unittest.TestCase):
         block, problems = locate_dashboard_block(dashboard_grid(offset=3), "LePone(Z)")
         self.assertEqual(problems, [])
         self.assertEqual(block.rows["Active"], 5)
-        self.assertEqual(block.rows["Energy"], 13)
+        self.assertEqual(block.rows["Energy"], 20)
 
     def test_nation_not_found_names_row_one(self):
         block, problems = locate_dashboard_block(dashboard_grid(), "Nowhere(X)")
@@ -240,13 +255,15 @@ class LocateDashboardBlockTests(unittest.TestCase):
     def test_spacer_rows_are_not_labels(self):
         block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
         located = set(block.rows.values())
-        for spacer in (6, 9, 21, 28):
+        for spacer in SPACER_ROWS:
             self.assertNotIn(spacer, located)
 
     def test_runs_from_todays_layout_skip_the_spacers(self):
         block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
         spans = [(run[0][0], run[-1][0]) for run in contiguous_runs(block.rows)]
-        self.assertEqual(spans, [(2, 5), (7, 8), (10, 20), (22, 27), (29, 42)])
+        self.assertEqual(
+            spans, [(2, 5), (7, 12), (14, 15), (17, 27), (29, 34), (36, 49)]
+        )
 
 
 STATUS = NationStatus(
@@ -260,7 +277,14 @@ STATUS = NationStatus(
     server_time="2026-08-23 11:42:12",
 )
 
-STOCK = Stockpiles({"Apples": 1226, "Oil": 80, "Gems": 6, "Toys": 4})
+STOCK = Stockpiles(
+    {"Apples": 1226, "Oil": 80, "Gems": 6, "Toys": 4},
+    # Ticks-Worth as the game prints it: a number, or one of its two words.
+    {"Apples": 13, "Oil": "N/A", "Gems": "NONE", "Toys": 2},
+)
+
+#: A page with no Ticks-Worth column at all -- ticks unknown rather than zero.
+STOCK_NO_TICKS = Stockpiles({"Apples": 1226, "Oil": 80, "Gems": 6, "Toys": 4})
 
 
 class FakeSheet:
@@ -331,11 +355,13 @@ class SnapshotTests(unittest.TestCase):
         self.run_snapshot(sheet)
         self.assertEqual(sheet.cells, [("LePone(Z)", "W10", as_sheet_text(STATUS.server_time))])
 
-    def test_dashboard_written_as_five_runs(self):
+    def test_dashboard_written_as_six_runs(self):
         sheet = FakeSheet()
         self.run_snapshot(sheet)
         ranges = [block[1] for block in sheet.blocks if block[0] == DASHBOARD_TAB]
-        self.assertEqual(ranges, ["C2:C5", "C7:C8", "C10:C20", "C22:C27", "C29:C42"])
+        self.assertEqual(
+            ranges, ["C2:C5", "C7:C12", "C14:C15", "C17:C27", "C29:C34", "C36:C49"]
+        )
 
     def test_dashboard_status_run_payload(self):
         sheet = FakeSheet()
@@ -350,7 +376,18 @@ class SnapshotTests(unittest.TestCase):
                 ["-120 (3)"],
             ],
         )
-        self.assertEqual(payload["C7:C8"], [[60900], [1234567]])
+        self.assertEqual(payload["C14:C15"], [[60900], [1234567]])
+
+    def test_dashboard_tick_run_payload(self):
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
+        # Apple, Oil, Coffee, M Part, V Part, Gems -- the sheet's order, and the game's own words
+        # where it does not print a number. Coffee/M Part/V Part are not on the page at all, which
+        # the game itself would render as "N/A".
+        self.assertEqual(
+            payload["C7:C12"], [[13], ["N/A"], ["N/A"], ["N/A"], ["N/A"], ["NONE"]]
+        )
 
     def test_dashboard_goods_run_payload(self):
         sheet = FakeSheet()
@@ -358,7 +395,7 @@ class SnapshotTests(unittest.TestCase):
         payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
         # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
         self.assertEqual(
-            payload["C10:C20"],
+            payload["C17:C27"],
             [[0], [1226], [0], [80], [0], [6], [0], [0], [4], [0], [0]],
         )
 
@@ -366,17 +403,32 @@ class SnapshotTests(unittest.TestCase):
         sheet = FakeSheet()
         self.run_snapshot(sheet)
         payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
-        self.assertEqual(payload["C29:C42"], [[0]] * 14)
+        self.assertEqual(payload["C36:C49"], [[0]] * 14)
+
+    def test_no_ticks_column_leaves_the_tick_rows_alone(self):
+        # "We could not read it" and "you have none" are different claims. The tick rows keep
+        # whatever they held, everything else is still written, and a problem is reported.
+        sheet = FakeSheet()
+        _report, problems = snapshot(sheet, "LePone(Z)", STOCK_NO_TICKS, STATUS)
+        ranges = [block[1] for block in sheet.blocks if block[0] == DASHBOARD_TAB]
+        self.assertNotIn("C7:C12", ranges)
+        self.assertIn("C2:C5", ranges)
+        self.assertIn("C17:C27", ranges)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Ticks-Worth", problems[0])
 
     def test_spacer_rows_never_written(self):
         sheet = FakeSheet()
         self.run_snapshot(sheet)
         touched = set()
-        for _tab, a1, _values in sheet.blocks:
+        for tab, a1, _values in sheet.blocks:
+            if tab != DASHBOARD_TAB:
+                continue          # the nation tab has its own rows; SPACER_ROWS is this tab's
             first, last = a1.split(":")
             touched.update(range(int(first[1:]), int(last[1:]) + 1))
-        for spacer in (6, 9, 21, 28):
+        for spacer in SPACER_ROWS:
             self.assertNotIn(spacer, touched)
+        self.assertTrue(touched)  # ...and it did write something, so this is not vacuously true
 
     def test_dashboard_problem_does_not_stop_the_nation_tab(self):
         sheet = FakeSheet(dashboard=dashboard_grid(nations=["READ ONLY", "TOTAL"]))
@@ -416,7 +468,7 @@ class SnapshotTests(unittest.TestCase):
         report, _problems = self.run_snapshot(sheet)
         self.assertEqual(report.timestamp, "2026-08-23 11:42:12")
         self.assertEqual(len(report.nation_writes), 1)
-        self.assertEqual(len(report.dashboard_writes), 5)
+        self.assertEqual(len(report.dashboard_writes), 6)
 
 
 if __name__ == "__main__":

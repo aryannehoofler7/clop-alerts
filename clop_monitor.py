@@ -1859,9 +1859,10 @@ def sync_sheet_step(
         _report, stock_problems = snapshot(sheet, nation, stock, status)
         if stock_problems:
             notifier.notify_failure(
-                "Stockpile snapshot: part of the sheet was not written because its layout is not "
-                "what the script expects. The affected region is untouched and its timestamp will "
-                "now go stale. Run 'python stockpiles.py' to recheck once the sheet is fixed.\n\n"
+                "Stockpile snapshot: some cells were not written, for the reasons below. Anything "
+                "not mentioned was updated as usual; a region that was skipped is untouched, and "
+                "its timestamp will now go stale on purpose. Run 'python stockpiles.py' for a "
+                "read-only report of where the script currently thinks each block is.\n\n"
                 + "\n".join(f"- {problem}" for problem in stock_problems)
             )
     except (

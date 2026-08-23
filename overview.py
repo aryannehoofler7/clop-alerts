@@ -6,8 +6,10 @@ row shape: a right-aligned name cell followed by a cell whose ``<span>`` holds t
 
     <td style="text-align: right;">Apples</td><td><span class="text-success">226</span></td>
 
-``parse_panel`` captures the value cell's first ``<span>``; ``parse_panel_text`` captures the whole
-cell instead, which the Nation panel needs. Both arm through the same heading rule.
+Three readings of that value side are available, all arming through the same heading rule:
+``parse_panel`` takes the first ``<span>`` of the first value cell, ``parse_panel_text`` takes that
+whole cell (the Nation panel's per-tick figures need it), and ``parse_panel_cells`` takes every
+value cell in the row (the Resources panel's Generated / Used / Net / Ticks-Worth columns).
 
 ``PanelParser`` arms only after the ``panel-heading`` div whose text matches the heading it was
 given, and stops at that panel's ``</table>``, so the identically-shaped sibling panels are not
@@ -38,26 +40,40 @@ tell the reader nothing has been. Keep it that way -- call it as soon as the pag
 from __future__ import annotations
 
 from html.parser import HTMLParser
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
+
+
+#: How much of a row's value side to capture. ``span`` takes the first ``<span>`` of the first value
+#: cell (Resources, Buildings); ``cell`` takes that whole cell (the Nation panel's per-tick figures);
+#: ``cells`` takes every value cell in the row (the Resources panel's Generated/Used/Net/Ticks-Worth
+#: columns). All three arm through the same heading rule.
+MODES = ("span", "cell", "cells")
 
 
 class PanelParser(HTMLParser):
-    """Collect ``[(name, value_text), ...]`` from the overview panel headed ``heading``."""
+    """Collect ``[(name, value), ...]`` from the overview panel headed ``heading``.
 
-    def __init__(self, heading: str, cell_text: bool = False) -> None:
+    ``value`` is a string in ``span`` and ``cell`` mode, and a list of the row's value cells in
+    ``cells`` mode.
+    """
+
+    def __init__(self, heading: str, mode: str = "span") -> None:
         super().__init__(convert_charrefs=True)
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self._heading = heading
-        self._cell_text = cell_text
+        self._mode = mode
         self._in_heading = False
         self._heading_buf: List[str] = []
         self._pending_table = False
         self._in_table = False
-        self._capture: Optional[str] = None  # "name" | "value" | None
+        self._capture: Optional[str] = None  # "name" | "value" | "cell" | None
         self._name: Optional[str] = None
         self._value: Optional[str] = None
+        self._cells: List[str] = []
         self._buf: List[str] = []
         self.found = False
-        self.rows: List[Tuple[str, str]] = []
+        self.rows: List[Tuple[str, Any]] = []
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
         attr = dict(attrs)
@@ -73,19 +89,21 @@ class PanelParser(HTMLParser):
             return
         if tag == "tr":
             self._name = self._value = None
+            self._cells = []
         elif tag == "td" and "text-align: right" in (attr.get("style") or "") and self._name is None:
             self._capture = "name"
             self._buf = []
         elif (
-            self._cell_text
-            and tag == "td"
+            tag == "td"
             and self._name is not None
-            and self._value is None
+            and self._mode in ("cell", "cells")
+            # "cell" wants only the first value cell; "cells" wants every one of them.
+            and (self._mode == "cells" or self._value is None)
         ):
             self._capture = "cell"
             self._buf = []
         elif (
-            not self._cell_text
+            self._mode == "span"
             and tag == "span"
             and self._name is not None
             and self._value is None
@@ -114,13 +132,19 @@ class PanelParser(HTMLParser):
         elif tag == "td" and self._capture == "cell":
             # The whole cell, tags stripped and whitespace collapsed. Nested tags contribute their
             # text and do not end capture -- only this cell's own </td> does.
-            self._value = " ".join("".join(self._buf).split())
+            text = " ".join("".join(self._buf).split())
+            self._cells.append(text)
+            if self._value is None:
+                self._value = text
             self._capture = None
         elif tag == "span" and self._capture == "value":
             self._value = "".join(self._buf).strip()
             self._capture = None
         elif tag == "tr":
-            if self._name and self._value is not None:
+            if self._mode == "cells":
+                if self._name and self._cells:
+                    self.rows.append((self._name, list(self._cells)))
+            elif self._name and self._value is not None:
                 self.rows.append((self._name, self._value))
         elif tag == "table":
             self._in_table = False
@@ -151,7 +175,27 @@ def parse_panel_text(html: str, heading: str) -> List[Tuple[str, str]]:
     ``panel-heading`` div whose text matches exactly" rule lives there, and it is what stops a
     favourite action named ``Nation`` impersonating the Nation panel.
     """
-    parser = PanelParser(heading, cell_text=True)
+    parser = PanelParser(heading, mode="cell")
+    parser.feed(html)
+    return parser.rows
+
+
+def parse_panel_cells(html: str, heading: str) -> List[Tuple[str, List[str]]]:
+    """Return ``[(name, [cell_text, ...]), ...]`` -- every value cell of every row.
+
+    The Resources panel is seven columns wide (Qty, Generated, Used, Loss, Net, Ticks-Worth after
+    the name), and ``parse_panel`` only ever sees the first. This is how the later columns are read.
+
+    The panel's ``<thead>`` row comes back like any other, as
+    ``("Resource", ["Qty", "Generated", "Used", "Loss", "Net", "Ticks-Worth"])`` -- which is what
+    lets a caller find a column *by its heading* instead of counting cells. Do that rather than
+    indexing a fixed position; the game has changed this table's shape before.
+
+    The leading icon cell has no ``text-align: right`` so it is never mistaken for the name, and it
+    is dropped in both the header row and the data rows -- so the columns line up whether or not the
+    nation has ``hideicons`` set.
+    """
+    parser = PanelParser(heading, mode="cells")
     parser.feed(html)
     return parser.rows
 

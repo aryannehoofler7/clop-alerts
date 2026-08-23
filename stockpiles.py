@@ -5,8 +5,9 @@ Two regions are written from one read of ``overview.php``:
 
 1. the player's own **nation tab** -- the six goods in the ``STOCK`` block's ``HAVE`` column, plus
    the timestamp beside the header;
-2. the alliance-wide **Dashboard tab** -- the nation's own column: all 31 goods and six status rows
-   (``Active``, ``Sat``, ``NLR``, ``SE``, ``GDP``, ``Bits``).
+2. the alliance-wide **Dashboard-Stockpile tab** -- the nation's own column: all 31 goods, six
+   status rows (``Active``, ``Sat``, ``NLR``, ``SE``, ``GDP``, ``Bits``), and six ``<good> - tick``
+   rows carrying the Resources panel's Ticks-Worth column.
 
 The parsing lives elsewhere and happens once: ``goods.Stockpiles`` and ``nation.NationStatus`` are
 handed in already built, so nothing here re-fetches or re-parses the page.
@@ -44,7 +45,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from goods import (  # re-exported: clop_monitor and the diagnostics import them from here
     BY_STOCK_LABEL,
+    BY_TICK_LABEL,
     GOODS,
+    TICKS_HEADING,
     StockpileError,
     Stockpiles,
     parse_overview_resources,
@@ -74,18 +77,24 @@ TIMESTAMP_COLUMN = "W"
 #: 0-based offset of column W within a NATION_SCAN_RANGE row (Q=0, R=1, ... W=6).
 _TIMESTAMP_OFFSET = 6
 
-DASHBOARD_TAB = "Dashboard"
+#: The alliance-wide tab. Renamed from "Dashboard" on 2026-08-24; the tab name is the only thing
+#: about that sheet this module hardcodes, because it is the one thing no lookup can find for us.
+DASHBOARD_TAB = "Dashboard-Stockpile"
 
-#: Row 1 holds the nation names, column A the row labels; 60 rows covers the block with room.
-DASHBOARD_SCAN_RANGE = "A1:Z60"
+#: Row 1 holds the nation names, column A the row labels; 80 rows covers the block with room.
+DASHBOARD_SCAN_RANGE = "A1:Z80"
 
-#: The Dashboard's non-goods rows, in the order they appear. ``Active`` holds a last-updated
-#: timestamp despite its label -- the sheet owner's instruction, recorded so it is not "fixed".
+#: The tab's non-goods rows. ``Active`` holds a last-updated timestamp despite its label -- the
+#: sheet owner's instruction, recorded so it is not "fixed".
 STATUS_LABELS: Tuple[str, ...] = ("Active", "Sat", "NLR", "SE", "GDP", "Bits")
 
-#: Every label this module expects to find in the Dashboard's column A: 6 status + 31 goods.
-DASHBOARD_LABELS: Tuple[str, ...] = STATUS_LABELS + tuple(
-    good.dashboard_label for good in GOODS
+#: The "<good> - tick" rows: how many ticks the nation's stock of each lasts. Same six goods as the
+#: nation tab's STOCK block, under labels of their own again.
+TICK_LABELS: Tuple[str, ...] = tuple(good.tick_label for good in GOODS if good.tick_label)
+
+#: Every label this module expects in column A: 6 status + 6 tick + 31 goods.
+DASHBOARD_LABELS: Tuple[str, ...] = (
+    STATUS_LABELS + TICK_LABELS + tuple(good.dashboard_label for good in GOODS)
 )
 
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
@@ -307,6 +316,27 @@ def status_values(status: NationStatus) -> Dict[str, Any]:
     }
 
 
+def dashboard_values(
+    stock: Stockpiles,
+    status: NationStatus,
+    rows: Dict[str, int],
+) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    """Return ``(values, writable_rows)`` for the alliance tab.
+
+    ``writable_rows`` is ``rows`` minus anything there is no value for. In practice that is only
+    the ``- tick`` block, and only when overview.php had no ``Ticks-Worth`` column: those rows are
+    then left exactly as they are rather than being zeroed, because "we could not read it" and
+    "you have none" are different claims and only one of them is true.
+    """
+    values: Dict[str, Any] = status_values(status)
+    for good in GOODS:
+        values[good.dashboard_label] = stock.get(good.game_name)
+    if stock.ticks_worth is not None:
+        for label, good in BY_TICK_LABEL.items():
+            values[label] = stock.ticks(good.game_name)
+    return values, {label: row for label, row in rows.items() if label in values}
+
+
 def _write_runs(
     sheet: GoogleSheet,
     tab: str,
@@ -382,12 +412,15 @@ def snapshot(
     dashboard, dashboard_problems = locate_dashboard_block(dashboard_grid, nation)
     problems.extend(dashboard_problems)
     if dashboard is not None:
-        values = status_values(status)
-        for good in GOODS:
-            values[good.dashboard_label] = stock.get(good.game_name)
-        dashboard_writes = _write_runs(
-            sheet, DASHBOARD_TAB, dashboard.column, dashboard.rows, values
-        )
+        values, rows = dashboard_values(stock, status, dashboard.rows)
+        if len(rows) < len(dashboard.rows):
+            # Only the tick rows can be dropped, and only when the page had no such column.
+            problems.append(
+                f"overview.php has no {TICKS_HEADING} column, so the "
+                f"{len(dashboard.rows) - len(rows)} '- tick' rows were left alone. "
+                "Everything else on the tab was written."
+            )
+        dashboard_writes = _write_runs(sheet, DASHBOARD_TAB, dashboard.column, rows, values)
 
     return Report(nation_writes, dashboard_writes, stamped), problems
 
@@ -452,13 +485,12 @@ def _standalone() -> int:
         print("  could not be located; see the problems below.")
     else:
         print(f"  column for {nation!r}: {dashboard.column}")
-        values = status_values(status)
-        for good in GOODS:
-            values[good.dashboard_label] = stock.get(good.game_name)
+        values, writable = dashboard_values(stock, status, dashboard.rows)
         print(f"\n  {'cell':<8}{'label':<26}{'would write':>26}")
         for label, row in sorted(dashboard.rows.items(), key=lambda item: item[1]):
             cell = f"{dashboard.column}{row}"
-            print(f"  {cell:<8}{label:<26}{str(values[label]):>26}")
+            shown = str(values[label]) if label in writable else "(left alone)"
+            print(f"  {cell:<8}{label:<26}{shown:>26}")
 
     if problems:
         print(f"\nProblems ({len(problems)}) -- a real run would skip the affected region:")

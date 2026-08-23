@@ -5,6 +5,7 @@ import unittest
 
 import buildings
 from building_map import GAME_TO_SHEET, SHEET_BUILDINGS
+from stockpiles import DASHBOARD_TAB
 from buildings import (
     BuildingError,
     Correction,
@@ -17,12 +18,24 @@ from buildings import (
 
 
 # A minimal overview.php: a decoy resources panel with the same row shape, then the Buildings panel.
+# The Resources panel carries its real <thead>, because that header row is how the Ticks-Worth
+# column is located -- see goods._parse_resources_panel.
 OVERVIEW_HTML = """
 <div class="panel-heading">Resources</div>
-<table class="table"><tbody>
-  <tr><td style="text-align: right;">Copper</td><td><span class="text-success">201</span></td></tr>
-  <tr><td style="text-align: right;">Apples</td><td><span class="text-success">1,226</span></td></tr>
-  <tr><td style="text-align: right;">Gems</td><td><span class="text-success">6</span></td></tr>
+<table class="table">
+<thead><tr><td></td><td style="text-align: right;">Resource</td>
+  <td>Qty</td><td>Generated</td><td>Used</td><td>Loss</td><td>Net</td><td>Ticks-Worth</td>
+</tr></thead>
+<tbody>
+  <tr><td style="text-align: right;">Copper</td><td><span class="text-success">201</span></td>
+      <td><span>0</span></td><td><span>0</span></td><td><span>0</span></td><td><span>0</span></td>
+      <td><span class="text-success">N/A</span></td></tr>
+  <tr><td style="text-align: right;">Apples</td><td><span class="text-success">1,226</span></td>
+      <td><span>0</span></td><td><span>14</span></td><td><span>0</span></td><td><span>-14</span></td>
+      <td><span class="text-warning">87</span></td></tr>
+  <tr><td style="text-align: right;">Gems</td><td><span class="text-success">6</span></td>
+      <td><span>0</span></td><td><span>1</span></td><td><span>0</span></td><td><span>-1</span></td>
+      <td><span class="text-warning">6</span></td></tr>
 </tbody></table>
 <div class="panel-heading">Buildings</div>
 <table class="table"><tbody>
@@ -48,10 +61,13 @@ OVERVIEW_HTML = """
 """
 
 
-#: The Dashboard's column A, in the live order: four status rows, a spacer, two more, a spacer,
-#: then the 31 goods with their two spacers. Nation "T" sits in column C.
+#: The alliance tab's column A, in the live order: four status rows, the six "- tick" rows,
+#: GDP/Bits, then the 31 goods -- with a blank spacer between each block. Nation "T" is column C.
 DASHBOARD_COLUMN_A = (
-    ["Active", "Sat", "NLR", "SE", "", "GDP", "Bits", ""]
+    ["Active", "Sat", "NLR", "SE", ""]
+    + ["Apple - tick", "Oil - tick", "Coffee - tick",
+       "M Part - tick", "V Part - tick", "Gems - tick", ""]
+    + ["GDP", "Bits", ""]
     + ["Energy", "Apples", "Coffee", "Oil", "Gas", "Gems", "Cider", "Pies", "Toys",
        "Tungsten", "Plastics", "",
        "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites", "",
@@ -64,7 +80,7 @@ DASHBOARD_COLUMN_A = (
 
 
 def dashboard_grid(nations=("READ ONLY", "TOTAL", "T", "other(P)")):
-    """The Dashboard as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels."""
+    """The alliance tab as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels."""
     return [list(nations)] + [[label] for label in DASHBOARD_COLUMN_A]
 
 
@@ -104,7 +120,7 @@ class FakeSheet:
         self.blocks = []   # (a1, values) from write
 
     def read(self, tab, a1):
-        if tab == "Dashboard":
+        if tab == DASHBOARD_TAB:
             return self._dashboard
         if a1.startswith("Q"):
             # Q..W: the STOCK header at row 10 with HAVE beside it and the stamp in W, then the
@@ -419,10 +435,15 @@ class SyncSheetStepTests(unittest.TestCase):
             blocks["C2:C5"],
             [["'2026-08-23 03:23:44"], ["218 (-5)"], ["1500 (Ascending)"], ["-120 (3)"]],
         )
-        self.assertEqual(blocks["C7:C8"], [[60900], [1234567]])
+        self.assertEqual(blocks["C14:C15"], [[60900], [1234567]])
+        # Apple, Oil, Coffee, M Part, V Part, Gems -- the Ticks-Worth column, the game's own words
+        # where it prints one. Only Apples and Gems are on this page; the rest read as "N/A".
+        self.assertEqual(
+            blocks["C7:C12"], [[87], ["N/A"], ["N/A"], ["N/A"], ["N/A"], [6]]
+        )
         # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
         self.assertEqual(
-            blocks["C10:C20"], [[0], [1226], [0], [0], [0], [6], [0], [0], [0], [0], [0]]
+            blocks["C17:C27"], [[0], [1226], [0], [0], [0], [6], [0], [0], [0], [0], [0]]
         )
         # A routine snapshot is a scheduled refresh, not an event: no popup for it.
         self.assertEqual(notifier.failures, [])
@@ -616,9 +637,14 @@ class SyncSheetStepTests(unittest.TestCase):
                         '<li><a>Server time: 2026-08-23 03:23:44</a></li>'
                         + NATION_PANEL_HTML +
                         '<div class="panel-heading">Resources</div>'
-                        '<table class="table"><tbody>'
+                        '<table class="table">'
+                        '<thead><tr><td></td><td style="text-align: right;">Resource</td>'
+                        '<td>Qty</td><td>Generated</td><td>Used</td><td>Loss</td><td>Net</td>'
+                        '<td>Ticks-Worth</td></tr></thead><tbody>'
                         '<tr><td style="text-align: right;">Apples</td>'
-                        '<td><span class="text-success">7</span></td></tr>'
+                        '<td><span class="text-success">7</span></td>'
+                        '<td><span>0</span></td><td><span>1</span></td><td><span>0</span></td>'
+                        '<td><span>-1</span></td><td><span>7</span></td></tr>'
                         '</tbody></table>'
                         '<div class="panel-heading">Buildings</div>'
                         '<table class="table"><tbody></tbody></table></html>')
@@ -629,7 +655,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(notifier.failures, [])
         self.assertEqual(dict(sheet.blocks)["R11:R16"], [[7], [0], [0], [0], [0], [0]])
         self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
-        self.assertEqual(dict(sheet.blocks)["C7:C8"], [[60900], [1234567]])
+        self.assertEqual(dict(sheet.blocks)["C14:C15"], [[60900], [1234567]])
 
 
 if __name__ == "__main__":

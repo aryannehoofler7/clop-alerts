@@ -331,3 +331,49 @@ whose per-tick is bare text; it still arms only on an exact heading match.
   writes this tab.
 - `README.md` — the bullet list currently describes the six-good snapshot; extend it to both tabs.
 - This spec — already the design of record.
+
+---
+
+## Amendment, 2026-08-24 — rename, rearrange, and the tick rows
+
+The sheet changed the day after this was built. Recorded here rather than rewritten above, so the
+reasoning that produced the design stays legible next to what actually happened to it.
+
+**The tab was renamed** `Dashboard` → `Dashboard-Stockpile`, **and its blocks were moved**: the
+status rows kept 2-5, `GDP`/`Bits` went from 7-8 to 14-15, and the goods block from 10-42 to 17-49.
+
+The only code change either of those needed was the one constant, `stockpiles.DASHBOARD_TAB`. Every
+row and column is found by looking a label up, so the rearrangement was something the code simply
+followed — which is the payoff for the "no brittle hardcodes" decision in the original design, and
+worth noting because it was tested by reality within a day. A tab *name* is the one thing no lookup
+can recover for us, so it stays a constant with a comment saying why.
+
+**A new block was added at rows 7-12**: `Apple - tick`, `Oil - tick`, `Coffee - tick`,
+`M Part - tick`, `V Part - tick`, `Gems - tick` — how many ticks the nation's stock of each lasts.
+
+- The source is the **Ticks-Worth** column of overview's Resources panel (`overview.php:181`,
+  `$displayreserves`), which `parse_panel` structurally could not see: it captures only the first
+  `<span>` of a row. `overview.py` therefore gained a third mode, `cells`, and `parse_panel_cells`.
+- The column is located **by its heading**. The panel's `<thead>` row arrives through the parser
+  like any other row, as `("Resource", ["Qty", "Generated", "Used", "Loss", "Net", "Ticks-Worth"])`,
+  so the index is looked up rather than counted to. The icon cell has no `text-align: right`, so it
+  drops out of both the header and the data rows and the columns line up either way.
+- The quantity and the ticks-worth are two columns of the same row, so they are read in **one pass**
+  (`goods._parse_resources_panel`) and both live on the same `Stockpiles` object: `stock["Apples"]`
+  and `stock.ticks("Apples")`.
+- The value is written **as the game prints it** — a whole number, or the literal `N/A` (net is zero
+  or positive, so it never runs out) or `NONE` (already under one tick's worth). A good absent from
+  the page reads as `N/A`, which is what the game itself would render for it: `overview.php:176-181`
+  takes the `N/A` branch when the amount is not below the requirement and the net is not negative,
+  and a good with no requirement satisfies both.
+- If the panel has **no Ticks-Worth column at all**, the six rows are left exactly as they are and a
+  problem is reported. They are not zeroed: "could not read it" and "you have none" are different
+  claims, and only one of them would be true. Everything else on the tab is still written. This is
+  the same per-region independence the original design applies to the two tabs, one level finer.
+
+`DASHBOARD_LABELS` is now 43 labels — 6 status, 6 tick, 31 goods — and today's layout writes six
+contiguous runs rather than five.
+
+`Good` gained a fourth name, `tick_label`. Note it is a *third* vocabulary, not derivable from the
+others: the sheet says `M Part - tick` (singular) where its quantity row says `M Parts` (plural) and
+the nation tab says `mpart`.
