@@ -58,7 +58,11 @@ _SERVER_TIME_RE = re.compile(r"Server time:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{
 
 
 class StockpileError(RuntimeError):
-    """The overview page is not what the snapshot expects (no server-time stamp)."""
+    """The overview page is not what the snapshot expects.
+
+    Raised for a missing server-time stamp or an unreadable quantity. Both mean the same thing to
+    the caller: do not write anything to the sheet, and tell someone.
+    """
 
 
 def parse_overview_resources(html: str) -> Dict[str, int]:
@@ -66,15 +70,41 @@ def parse_overview_resources(html: str) -> Dict[str, int]:
 
     Only resources the nation has a row for are rendered, so a good it holds none of is absent from
     the result rather than present as zero; ``desired_stock`` is what turns that into a zero.
+
+    Raises ``StockpileError`` if a row's Qty is not a plain integer. Skipping such a row would be
+    the more dangerous choice: the good would fall through to zero and be written to the sheet as
+    "you hold none", stamped freshly verified. The game formats every Qty with its integer
+    ``commas()`` helper, so anything else means the page changed and a human should look.
     """
     result: Dict[str, int] = {}
     for name, value_text in parse_panel(html, "Resources"):
         text = value_text.replace(",", "").strip()
-        if re.fullmatch(r"-?\d+", text):
-            result[name] = int(text)
+        if not re.fullmatch(r"-?\d+", text):
+            raise StockpileError(
+                f"resource {name!r} has an unreadable quantity {value_text!r} on overview.php"
+            )
+        result[name] = int(text)
     return result
 
 
 def desired_stock(resources: Dict[str, int]) -> List[int]:
     """Return the six quantities in sheet row order; a good absent from overview is zero."""
     return [resources.get(game_name, 0) for _, game_name in STOCK_ROWS]
+
+
+def parse_server_time(html: str) -> str:
+    """Return the ``YYYY-MM-DD HH:MM:SS`` stamp from the page header, exactly as rendered.
+
+    This is the game server's own clock (``date("Y-m-d H:i:s")`` in ``clop/header.php``), shown on
+    every logged-in page. It goes into the sheet unparsed and unconverted, so the sheet shows the
+    same wall-clock the game shows and no timezone has to be assumed anywhere.
+
+    Raises ``StockpileError`` when the stamp is absent: a page without it is not the page we think
+    it is, and a snapshot with no staleness marker is worse than no snapshot.
+    """
+    match = _SERVER_TIME_RE.search(html)
+    if not match:
+        raise StockpileError(
+            "no 'Server time:' stamp on the page -- is this a logged-in CLOP page?"
+        )
+    return match.group(1)
