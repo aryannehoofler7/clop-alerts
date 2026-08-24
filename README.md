@@ -721,6 +721,25 @@ was still in flight*. The client now names it exactly:
 Each retry is a fresh POST and therefore a fresh link, which is precisely the remedy — the retry
 window widened from 4 seconds to 12 after a live failure used up all three of the old attempts.
 
+**The two hops are timed separately**, because they need very different budgets. Sampled during a
+bad Google patch:
+
+| Outcome | End-to-end |
+|---|---|
+| Success | 3.5–6.5 s |
+| Failure | 18–33 s |
+
+A wide, clean gap. Running the script (hop 1) can legitimately take 30 seconds; *fetching* the
+finished result (hop 2) cannot usefully take more than about 12, because the link is dead by then
+and waiting only collects a corpse. So hop 2 gets its own tighter timeout, and a slow one is
+abandoned in favour of a fresh POST — which is what actually fixes it.
+
+There is also a **total deadline of 45 seconds per read or write**, retries included, and each hop's
+timeout is clamped to whatever is left of it. Without the clamp the deadline only stopped the *next*
+retry while the attempt already in flight ran on — measured at 50.7 s against a 45 s budget; it is
+41.9 s now. The bound matters because the monitor polls every 60 seconds, and a poll stuck waiting
+on Google is a poll not watching for messages, news or reports.
+
 A `doGet` that answers this honestly (JSON with `retry: true`, instead of an HTML page) is committed
 at **`docs/apps-script/Code.gs`**, along with a redeploy walkthrough at `docs/apps-script/README.md`.
 Redeploying is optional; the client handles both.
@@ -916,7 +935,9 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`Google returned the sheet result too late to be read`** | **The common one, and it is not your fault.** Google answers a POST by redirecting to a single-use result link that expires in well under a minute; when it is read late, Google runs the script over `GET` instead and returns `Script function not found: doGet`. Already retried four times over twelve seconds, so Google was having a genuinely bad minute. | Nothing. It clears itself, and the next poll starts fresh. **Nothing was written on this attempt.** If it fires on most polls for an hour or more, redeploy the endpoint per `docs/apps-script/README.md` — that makes the failure legible but does not make Google faster. |
 | **`unexpected non-JSON reply from sheet endpoint`** | Google answered `200 OK` with an HTML page that is *not* an Apps Script error page. Already tried four times. The message quotes the page's `Content-Type` and its first 200 characters. | Read the quoted snippet. If it looks like a Google sign-in page, the deployment has lost its "Anyone" access — redeploy per `docs/apps-script/README.md`. If it is a Google "unable to open the file" page, that is Google's end and it clears by itself. **Nothing was written on this attempt.** |
 | **`the sheet endpoint returned an Apps Script error page`** | The script itself failed — e.g. `Authorization is required to perform that action`. This is the deployment, not the network. | Open the script (Extensions → Apps Script on the sheet) and check it still runs and is still deployed as *Execute as: Me* / *Who has access: Anyone*. `docs/apps-script/README.md` has the walkthrough. |
-| **`timed out reading the sheet endpoint's reply`** / **`the reply broke off part-way`** | The connection to Google opened but the answer never fully arrived. Also already retried three times. | Almost always the network or Google. It clears by itself; if it does not, check your connection. **Nothing was written on this attempt.** |
+| **`timed out reading the sheet endpoint's reply`** / **`the reply broke off part-way`** | The connection to Google opened but the answer never fully arrived. Already retried four times, inside a 45-second budget. The timeout is deliberately shorter than it used to be: Google's result links expire in well under a minute, so waiting longer collects a dead one rather than a slow one. | Almost always Google, occasionally your connection. It clears by itself. **Nothing was written on this attempt.** |
+| **`… (stopped at the 45s budget)`** | Appended when the retries ran out of *time* rather than out of attempts — Google was slow enough that continuing would have stalled the poll. | Nothing. The next poll starts over with a clean budget. |
+| **`Sorry, unable to open the file at present`** (as an `HTTP 404`) | The same expiring-link fault as the row above, caught a moment earlier: Google's Drive front-end answers a dead result link with its own "Page not found". Retried like any 404. | Nothing. **Nothing was written on this attempt.** |
 
 Two details that will otherwise confuse you:
 

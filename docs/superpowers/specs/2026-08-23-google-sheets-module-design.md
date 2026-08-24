@@ -70,7 +70,8 @@ class GoogleSheet:
 ```
 
 - Transport: `urllib.request` POST of `application/json` to `EXEC_URL`, JSON response parsed with
-  `json`. No third-party packages.
+  `json`. No third-party packages. The `/exec` redirect is followed by hand rather than by urllib,
+  so each hop gets its own timeout — see [Timing the hops apart](#timing-the-hops-apart).
 - `write` coerces a scalar to `[[v]]` and a flat list to `[[...]]` so callers don't hand-build the
   2-D shape; `read_cell`/`write_cell` unwrap to a single string.
 - Any non-200, transport error, non-JSON body, or `{ok:false}` raises `SheetError` with the
@@ -194,8 +195,46 @@ This also settles what *not* to do. Capping the first hop looks appealing but is
 clock starts when the 302 is issued, i.e. after hop 1 finishes, so a slow execution hands over a
 perfectly fresh link. Only hop 2's own latency can consume it.
 
-During a slow patch this severe, the four attempts inside 12 s will all fail — and that is the right
-outcome. The monitor reports it accurately, keeps polling, and the next poll 60 s later tries again.
+#### Timing the hops apart
+
+Following on from the above, `_fetch` makes both hops itself instead of letting urllib follow the
+redirect, so each gets its own timeout. A later sample during a bad patch made the case plainly —
+2 of 6 calls succeeded in 3.5–6.5 s while all 4 failures took 18–33 s:
+
+| Hop | Budget | Why |
+|---|---|---|
+| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` 30 s | Legitimately slow; 21.8 s measured on a call that then succeeded |
+| 2 — GET the result link | `CONTENT_TIMEOUT` 12 s | The link is dead by ~20 s, so waiting longer collects a corpse rather than an answer |
+
+One number covering both meant spending 30 s to receive something guaranteed worthless. Abandoning
+hop 2 early and re-POSTing for a fresh link is strictly better, and is the actual remedy.
+
+#### The deadline
+
+`DEFAULT_DEADLINE` caps one read or write at 45 s including retries, and each hop's timeout is
+clamped to what is left of it (floored at `MIN_TIMEOUT`, since a timeout of zero means
+"non-blocking" and fails instantly with a misleading error).
+
+The clamp is not decoration. Stopping only the *next* retry lets the attempt already in flight run
+on past the deadline: measured at 50.7 s against a 45 s budget, and 41.9 s once clamped. The bound
+exists because the monitor polls every 60 s, and `sync_sheet_step` aborts the whole step on the
+first `SheetError` — so the worst case per poll is one call's full budget, which must stay under one
+interval or the monitor stops doing its real job.
+
+During a slow patch this severe the attempts will all fail anyway — and that is the right outcome.
+The monitor reports it accurately, keeps polling, and the next poll tries again with a clean budget.
+
+#### The other face of the same fault
+
+An expired link does not always reach `doGet`. Caught a beat earlier, Google's Drive front-end
+answers it with **HTTP 404** and its own "Page not found — Sorry, unable to open the file at
+present" page. 404 is already in `RETRYABLE_HTTP_STATUSES`, so this was being handled correctly;
+what was wrong was the reporting. That page is 7,805 bytes whose first 200 characters are entirely
+`window['ppConfig']` telemetry, so quoting bytes showed the reader nothing at all.
+
+`_snippet` now reduces any HTML body to its visible words, which is what makes both pages legible.
+`apps_script_error` stays a separate, stricter check — it needs *two* markers, because the Drive
+page carries the same telemetry preamble and must not be mistaken for the `doGet` fault.
 
 ## Testing
 

@@ -50,7 +50,27 @@ EXEC_URL = (
 #: (``https://docs.google.com/spreadsheets/d/<id>/export?format=csv``), which need no endpoint.
 SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
+#: Budget for the first hop -- POSTing to /exec, which runs the script. Legitimately slow: 21.8
+#: seconds has been measured on a healthy call.
 DEFAULT_TIMEOUT = 30.0
+
+#: Budget for the second hop -- fetching the one-shot result link. Far tighter, and deliberately
+#: so: that link only lives 15-30 seconds (see EXPIRING_LINK), so a fetch still running at 12 is
+#: overwhelmingly likely to be handed a corpse. Sampled during a bad Google patch, successful round
+#: trips took 3.5-6.5s while every single failure took 18-33s -- a wide, clean gap to cut in.
+#: Abandoning early and re-POSTing for a fresh link beats waiting for a dead one.
+CONTENT_TIMEOUT = 12.0
+
+#: Ceiling on the total time one read or write may spend, retries included. Without it four
+#: attempts could block a 60-second poll for minutes, starving the monitor of the message, news and
+#: report checks that are its actual job. Retries stop once the next delay would cross this; the
+#: attempt in flight is always allowed to finish.
+DEFAULT_DEADLINE = 45.0
+
+#: Floor on a clamped hop timeout. A budget that has almost run out must still leave enough for a
+#: connection to be attempted rather than collapsing to zero, which means "non-blocking" and fails
+#: instantly with a misleading error.
+MIN_TIMEOUT = 1.0
 
 #: One initial request plus these three retries. Writes are explicit assignments, so repeating the
 #: identical payload is idempotent if Google applied it but dropped the response.
@@ -164,13 +184,26 @@ class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
 
 
+def visible_text(markup: str) -> str:
+    """Reduce an HTML page to the words a person would actually see, on one line.
+
+    Google's error pages -- Apps Script's and Drive's alike -- open with kilobytes of telemetry
+    (``window['ppConfig'] = ...``) and inline CSS, so quoting their first 200 characters shows
+    nothing at all. The sentence that matters is in the body: ``Script function not found: doGet``,
+    ``Sorry, unable to open the file at present``.
+    """
+    start = markup.find("<body")
+    body = markup[start:] if start != -1 else markup
+    body = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", body, flags=re.S | re.I)
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", body)).split())
+
+
 def apps_script_error(raw: bytes) -> Optional[str]:
     """Return the message from a Google Apps Script HTML error page, or ``None`` if not one.
 
-    These pages are ~5KB of telemetry boilerplate wrapped around a single line of monospace text,
-    so quoting the first 200 characters shows nothing but ``window['ppConfig'] = ...``. The line
-    that matters is the whole of the visible body: ``Script function not found: doGet``,
-    ``Authorization is required to perform that action``, an uncaught ``Exception: ...``.
+    Matched on two markers together, because either alone appears on unrelated Google pages -- in
+    particular Drive's own "Page not found", which carries the same telemetry preamble but is a
+    different fault and must not be mistaken for this one.
     """
     try:
         text = raw.decode("utf-8")
@@ -178,9 +211,7 @@ def apps_script_error(raw: bytes) -> Optional[str]:
         return None
     if not all(marker in text for marker in _APPS_SCRIPT_PAGE_MARKERS):
         return None
-    start = text.find("<body")
-    body = text[start:] if start != -1 else text
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", body)).split()) or None
+    return visible_text(text) or None
 
 
 def _snippet(raw: bytes, limit: int = 200) -> str:
@@ -190,7 +221,12 @@ def _snippet(raw: bytes, limit: int = 200) -> str:
     newlines and indentation, so the whitespace is collapsed. An empty body is named rather than
     quoted as nothing -- "the endpoint sent no body at all" is a distinct and useful symptom.
     """
-    text = " ".join(raw.decode("utf-8", "replace").split())
+    decoded = raw.decode("utf-8", "replace")
+    lowered = decoded[:400].lower()
+    if "<html" in lowered or "<!doctype html" in lowered:
+        text = visible_text(decoded)
+    else:
+        text = " ".join(decoded.split())
     if not text:
         return "(empty body)"
     return text[:limit] + "..." if len(text) > limit else text
@@ -227,6 +263,25 @@ def _as_grid(values: Any) -> Grid:
     return [list(rows)]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Stop urllib swallowing the /exec redirect, so the two hops can be capped separately.
+
+    Returning ``None`` leaves the 302 to surface as an ``HTTPError`` carrying the ``Location``.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """Opener for the first hop, which must not follow the redirect.
+
+    A module-level function rather than an inline call so the offline tests have one seam to
+    substitute, the same way they already substitute ``urlopen`` for the second hop.
+    """
+    return urllib.request.build_opener(_NoRedirect)
+
+
 class GoogleSheet:
     """Read and write ranges of the shared sheet by A1 notation, via the Apps Script endpoint."""
 
@@ -235,10 +290,14 @@ class GoogleSheet:
         exec_url: str = EXEC_URL,
         *,
         timeout: float = DEFAULT_TIMEOUT,
+        content_timeout: float = CONTENT_TIMEOUT,
+        deadline: float = DEFAULT_DEADLINE,
         retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS,
     ) -> None:
         self.exec_url = exec_url
         self.timeout = timeout
+        self.content_timeout = content_timeout
+        self.deadline = deadline
         self.retry_delays = tuple(retry_delays)
 
     def read(self, tab: str, a1: str) -> Grid:
@@ -302,39 +361,99 @@ class GoogleSheet:
         *,
         retryable: bool = True,
         hint: str = "",
+        started: Optional[float] = None,
     ) -> None:
         """Return (so the caller retries) if another attempt is due, else raise ``SheetError``.
 
-        Every transient class funnels through here so they all spend the same attempt budget and
-        report the same ``after N attempts`` suffix. ``hint`` is appended only to the final
-        message, where it can say what N failures in a row -- as opposed to one -- tend to mean.
+        Every transient class funnels through here so they all spend the same budget and report it
+        the same way. ``hint`` is appended only to the final message, where it can say what a run
+        of failures -- as opposed to one -- tends to mean.
+
+        Two things end the retries: running out of attempts, and running out of ``deadline``. The
+        clock matters as much as the count, because a Google slow patch makes every attempt take
+        tens of seconds, and a monitor stuck in here is not watching the game.
         """
-        attempts = len(self.retry_delays) + 1
-        if retryable and attempt < len(self.retry_delays):
-            time.sleep(self.retry_delays[attempt])
+        delay = self.retry_delays[attempt] if attempt < len(self.retry_delays) else None
+        elapsed = 0.0 if started is None else time.monotonic() - started
+        out_of_time = delay is not None and elapsed + delay > self.deadline
+        if retryable and delay is not None and not out_of_time:
+            time.sleep(delay)
             return
-        text = message + (f" after {attempts} attempts" if attempt else "") + hint
+
+        if attempt:
+            spent = f" in {elapsed:.0f}s" if started is not None and elapsed else ""
+            suffix = f" after {attempt + 1} attempts{spent}"
+            if out_of_time:
+                suffix += f" (stopped at the {self.deadline:.0f}s budget)"
+        else:
+            suffix = ""
+        text = message + suffix + hint
         if cause is None:
             raise SheetError(text)
         raise SheetError(text) from cause
+
+    def _fetch(self, encoded: bytes, budget: Optional[float] = None) -> "tuple[int, str, bytes]":
+        """One full round trip, as ``(status, content_type, body)``.
+
+        Both hops are made here rather than left to urllib so each gets its own timeout: the first
+        runs the script and may legitimately take half a minute, while the second only fetches an
+        already-computed result down a link that will be dead within seconds. Letting one number
+        cover both meant waiting 30 seconds for a link that stopped being worth anything at 15.
+
+        ``budget`` is whatever is left of the caller's deadline. Each hop's timeout is clamped to
+        it, so the deadline is a real ceiling rather than merely the point at which retrying stops
+        -- otherwise a final attempt could run for another 42 seconds past it.
+        """
+        start = time.monotonic()
+
+        def cap(limit: float) -> float:
+            # Floor the *budget*, then apply the configured limit -- never the other way round, or
+            # the floor would quietly raise a deliberately small timeout above what was asked for.
+            if budget is None:
+                return limit
+            left = budget - (time.monotonic() - start)
+            return min(limit, max(MIN_TIMEOUT, left))
+
+        request = urllib.request.Request(
+            self.exec_url,
+            data=encoded,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        location = None
+        try:
+            with _build_opener().open(request, timeout=cap(self.timeout)) as response:
+                # No redirect at all: the endpoint answered the POST directly.
+                return (
+                    response.status,
+                    response.headers.get("Content-Type", "unset"),
+                    response.read(),
+                )
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                location = exc.headers.get("Location")
+            if not location:
+                raise
+            exc.close()
+
+        with urllib.request.urlopen(location, timeout=cap(self.content_timeout)) as response:
+            return (
+                response.status,
+                response.headers.get("Content-Type", "unset"),
+                response.read(),
+            )
 
     def _call(self, action: str, tab: str, a1: str, values: Any = None) -> Grid:
         payload = {"action": action, "tab": tab, "range": a1}
         if values is not None:
             payload["values"] = values
         encoded = json.dumps(payload).encode("utf-8")
+        started = time.monotonic()
         for attempt in range(len(self.retry_delays) + 1):
-            request = urllib.request.Request(
-                self.exec_url,
-                data=encoded,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    status = response.status
-                    content_type = response.headers.get("Content-Type", "unset")
-                    raw = response.read()
+                status, content_type, raw = self._fetch(
+                    encoded, self.deadline - (time.monotonic() - started)
+                )
             except urllib.error.HTTPError as exc:
                 detail = _snippet(exc.read())
                 self._retry_or_raise(
@@ -342,11 +461,15 @@ class GoogleSheet:
                     attempt,
                     exc,
                     retryable=exc.code in RETRYABLE_HTTP_STATUSES,
+                    started=started,
                 )
                 continue
             except urllib.error.URLError as exc:
                 self._retry_or_raise(
-                    f"could not reach sheet endpoint: {exc.reason}", attempt, exc
+                    f"could not reach sheet endpoint: {exc.reason}",
+                    attempt,
+                    exc,
+                    started=started,
                 )
                 continue
             except TimeoutError as exc:
@@ -355,7 +478,15 @@ class GoogleSheet:
                 # above sync_sheet_step catches it -- it would end the monitor with a traceback
                 # and no dialog. Same trap clop_monitor's own client fell into.
                 self._retry_or_raise(
-                    "timed out reading the sheet endpoint's reply", attempt, exc
+                    "timed out reading the sheet endpoint's reply",
+                    attempt,
+                    exc,
+                    hint=(
+                        ". Google was answering more slowly than its own result links stay "
+                        "alive, so waiting longer would only have collected a dead one. Each "
+                        "attempt asked again from scratch; this clears once Google speeds up"
+                    ),
+                    started=started,
                 )
                 continue
             except http.client.HTTPException as exc:
@@ -366,6 +497,7 @@ class GoogleSheet:
                     f"({exc.__class__.__name__})",
                     attempt,
                     exc,
+                    started=started,
                 )
                 continue
 
@@ -374,6 +506,7 @@ class GoogleSheet:
                     f"HTTP {status} from sheet endpoint: {_snippet(raw)}",
                     attempt,
                     retryable=status in RETRYABLE_HTTP_STATUSES,
+                    started=started,
                 )
                 continue
 
@@ -412,7 +545,7 @@ class GoogleSheet:
                         "the Apps Script deployment has stopped being 'Anyone' access and Google "
                         "is serving a sign-in page instead"
                     )
-                self._retry_or_raise(message, attempt, exc, hint=hint)
+                self._retry_or_raise(message, attempt, exc, hint=hint, started=started)
                 continue
 
             if not isinstance(body, dict) or not body.get("ok"):
@@ -426,7 +559,9 @@ class GoogleSheet:
                 # a JSON error that does not, which is a worse outcome, not a better one.
                 if isinstance(body, dict) and body.get("retry"):
                     self._retry_or_raise(
-                        message or "sheet endpoint asked for the request to be repeated", attempt
+                        message or "sheet endpoint asked for the request to be repeated",
+                        attempt,
+                        started=started,
                     )
                     continue
                 raise SheetError(message or "sheet endpoint reported failure")

@@ -99,15 +99,26 @@ def replies(*outcomes):
 
 @contextmanager
 def stub_urlopen(handler):
-    """Replace sheets' urlopen with `handler(request) -> FakeResponse (or raises)`; capture calls."""
+    """Replace sheets' HTTP with `handler(request) -> FakeResponse (or raises)`; capture calls.
+
+    Both seams are covered: the no-redirect opener used for the first hop (POST to /exec) and the
+    plain urlopen used for the second (fetching the result link). A handler that returns an
+    ordinary response settles it on the first hop, so `calls` stays one entry per round trip --
+    which is what every count assertion in this file means.
+    """
     calls = []
 
     def fake(request, timeout=None):
         calls.append((request, timeout))
         return handler(request)
 
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            return fake(request, timeout)
+
     with mock.patch.object(sheets.urllib.request, "urlopen", fake):
-        yield calls
+        with mock.patch.object(sheets, "_build_opener", FakeOpener):
+            yield calls
 
 
 def ok(values):
@@ -170,6 +181,125 @@ class RequestShapeTests(unittest.TestCase):
         request, timeout = calls[0]
         self.assertEqual(request.full_url, "https://example/exec")
         self.assertEqual(timeout, 5)
+
+
+ECHO_URL = "https://script.googleusercontent.com/macros/echo?user_content_key=abc&lib=xyz"
+
+
+def redirect_to(location=ECHO_URL, code=302):
+    """The 302 that /exec answers a POST with, carrying the one-shot result link."""
+    return urllib.error.HTTPError(
+        "https://script.google.com/exec", code, "Found",
+        {"Location": location}, io.BytesIO(b""),
+    )
+
+
+def two_hop(second, location=ECHO_URL):
+    """Handler that redirects the first hop and answers the second with `second`."""
+    def respond(request):
+        if isinstance(request, str):          # hop 2 is fetched by URL
+            return second() if callable(second) else second
+        raise redirect_to(location)           # hop 1 is a Request object
+    return respond
+
+
+class TwoHopTests(unittest.TestCase):
+    """/exec answers a POST with a redirect; the hops are fetched and capped separately."""
+
+    def test_redirect_is_followed_and_its_body_parsed(self):
+        with stub_urlopen(two_hop(ok([[11]]))) as calls:
+            self.assertEqual(GoogleSheet().read("T", "A1"), [[11]])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][0], ECHO_URL)
+
+    def test_each_hop_gets_its_own_timeout(self):
+        # The whole point of splitting them: the script may legitimately run for half a minute,
+        # but the result link is dead within seconds, so waiting 30s on it collects a corpse.
+        with stub_urlopen(two_hop(ok([[1]]))) as calls:
+            GoogleSheet(timeout=30.0, content_timeout=12.0).read("T", "A1")
+        self.assertEqual(calls[0][1], 30.0)
+        self.assertEqual(calls[1][1], 12.0)
+        self.assertLess(sheets.CONTENT_TIMEOUT, sheets.DEFAULT_TIMEOUT)
+
+    def test_a_direct_answer_needs_no_second_hop(self):
+        with stub_urlopen(lambda req: ok([[2]])) as calls:
+            self.assertEqual(GoogleSheet().read("T", "A1"), [[2]])
+        self.assertEqual(len(calls), 1)
+
+    def test_a_redirect_without_a_location_is_not_swallowed(self):
+        with stub_urlopen(lambda req: (_ for _ in ()).throw(
+            urllib.error.HTTPError("u", 302, "Found", {}, io.BytesIO(b"")))):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("302", str(ctx.exception))
+
+    def test_slow_second_hop_times_out_and_retries_with_a_fresh_link(self):
+        # A fresh POST means a fresh link, which is the actual remedy for an expired one.
+        hops = [TimeoutError("timed out"), ok([[3]])]
+
+        def second():
+            outcome = hops.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(two_hop(second)) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[3]])
+        self.assertEqual(len(calls), 4)   # two full round trips, two hops each
+
+
+class DeadlineTests(unittest.TestCase):
+    """Retries stop on the clock as well as the count -- a stalled poll is not monitoring."""
+
+    @staticmethod
+    def _clock(step):
+        state = {"now": 0.0}
+
+        def monotonic():
+            state["now"] += step
+            return state["now"]
+
+        return monotonic
+
+    def test_slow_attempts_stop_retrying_before_the_attempts_run_out(self):
+        with mock.patch.object(sheets.time, "sleep"):
+            with mock.patch.object(sheets.time, "monotonic", self._clock(1.0)):
+                with stub_urlopen(lambda req: html_page()) as calls:
+                    with self.assertRaises(SheetError) as ctx:
+                        GoogleSheet(retry_delays=(1.0, 3.0, 8.0), deadline=10.0).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("stopped at the 10s budget", message)
+        self.assertLess(len(calls), 4)
+
+    def test_each_hop_is_clamped_to_what_is_left_of_the_budget(self):
+        # Without this the deadline only stops the *next* retry, and the attempt already running
+        # can overshoot it by another 42 seconds. Measured live at 50.7s against a 45s budget.
+        with stub_urlopen(two_hop(ok([[1]]))) as calls:
+            GoogleSheet(timeout=30.0, content_timeout=12.0, deadline=5.0).read("T", "A1")
+        self.assertLessEqual(calls[0][1], 5.0)
+        self.assertLessEqual(calls[1][1], 5.0)
+
+    def test_an_exhausted_budget_still_leaves_a_usable_timeout(self):
+        # Clamping to zero would mean "non-blocking" and fail instantly with a confusing error.
+        with stub_urlopen(two_hop(ok([[1]]))) as calls:
+            GoogleSheet(deadline=0.0).read("T", "A1")
+        self.assertEqual(calls[0][1], sheets.MIN_TIMEOUT)
+
+    def test_fast_attempts_still_use_the_whole_retry_budget(self):
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(lambda req: html_page()) as calls:
+                with self.assertRaises(SheetError):
+                    GoogleSheet(retry_delays=(1.0, 3.0, 8.0), deadline=45.0).read("T", "A1")
+        self.assertEqual(len(calls), 4)
+
+    def test_the_final_message_reports_attempts_and_time(self):
+        with mock.patch.object(sheets.time, "sleep"):
+            with mock.patch.object(sheets.time, "monotonic", self._clock(1.0)):
+                with stub_urlopen(lambda req: html_page()):
+                    with self.assertRaises(SheetError) as ctx:
+                        GoogleSheet(retry_delays=(1.0, 3.0, 8.0), deadline=10.0).read("T", "A1")
+        self.assertRegex(str(ctx.exception), r"after \d+ attempts in \d+s")
 
 
 class ConvenienceTests(unittest.TestCase):
@@ -330,6 +460,36 @@ class ErrorHandlingTests(unittest.TestCase):
             with self.assertRaises(SheetError) as ctx:
                 GoogleSheet(retry_delays=()).read("T", "A1")
         self.assertIn("'Anyone' access", str(ctx.exception))
+
+    def test_google_error_pages_are_quoted_as_words_not_boilerplate(self):
+        # Drive's "Page not found", which is what an expired result link looks like when Google
+        # gets to it fractionally sooner. Real capture: 7805 bytes whose first 200 characters are
+        # entirely window['ppConfig'] telemetry, so a byte-quote showed the reader nothing.
+        drive_404 = (
+            b"<!DOCTYPE html><html lang=\"en\"><head>"
+            b"<script nonce=\"HwUR6ZoM0zatdET2VpdZWw\">window['ppConfig'] = {productName: "
+            b"'26981ed0d57bbad37e728ff58134270c', deleteIsEnforced: false, sealIsEnforced: false,"
+            b" heartbeatRate: 0.5};</script><title>Page not found</title>"
+            b"<style>.errorMessage {font-weight:bold}</style></head><body><div>Drive</div>"
+            b"<div>Sorry, unable to open the file at present. "
+            b"Please check the address and try again.</div></body></html>"
+        )
+
+        def boom(req):
+            raise urllib.error.HTTPError(
+                "https://script.googleusercontent.com/macros/echo",
+                404, "Not Found", {}, io.BytesIO(drive_404),
+            )
+
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(boom):
+                with self.assertRaises(SheetError) as ctx:
+                    GoogleSheet(retry_delays=()).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("unable to open the file at present", message)
+        self.assertNotIn("ppConfig", message)
+        # It is a 404, so it is retryable -- the same expired-link fault, caught a beat earlier.
+        self.assertIn(404, sheets.RETRYABLE_HTTP_STATUSES)
 
     def test_apps_script_error_reader_ignores_unrelated_html(self):
         self.assertIsNone(sheets.apps_script_error(b"<html><body>Sign in</body></html>"))
