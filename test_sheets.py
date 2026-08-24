@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline unit tests for sheets.py -- no network; urlopen is stubbed."""
 
+import http.client
 import io
 import json
 import os
@@ -28,9 +29,10 @@ from sheets import (
 class FakeResponse(io.BytesIO):
     """Minimal stand-in for the object urlopen() yields as a context manager."""
 
-    def __init__(self, body: bytes, status: int = 200):
+    def __init__(self, body: bytes, status: int = 200, content_type="application/json"):
         super().__init__(body)
         self.status = status
+        self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
         return self
@@ -38,6 +40,39 @@ class FakeResponse(io.BytesIO):
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+class FailingReadResponse(FakeResponse):
+    """A response whose headers arrive but whose body dies mid-transfer.
+
+    This is the shape that matters: the failure lands inside the ``with urlopen(...)`` block on
+    ``read()``, not on the call that opened it, so it is only caught if the handler wraps both.
+    """
+
+    def __init__(self, error: BaseException):
+        super().__init__(b"")
+        self.error = error
+
+    def read(self, *args):
+        raise self.error
+
+
+def html_page(body=b"<html><body>Sorry, unable to open the file at this time.</body></html>"):
+    """The 200-with-an-HTML-page reply Google Apps Script serves during a hiccup."""
+    return FakeResponse(body, content_type="text/html; charset=utf-8")
+
+
+def replies(*outcomes):
+    """Return a stub handler that plays `outcomes` in order, raising any that are exceptions."""
+    queued = list(outcomes)
+
+    def respond(_request):
+        outcome = queued.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return respond
 
 
 @contextmanager
@@ -149,8 +184,97 @@ class ErrorHandlingTests(unittest.TestCase):
     def test_non_json_body_raises(self):
         with stub_urlopen(lambda req: FakeResponse(b"<html>Sign in</html>")):
             with self.assertRaises(SheetError) as ctx:
-                GoogleSheet().read("T", "A1")
+                GoogleSheet(retry_delays=()).read("T", "A1")
         self.assertIn("non-JSON", str(ctx.exception))
+
+    def test_transient_non_json_body_is_retried_then_succeeds(self):
+        # A 200 carrying an HTML page is how Apps Script reports a passing hiccup on the
+        # googleusercontent redirect hop. It looks nothing like a transport error, so it used to
+        # skip the retries entirely and pop a dialog on the very first occurrence.
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(replies(html_page(), ok([[42]]))) as calls:
+                result = GoogleSheet(retry_delays=(1.0, 3.0)).read("T", "A1")
+        self.assertEqual(result, [[42]])
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_empty_body_is_retried_then_succeeds(self):
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(FakeResponse(b""), ok([[7]]))) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[7]])
+        self.assertEqual(len(calls), 2)
+
+    def test_persistent_non_json_body_raises_only_after_three_attempts(self):
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(lambda req: html_page()) as calls:
+                with self.assertRaisesRegex(SheetError, "after 3 attempts"):
+                    GoogleSheet(retry_delays=(1.0, 3.0)).read("T", "A1")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 3.0])
+
+    def test_non_json_error_quotes_what_actually_arrived(self):
+        # The message must carry evidence rather than assert a cause: a live check after the first
+        # such dialog found the deployment perfectly healthy, so "check the access setting" was a
+        # wrong guess presented as a diagnosis.
+        with stub_urlopen(lambda req: html_page()):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("text/html", message)
+        self.assertIn("Sorry, unable to open the file", message)
+
+    def test_empty_body_error_says_so_rather_than_quoting_nothing(self):
+        with stub_urlopen(lambda req: FakeResponse(b"")):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("empty body", str(ctx.exception))
+
+    def test_read_timeout_becomes_a_sheet_error_and_is_retried(self):
+        # A socket timeout during response.read() escapes as a bare TimeoutError, not a URLError.
+        # Nothing above sync_sheet_step catches that, so uncaught it kills the monitor outright --
+        # with a traceback and no dialog, which is the one outcome this project refuses to ship.
+        timeout = TimeoutError("The read operation timed out")
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(FailingReadResponse(timeout), ok([[1]]))) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[1]])
+        self.assertEqual(len(calls), 2)
+
+    def test_persistent_read_timeout_raises_sheet_error(self):
+        def boom(_req):
+            return FailingReadResponse(TimeoutError("The read operation timed out"))
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("timed out", str(ctx.exception).lower())
+
+    def test_body_dying_mid_transfer_becomes_a_sheet_error_and_is_retried(self):
+        # IncompleteRead is an http.client.HTTPException -- neither an HTTPError nor a URLError,
+        # so it too used to escape every handler here.
+        cut_short = http.client.IncompleteRead(b"half a payload")
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(FailingReadResponse(cut_short), ok([[1]]))) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[1]])
+        self.assertEqual(len(calls), 2)
+
+    def test_persistent_mid_transfer_failure_raises_sheet_error(self):
+        def boom(_req):
+            return FailingReadResponse(http.client.IncompleteRead(b"half a payload"))
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("broke off part-way", str(ctx.exception))
+
+    def test_a_write_retried_after_a_garbled_reply_repeats_the_same_payload(self):
+        # Retrying a write is only safe because the payload is an assignment, not an increment.
+        # If this ever stops holding, the retry has to go.
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(html_page(), ok([[42]]))) as calls:
+                GoogleSheet(retry_delays=(1.0,)).write("T", "R11", 42)
+        first, second = (json.loads(call[0].data.decode()) for call in calls)
+        self.assertEqual(first, second)
+        self.assertEqual(second["values"], [[42]])
 
     def test_http_error_raises(self):
         def boom(req):

@@ -683,9 +683,25 @@ shape the range expects. Any failure — network, a non-JSON reply, or a server-
 unknown tab — raises `sheets.SheetError`.
 
 Transient endpoint failures are retried before that error escapes: the original request, then two
-retries after 1 and 3 seconds. This includes network failures and HTTP 404, 408, 425, 429, and
-5xx responses. Apps Script protocol replies such as `no such tab` are definitive and fail
-immediately. Writes assign explicit values, so retrying the identical write is safe.
+retries after 1 and 3 seconds. The rule is that **everything which can go wrong between asking and
+being answered is retried**, because none of it can be told apart from a passing Google hiccup on a
+single sample:
+
+- network failures, and HTTP 404, 408, 425, 429 and 5xx responses;
+- a reply that times out or breaks off part-way through its body;
+- an HTTP **200 whose body is not JSON** — Google serves an HTML page for this, and it looks like a
+  clean success right up until the parse.
+
+Apps Script protocol replies such as `no such tab` are definitive and fail immediately, on the first
+attempt. Writes assign explicit values rather than adjusting them, so repeating an identical write
+is safe whether or not the first one landed.
+
+The non-JSON case is worth knowing about, because its message used to name a cause it could not
+know. Google returns an HTML page both when the deployment has genuinely stopped being "Anyone"
+access — a sign-in page — and when Apps Script merely stumbles on the `googleusercontent.com` hop
+it redirects to. One occurrence cannot distinguish those, so the error now **quotes what actually
+arrived** (its `Content-Type` and the first 200 characters of the body) instead of guessing, and
+only points at the deployment after three failures in a row.
 
 ### Your nation tab
 
@@ -870,6 +886,8 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`resource '...' has an unreadable quantity`** | The game printed a quantity that is not a plain number. It is refused rather than guessed at, because guessing would write a wrong number — most likely a `0`, meaning "you have none of this". | Look at that resource on `overview.php` in a browser. If the game has started formatting quantities differently, `stockpiles.py` needs updating to match. **Nothing was written.** |
 | **`not logged in when reading overview.php`** | The session dropped and logging back in did not take. | Check `CLOP_USERNAME` and `CLOP_PASSWORD` in `.env`, and that you can sign in through a browser. **Nothing was written.** |
 | **`Sheet sync failed during ...`** | The catch-all. If the sentence after the colon matches a row above, use that row. Otherwise it is a network or Google Sheets problem rather than anything wrong with your data, and the message names which half it happened in. | For a plain network or Sheets problem: usually nothing, it clears by itself. If it persists, check your internet connection and that the sheet still opens in a browser. |
+| **`unexpected non-JSON reply from sheet endpoint`** | Google answered `200 OK` with an HTML page instead of the JSON the Apps Script endpoint should return. **It has already been tried three times** over about four seconds, so this is not a one-off blip. The message quotes the page's `Content-Type` and its first 200 characters. | Read the quoted snippet. If it looks like a Google sign-in page, the Apps Script deployment has lost its "Anyone" access — redeploy it from the source in `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md`. If it is a Google "unable to open the file" or "temporarily unavailable" page, that is Google's end and it clears by itself. **Nothing was written on this attempt**, and the next poll retries from scratch. |
+| **`timed out reading the sheet endpoint's reply`** / **`the reply broke off part-way`** | The connection to Google opened but the answer never fully arrived. Also already retried three times. | Almost always the network or Google. It clears by itself; if it does not, check your connection. **Nothing was written on this attempt.** |
 
 Two details that will otherwise confuse you:
 

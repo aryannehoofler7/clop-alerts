@@ -66,7 +66,8 @@ class GoogleSheet:
 - `write` coerces a scalar to `[[v]]` and a flat list to `[[...]]` so callers don't hand-build the
   2-D shape; `read_cell`/`write_cell` unwrap to a single string.
 - Any non-200, transport error, non-JSON body, or `{ok:false}` raises `SheetError` with the
-  server-supplied message where available.
+  server-supplied message where available. Transient classes are retried first — see
+  [Error handling](#error-handling).
 
 Config home: `EXEC_URL` and `SHEET_ID` are **committed constants** in `sheets.py`. The sheet is
 shared and the tool is shared, so the endpoint is public by design — no token, nothing git-ignored.
@@ -92,13 +93,39 @@ first; it raises before any real work if the configuration or the sheet is wrong
 
 ## Error handling
 
-| Condition                         | Result                                             |
-|-----------------------------------|----------------------------------------------------|
-| Network / DNS / timeout           | `SheetError` wrapping the `urllib` error           |
-| HTTP status != 200                | `SheetError` with status + first bytes of body     |
-| Body not JSON (e.g. Google login) | `SheetError` "unexpected non-JSON response"        |
-| `{ok:false, error}`               | `SheetError(error)`                                |
-| Unknown tab / bad range           | Surfaces as `{ok:false}` from the script           |
+Every failure leaves `_call` as a `SheetError` — never as a bare `TimeoutError` or
+`http.client.HTTPException`, both of which can escape a `urlopen`/`read()` pair and neither of which
+is caught by `sync_sheet_step` or anything above it. One of those escaping would end the monitor
+with a traceback and no dialog, which is the single outcome this project refuses to ship.
+
+| Condition                             | Result                                        | Retried? |
+|---------------------------------------|-----------------------------------------------|----------|
+| Network / DNS (`URLError`)            | `SheetError` wrapping the `urllib` error      | yes      |
+| Read timeout (bare `TimeoutError`)    | `SheetError` "timed out reading …"            | yes      |
+| Body dies mid-transfer (`IncompleteRead`) | `SheetError` "… broke off part-way"       | yes      |
+| HTTP status in `RETRYABLE_HTTP_STATUSES` | `SheetError` with status + body snippet    | yes      |
+| Any other HTTP status != 200          | `SheetError` with status + body snippet       | no       |
+| Body not JSON (HTML page)             | `SheetError` quoting `Content-Type` + snippet | yes      |
+| `{ok:false, error}`                   | `SheetError(error)`                           | no       |
+| Unknown tab / bad range               | Surfaces as `{ok:false}` from the script      | no       |
+
+### Why the retry line falls where it does
+
+The rule is **everything between asking and being answered is retried; the endpoint's own verdict is
+not**. A `{ok:false}` reply means the Apps Script ran and decided — `no such tab` will still be true
+in three seconds, so retrying it only delays a dialog the user has to act on either way.
+
+The non-JSON row is the subtle one, and it was originally on the wrong side of that line. The parse
+sat *after* the retry loop, so a 200 carrying HTML — which is exactly how Apps Script reports a
+stumble on the `script.googleusercontent.com` hop it redirects to — took zero retries and popped a
+dialog on first sight. It also asserted a cause it could not know ("is the deployment still 'Anyone'
+access?"): Google serves HTML both for a lost deployment (a sign-in page) and for a passing hiccup,
+and one sample cannot separate them. The message now quotes the `Content-Type` and the first 200
+characters of what arrived, and only names the deployment as a likely cause after three failures.
+
+Retrying a **write** after a garbled reply is safe because the payload is an assignment, not an
+adjustment: if Google applied the first one and lost the response, the second writes the same value.
+A test pins that the retried payload is byte-identical, so this stops being true loudly.
 
 ## Testing
 

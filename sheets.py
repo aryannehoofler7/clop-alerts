@@ -22,6 +22,7 @@ Everything here is Python standard library only, matching the rest of this proje
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -51,9 +52,15 @@ SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 DEFAULT_TIMEOUT = 30.0
 
 #: One initial request plus these two retries. A few seconds is long enough to absorb the brief
-#: Google Apps Script 404/5xx glitches seen in production without holding the monitor up for an
-#: entire polling interval. Writes are explicit assignments, so repeating the identical payload is
+#: Google Apps Script glitches seen in production without holding the monitor up for an entire
+#: polling interval. Writes are explicit assignments, so repeating the identical payload is
 #: idempotent if Google applied it but dropped the response.
+#:
+#: Everything that can go wrong *between* asking and being answered is retried, because none of it
+#: distinguishes "Google hiccuped" from "Google is broken" on a single sample: transport failures,
+#: the HTTP statuses below, a reply that dies mid-transfer, and -- the one this list was missing --
+#: a perfectly ordinary HTTP 200 whose body is not JSON. Only the endpoint's own protocol replies
+#: (``{ok: false}``, e.g. ``no such tab``) are definitive and fail on the first attempt.
 DEFAULT_RETRY_DELAYS = (1.0, 3.0)
 RETRYABLE_HTTP_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
@@ -132,6 +139,19 @@ def index_column(grid: Grid) -> Dict[str, List[int]]:
 
 class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
+
+
+def _snippet(raw: bytes, limit: int = 200) -> str:
+    """Render a response body as one short readable line, for quoting in an error message.
+
+    These messages are read in a popup, and the bodies being quoted are HTML pages full of
+    newlines and indentation, so the whitespace is collapsed. An empty body is named rather than
+    quoted as nothing -- "the endpoint sent no body at all" is a distinct and useful symptom.
+    """
+    text = " ".join(raw.decode("utf-8", "replace").split())
+    if not text:
+        return "(empty body)"
+    return text[:limit] + "..." if len(text) > limit else text
 
 
 def nation_from_env(env_path: Path = DEFAULT_ENV_PATH) -> str:
@@ -232,13 +252,36 @@ class GoogleSheet:
                 return cell
         return ""
 
+    def _retry_or_raise(
+        self,
+        message: str,
+        attempt: int,
+        cause: Optional[BaseException] = None,
+        *,
+        retryable: bool = True,
+        hint: str = "",
+    ) -> None:
+        """Return (so the caller retries) if another attempt is due, else raise ``SheetError``.
+
+        Every transient class funnels through here so they all spend the same attempt budget and
+        report the same ``after N attempts`` suffix. ``hint`` is appended only to the final
+        message, where it can say what N failures in a row -- as opposed to one -- tend to mean.
+        """
+        attempts = len(self.retry_delays) + 1
+        if retryable and attempt < len(self.retry_delays):
+            time.sleep(self.retry_delays[attempt])
+            return
+        text = message + (f" after {attempts} attempts" if attempt else "") + hint
+        if cause is None:
+            raise SheetError(text)
+        raise SheetError(text) from cause
+
     def _call(self, action: str, tab: str, a1: str, values: Any = None) -> Grid:
         payload = {"action": action, "tab": tab, "range": a1}
         if values is not None:
             payload["values"] = values
         encoded = json.dumps(payload).encode("utf-8")
-        attempts = len(self.retry_delays) + 1
-        for attempt in range(attempts):
+        for attempt in range(len(self.retry_delays) + 1):
             request = urllib.request.Request(
                 self.exec_url,
                 data=encoded,
@@ -248,47 +291,79 @@ class GoogleSheet:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     status = response.status
+                    content_type = response.headers.get("Content-Type", "unset")
                     raw = response.read()
             except urllib.error.HTTPError as exc:
-                detail = exc.read()[:200].decode("utf-8", "replace")
-                message = f"HTTP {exc.code} from sheet endpoint: {detail}"
-                if exc.code in RETRYABLE_HTTP_STATUSES and attempt < len(self.retry_delays):
-                    time.sleep(self.retry_delays[attempt])
-                    continue
-                suffix = f" after {attempts} attempts" if attempt else ""
-                raise SheetError(message + suffix) from exc
+                detail = _snippet(exc.read())
+                self._retry_or_raise(
+                    f"HTTP {exc.code} from sheet endpoint: {detail}",
+                    attempt,
+                    exc,
+                    retryable=exc.code in RETRYABLE_HTTP_STATUSES,
+                )
+                continue
             except urllib.error.URLError as exc:
-                message = f"could not reach sheet endpoint: {exc.reason}"
-                if attempt < len(self.retry_delays):
-                    time.sleep(self.retry_delays[attempt])
-                    continue
-                suffix = f" after {attempts} attempts" if attempt else ""
-                raise SheetError(message + suffix) from exc
+                self._retry_or_raise(
+                    f"could not reach sheet endpoint: {exc.reason}", attempt, exc
+                )
+                continue
+            except TimeoutError as exc:
+                # A socket timeout raised while read() is consuming the body is a bare
+                # TimeoutError, not a URLError. Uncaught it is not even a SheetError, and nothing
+                # above sync_sheet_step catches it -- it would end the monitor with a traceback
+                # and no dialog. Same trap clop_monitor's own client fell into.
+                self._retry_or_raise(
+                    "timed out reading the sheet endpoint's reply", attempt, exc
+                )
+                continue
+            except http.client.HTTPException as exc:
+                # IncompleteRead and friends: neither an HTTPError nor a URLError, so likewise
+                # invisible to both handlers above.
+                self._retry_or_raise(
+                    "the sheet endpoint's reply broke off part-way "
+                    f"({exc.__class__.__name__})",
+                    attempt,
+                    exc,
+                )
+                continue
 
             if status != 200:
-                message = f"HTTP {status} from sheet endpoint: {raw[:200]!r}"
-                if status in RETRYABLE_HTTP_STATUSES and attempt < len(self.retry_delays):
-                    time.sleep(self.retry_delays[attempt])
-                    continue
-                suffix = f" after {attempts} attempts" if attempt else ""
-                raise SheetError(message + suffix)
-            break
+                self._retry_or_raise(
+                    f"HTTP {status} from sheet endpoint: {_snippet(raw)}",
+                    attempt,
+                    retryable=status in RETRYABLE_HTTP_STATUSES,
+                )
+                continue
 
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as exc:
-            # A Google login page or an Apps Script error page arrives as HTML, not JSON.
-            raise SheetError(
-                "unexpected non-JSON response from sheet endpoint "
-                "(is the deployment still 'Anyone' access?)"
-            ) from exc
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                # A 200 whose body is HTML rather than JSON. Google serves one both when a
+                # deployment is genuinely not public (a sign-in page) and when Apps Script simply
+                # stumbles on the googleusercontent hop it redirects to -- and a single sample
+                # cannot tell those apart, so this retries and quotes what arrived rather than
+                # naming a cause. Only a run of them points at the deployment.
+                self._retry_or_raise(
+                    f"unexpected non-JSON reply from sheet endpoint "
+                    f"(Content-Type: {content_type}): {_snippet(raw)}",
+                    attempt,
+                    exc,
+                    hint=(
+                        ". One garbled reply is a Google hiccup; several in a row usually mean "
+                        "the Apps Script deployment has stopped being 'Anyone' access and Google "
+                        "is serving a sign-in page instead"
+                    ),
+                )
+                continue
 
-        if not isinstance(body, dict) or not body.get("ok"):
-            message = ""
-            if isinstance(body, dict):
-                message = str(body.get("error", ""))
-            raise SheetError(message or "sheet endpoint reported failure")
-        return body.get("values", [])
+            if not isinstance(body, dict) or not body.get("ok"):
+                message = ""
+                if isinstance(body, dict):
+                    message = str(body.get("error", ""))
+                raise SheetError(message or "sheet endpoint reported failure")
+            return body.get("values", [])
+
+        raise AssertionError("unreachable: the loop either returns or raises")  # pragma: no cover
 
 
 def startup_check(
