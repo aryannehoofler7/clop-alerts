@@ -1285,6 +1285,10 @@ class ClopClient:
             raise MonitorError(f"HTTP {error.code} from {url}") from error
         except urllib.error.URLError as error:
             raise MonitorError(f"Could not reach {url}: {error.reason}") from error
+        except TimeoutError as error:
+            # urllib wraps many connection failures in URLError, but a socket timeout raised
+            # while response.read() is consuming the body escapes as a bare TimeoutError.
+            raise MonitorError(f"Timed out while reading {url}") from error
         except http.client.HTTPException as error:
             # A response that dies mid-body raises IncompleteRead, which is an HTTPException and
             # neither an HTTPError nor a URLError. Uncaught it escapes every handler above this
@@ -1316,6 +1320,10 @@ class ClopClient:
         except urllib.error.URLError as error:
             raise MonitorError(
                 f"Could not reach {self.fourchan_thread.api_url}: {error.reason}"
+            ) from error
+        except TimeoutError as error:
+            raise MonitorError(
+                f"Timed out while reading {self.fourchan_thread.api_url}"
             ) from error
         except (ValueError, TypeError) as error:
             raise MonitorError("The configured 4chan thread returned invalid JSON") from error

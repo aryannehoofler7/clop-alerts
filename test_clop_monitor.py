@@ -4650,6 +4650,37 @@ class OpenTransportFailureTests(unittest.TestCase):
             client._open("overview.php")
         self.assertIn("broke off part-way", str(caught.exception))
 
+    def test_body_read_timeout_becomes_a_monitor_error(self):
+        class Headers:
+            def get_content_charset(self):
+                return None
+
+        class TimedOutResponse:
+            headers = Headers()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return None
+
+            def read(self):
+                raise TimeoutError("The read operation timed out")
+
+        class Opener:
+            def open(self, request, timeout=None):
+                del request, timeout
+                return TimedOutResponse()
+
+        client = clop_monitor.ClopClient("https://example.test/", "u", "p")
+        client.opener = Opener()
+        with self.assertRaises(clop_monitor.MonitorError) as caught:
+            client._open("reports.php")
+        self.assertIn(
+            "Timed out while reading https://example.test/reports.php",
+            str(caught.exception),
+        )
+
     def test_other_http_exceptions_become_a_monitor_error(self):
         client = self._client_raising(http.client.BadStatusLine("garbage"))
         with self.assertRaises(clop_monitor.MonitorError):
