@@ -210,10 +210,40 @@ hop 2 fails    -> 10.2, 10.3, 14.3 s, then a dead-link 404
 
 There is no such thing as a slow success. That single fact sets the budgets:
 
+**The same is true of hop 1**, which took two goes to accept. Timed apart, the two hops move
+together and the populations never overlap:
+
+```
+hop 1  2.3 - 3.2s  ->  hop 2 answers in 0.5s with JSON   -- every time
+hop 1  over 6s     ->  hop 2 fails                       -- every time
+                       (6.2, 7.1, 11.0, 12.5, 21.8, 32.6 observed)
+```
+
+Whatever congestion stretches the script run also kills the result link it hands back. So a slow
+hop 1 is not a slow success either: it is an early announcement that the attempt has already
+failed, and every second spent after that is waste.
+
+> An earlier revision of this document claimed "21.8 s measured on a call that still succeeded".
+> That was wrong — checking the log, that call returned the `doGet` error page. No slow hop 1 has
+> ever been observed to succeed, and the mistaken figure was the reason `DEFAULT_TIMEOUT` was left
+> far too generous.
+
 | Hop | Budget | Why |
 |---|---|---|
-| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` 20 s | Genuinely variable: ~3 s typical, 21.8 s seen on a call that still succeeded |
+| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` **8 s** | Slowest success ever measured is 3.2 s; the fastest failure is 6.2 s. 8 admits every success with room and abandons the doomed early |
 | 2 — GET the result link | `CONTENT_TIMEOUT` **3 s** | Success is 0.5 s. Anything still running at 3 has already failed and is taking its time to say so |
+
+At 20 s and 12 s a doomed attempt cost the better part of half a minute, so nine of them spent
+**158 seconds discovering nothing** — the `after 9 attempts in 158s` dialog. At 8 and 3 the same
+nine attempts take about a minute and each is a real chance rather than a wait.
+
+#### Naming the hop
+
+Both hops used to fail with the identical message, `timed out reading the sheet endpoint's reply`,
+which made that production dialog impossible to diagnose from its own text — the only way to learn
+which hop had timed out was to go and re-time them by hand. `_fetch` now tags the exception with
+`HOP_SCRIPT` or `HOP_RESULT` and the message names it. Tagged rather than wrapped, so every handler
+in `_call` still matches on the real exception type and only the wording gains the detail.
 
 `CONTENT_TIMEOUT` is the most important number in this module. At 12 s, two doomed attempts consumed
 an entire budget — which is exactly what the production message `after 2 attempts in 45s` meant. At

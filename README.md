@@ -723,21 +723,28 @@ was still in flight*. The client now names it exactly:
 Each retry is a fresh POST and therefore a fresh link, which is precisely the remedy — the retry
 window widened from 4 seconds to 12 after a live failure used up all three of the old attempts.
 
-**The two hops are timed separately**, because measurement says they behave completely differently.
-Timed apart over many calls, the second hop is bimodal with nothing in between:
+**The two hops are timed separately**, because measurement says they behave completely differently —
+and, crucially, that **there is no such thing as a slow success on either one**. Timed apart over
+many calls, the two populations never overlap:
 
-| Hop 2 | Time |
-|---|---|
-| succeeds | 0.5 – 0.6 s |
-| fails | 10 – 14 s, then a dead-link 404 |
+| hop 1 (runs the script) | hop 2 (fetches the result) | Outcome |
+|---|---|---|
+| 2.3 – 3.2 s | 0.5 s | **JSON, every time** |
+| over 6 s | fails after 10 – 14 s | **dead link, every time** |
 
-**There is no such thing as a slow success.** A hop 2 still running at 3 seconds has already failed
-and is just taking its time to say so. So hop 2 is capped at 3 seconds and the attempt is abandoned
-for a fresh POST — which gets a fresh link, and is the only thing that actually fixes it.
+Whatever congestion stretches the script run also kills the result link it hands back. So a hop
+running long is not slow, it is *already failed and taking its time to say so* — and the fix is to
+abandon it and re-POST, which gets a fresh link. Hence the caps: **8 seconds for hop 1** (slowest
+success ever seen: 3.2 s) and **3 seconds for hop 2** (success: 0.5 s).
 
-That single number is what made retries work. At the old 12-second cap, two doomed attempts ate an
-entire budget — which is precisely what `after 2 attempts in 45s` meant. At 3 seconds the same
-wall-clock buys five or six rolls of the dice instead of two.
+Those two numbers are what make the retries work. At the old 20 s and 12 s, a doomed attempt cost
+most of half a minute, so nine of them spent **158 seconds discovering nothing** — which is exactly
+what `after 9 attempts in 158s` meant. At 8 and 3 the same nine attempts take about a minute and
+each one is a real chance rather than a wait.
+
+A failure also **names which hop** it happened on. Both used to report the identical
+`timed out reading the sheet endpoint's reply`, which made a dialog impossible to diagnose without
+re-timing the hops by hand.
 
 The delays between attempts are correspondingly small (0, ¼, ½, ½, 1, 1, 2, 2 seconds — nine
 attempts). Failures here are *independent*, not sustained: timed back to back, successes and
@@ -754,9 +761,12 @@ retrying never reaches it.
 > work-then-`sleep(interval)`, so the interval is a fixed pause *between* cycles, not a schedule a
 > cycle must fit inside — nothing queues up behind a slow cycle and nothing overlaps. The one real
 > cost was that sheet sync used to run *before* the alerting, making its seconds the alerts'
-> seconds. That is fixed by running it **last**, not by cutting the retries short. Measured after
-> the change: 12 of 12 calls succeeded, median 3.2 s; one took 61 s of retrying and still got
-> through, where the old budget would have given up.
+> seconds. That is fixed by running it **last**, not by cutting the retries short.
+
+Measured with the final settings, during a Google patch bad enough that individual attempts kept
+failing: **12 of 12 calls succeeded**, median 5.0 s. Four of them needed 29–64 s of retrying to get
+there. Under the earlier settings that same weather produced `after 9 attempts in 158s` and a
+failure dialog.
 
 A `doGet` that answers this honestly (JSON with `retry: true`, instead of an HTML page) is committed
 at **`docs/apps-script/Code.gs`**, along with a redeploy walkthrough at `docs/apps-script/README.md`.

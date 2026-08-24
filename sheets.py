@@ -51,7 +51,28 @@ EXEC_URL = (
 SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 #: Budget for the first hop -- POSTing to /exec, which runs the script.
-DEFAULT_TIMEOUT = 20.0
+#:
+#: Also set from measurement, and for the same reason as CONTENT_TIMEOUT: a slow hop 1 is not a slow
+#: success, it is an announcement that the attempt has already failed. Timing the hops apart shows
+#: the two populations never overlap:
+#:
+#:     hop 1 in 2.3 - 3.2s -> hop 2 answers in 0.5s with JSON, every time
+#:     hop 1 over 6s       -> hop 2 fails, every time (6.2, 7.1, 11.0, 12.5, 21.8, 32.6 observed)
+#:
+#: Whatever congestion stretches the script run also kills the result link it hands back, so once
+#: hop 1 is past a few seconds the remaining work is guaranteed waste. Cutting at 8 admits every
+#: success ever measured (slowest 3.2s) with room to spare and abandons the doomed ones early.
+#:
+#: This was 30, then 20. At 20 a doomed attempt cost the full 20 seconds, so nine of them spent
+#: 158 seconds discovering nothing -- which is the "after 9 attempts in 158s" dialog. At 8 the same
+#: nine attempts take about a minute and each one is a real chance rather than a wait.
+DEFAULT_TIMEOUT = 8.0
+
+#: Which of the two hops a failure happened on. Attached to the exception in _fetch and read back
+#: in _call, purely so the message can say which -- "timed out reading the sheet endpoint's reply"
+#: was true of both, which left a production failure impossible to diagnose from its own dialog.
+HOP_SCRIPT = "running the script"
+HOP_RESULT = "fetching the result link"
 
 #: Budget for the second hop -- fetching the one-shot result link.
 #:
@@ -248,6 +269,14 @@ def apps_script_error(raw: bytes) -> Optional[str]:
     if not all(marker in text for marker in _APPS_SCRIPT_PAGE_MARKERS):
         return None
     return visible_text(text) or None
+
+
+def _hop_of(exc: BaseException, default: str) -> str:
+    """Name the hop a failure happened on, for the message.
+
+    ``_fetch`` tags the exception; ``default`` covers anything raised outside it.
+    """
+    return str(getattr(exc, "clop_hop", default))
 
 
 def _snippet(raw: bytes, limit: int = 200) -> str:
@@ -467,15 +496,25 @@ class GoogleSheet:
             if exc.code in (301, 302, 303, 307, 308):
                 location = exc.headers.get("Location")
             if not location:
+                exc.clop_hop = HOP_SCRIPT
                 raise
             exc.close()
+        except Exception as exc:
+            # Tagged rather than wrapped, so every existing handler in _call still matches on the
+            # real exception type and only the wording gains the detail.
+            exc.clop_hop = HOP_SCRIPT
+            raise
 
-        with urllib.request.urlopen(location, timeout=cap(self.content_timeout)) as response:
-            return (
-                response.status,
-                response.headers.get("Content-Type", "unset"),
-                response.read(),
-            )
+        try:
+            with urllib.request.urlopen(location, timeout=cap(self.content_timeout)) as response:
+                return (
+                    response.status,
+                    response.headers.get("Content-Type", "unset"),
+                    response.read(),
+                )
+        except Exception as exc:
+            exc.clop_hop = HOP_RESULT
+            raise
 
     def _call(self, action: str, tab: str, a1: str, values: Any = None) -> Grid:
         payload = {"action": action, "tab": tab, "range": a1}
@@ -512,7 +551,7 @@ class GoogleSheet:
                 # above sync_sheet_step catches it -- it would end the monitor with a traceback
                 # and no dialog. Same trap clop_monitor's own client fell into.
                 self._retry_or_raise(
-                    "timed out reading the sheet endpoint's reply",
+                    f"timed out {_hop_of(exc, HOP_SCRIPT)}",
                     attempt,
                     exc,
                     hint=(
@@ -527,7 +566,7 @@ class GoogleSheet:
                 # IncompleteRead and friends: neither an HTTPError nor a URLError, so likewise
                 # invisible to both handlers above.
                 self._retry_or_raise(
-                    "the sheet endpoint's reply broke off part-way "
+                    f"the reply broke off part-way while {_hop_of(exc, HOP_RESULT)} "
                     f"({exc.__class__.__name__})",
                     attempt,
                     exc,

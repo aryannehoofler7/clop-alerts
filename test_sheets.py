@@ -249,6 +249,60 @@ class TwoHopTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)   # two full round trips, two hops each
 
 
+class WhichHopFailedTests(unittest.TestCase):
+    """A failure must name the hop it happened on.
+
+    "timed out reading the sheet endpoint's reply" was true of both hops, which made a production
+    dialog impossible to diagnose from its own text -- the only way to tell was to go and re-time
+    the hops by hand.
+    """
+
+    def test_a_hop_1_timeout_says_running_the_script(self):
+        def boom(_req):
+            return FailingReadResponse(TimeoutError("The read operation timed out"))
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn(sheets.HOP_SCRIPT, str(ctx.exception))
+        self.assertNotIn(sheets.HOP_RESULT, str(ctx.exception))
+
+    def test_a_hop_2_timeout_says_fetching_the_result_link(self):
+        def respond(request):
+            if isinstance(request, str):
+                return FailingReadResponse(TimeoutError("The read operation timed out"))
+            raise redirect_to()
+
+        with stub_urlopen(respond):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn(sheets.HOP_RESULT, str(ctx.exception))
+        self.assertNotIn(sheets.HOP_SCRIPT, str(ctx.exception))
+
+    def test_the_two_hops_are_labelled_differently(self):
+        self.assertNotEqual(sheets.HOP_SCRIPT, sheets.HOP_RESULT)
+
+
+class DoomedAttemptCostTests(unittest.TestCase):
+    """A slow hop is a failed attempt, not a slow one, so both caps are set to abandon early."""
+
+    def test_hop_1_is_capped_well_below_any_observed_failure(self):
+        # Measured: every success had hop 1 under 3.2s; every hop 1 over 6s went on to fail.
+        self.assertLessEqual(sheets.DEFAULT_TIMEOUT, 10.0)
+        self.assertGreaterEqual(sheets.DEFAULT_TIMEOUT, 5.0)
+
+    def test_hop_2_is_capped_well_below_any_observed_failure(self):
+        # Measured: success is 0.5s; failure takes 10s or more before admitting it.
+        self.assertLessEqual(sheets.CONTENT_TIMEOUT, 5.0)
+
+    def test_a_full_run_of_doomed_attempts_fits_the_deadline(self):
+        # The point of both caps: nine attempts must be nine real chances, not two waits.
+        attempts = len(sheets.DEFAULT_RETRY_DELAYS) + 1
+        worst = attempts * (sheets.DEFAULT_TIMEOUT + sheets.CONTENT_TIMEOUT)
+        worst += sum(sheets.DEFAULT_RETRY_DELAYS)
+        self.assertLessEqual(worst, sheets.DEFAULT_DEADLINE)
+
+
 class DeadlineTests(unittest.TestCase):
     """Retries stop on the clock as well as the count -- a stalled poll is not monitoring."""
 
