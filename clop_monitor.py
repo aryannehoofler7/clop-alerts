@@ -1625,12 +1625,19 @@ def market_order_alerts(
 ) -> bool:
     """Whether one buy order raises an alert under this good's settings.
 
-    never is absolute, which is what "never alert on" says; always then beats both relation
-    checks, so both of them off with a populated always reads as "only these nations,
+    The active nation is always ignored, ahead of every configurable override. ``never`` is
+    otherwise absolute, which is what "never alert on" says; ``always`` then beats both
+    relation checks, so both of them off with a populated always reads as "only these nations,
     whoever they are". The two relation checks are independent, so a buyer who is both a
     friend and an ally satisfies either one on its own. A matching buyer must then also pass
     the reserve check: name overrides never invent stock that is not available to contribute.
     """
+    if (
+        stockpiles is not None
+        and stockpiles.nation_name is not None
+        and order.nation_name.casefold() == stockpiles.nation_name.casefold()
+    ):
+        return False
     if matches_any_pattern(order.nation_name, good.never):
         return False
     buyer_matches = (

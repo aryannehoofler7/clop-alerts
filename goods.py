@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Union
 
-from overview import parse_panel_cells
+from overview import parse_overview_nation_name, parse_panel_cells
 
 #: A Ticks-Worth reading: a whole number of ticks, or one of the game's words (see TICKS_WORDS).
 TickCount = Union[int, str]
@@ -187,6 +187,9 @@ class Stockpiles:
 
         stock.ticks("Apples")   # 13, or "NONE", or "N/A"
 
+    It also retains the active nation name printed on that overview. Market alerts use the cached
+    name to discard the nation's own buy orders without another page request.
+
     ``ticks_worth`` is ``None`` when the panel had no such column, which the caller must treat as
     "could not read it" rather than as zeros.
     """
@@ -195,15 +198,17 @@ class Stockpiles:
         self,
         amounts: Dict[str, int],
         ticks: "Optional[Dict[str, TickCount]]" = None,
+        nation_name: "Optional[str]" = None,
     ) -> None:
         self._amounts = dict(amounts)
         self._ticks = None if ticks is None else dict(ticks)
+        self._nation_name = nation_name
 
     @classmethod
     def from_overview(cls, html: str) -> "Stockpiles":
         """Parse the Resources panel. Raises ``StockpileError`` on an unreadable value."""
         amounts, ticks = _parse_resources_panel(html)
-        return cls(amounts, ticks)
+        return cls(amounts, ticks, parse_overview_nation_name(html))
 
     def get(self, game_name: str, default: int = 0) -> int:
         return self._amounts.get(game_name, default)
@@ -212,6 +217,11 @@ class Stockpiles:
     def ticks_worth(self) -> "Optional[Dict[str, TickCount]]":
         """``{game_name: ticks}``, or ``None`` if the page had no Ticks-Worth column."""
         return None if self._ticks is None else dict(self._ticks)
+
+    @property
+    def nation_name(self) -> "Optional[str]":
+        """The active nation named by the overview page that supplied this snapshot."""
+        return self._nation_name
 
     def ticks(self, game_name: str) -> "TickCount":
         """How many ticks of ``game_name`` the nation has left, as the game reports it.

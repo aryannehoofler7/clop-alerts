@@ -173,6 +173,10 @@ class StockpilesTests(unittest.TestCase):
         self.assertEqual(stock["Apples"], 1226)
         self.assertEqual(stock["Gems"], 6)
 
+    def test_from_overview_caches_the_active_nation_name(self):
+        html = "<center><h3>Fish Bucket</h3></center>" + RESOURCES_HTML
+        self.assertEqual(Stockpiles.from_overview(html).nation_name, "Fish Bucket")
+
     def test_absent_good_is_zero(self):
         # A good the nation holds none of is simply not rendered on the page.
         stock = Stockpiles.from_overview(RESOURCES_HTML)

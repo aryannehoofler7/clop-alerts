@@ -50,6 +50,48 @@ from typing import Any, List, Optional, Sequence, Tuple
 MODES = ("span", "cell", "cells")
 
 
+class NationNameParser(HTMLParser):
+    """Read the active nation's heading from ``overview.php``.
+
+    The page prints the nation name as its first centred ``<h3>`` immediately before the
+    subregion, age and Nation panel. Restricting the capture to a heading inside ``<center>``
+    avoids treating an unrelated heading elsewhere in the shared page chrome as the nation.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._center_depth = 0
+        self._capturing = False
+        self._buf: List[str] = []
+        self.name: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        if tag == "center":
+            self._center_depth += 1
+        elif tag == "h3" and self._center_depth and self.name is None:
+            self._capturing = True
+            self._buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capturing:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "h3" and self._capturing:
+            name = " ".join("".join(self._buf).split())
+            self.name = name or None
+            self._capturing = False
+        elif tag == "center" and self._center_depth:
+            self._center_depth -= 1
+
+
+def parse_overview_nation_name(html: str) -> Optional[str]:
+    """Return the active nation name printed at the top of ``overview.php``, if present."""
+    parser = NationNameParser()
+    parser.feed(html)
+    return parser.name
+
+
 class PanelParser(HTMLParser):
     """Collect ``[(name, value), ...]`` from the overview panel headed ``heading``.
 

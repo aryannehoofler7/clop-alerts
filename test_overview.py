@@ -14,6 +14,7 @@ from overview import (
     REQUIRED_PANELS,
     OverviewError,
     panel_present,
+    parse_overview_nation_name,
     parse_panel,
     parse_panel_text,
     require_valid_overview,
@@ -34,6 +35,20 @@ APPLES = ('<tr><td style="text-align: right;">Apples</td>'
           '<td><span class="text-success">7</span></td></tr>')
 BAKERY = ('<tr><td style="text-align: right;">Bakery</td>'
           '<td><span class="text-success">2</span></td></tr>')
+
+
+class NationNameTests(unittest.TestCase):
+    def test_reads_the_first_centred_h3(self):
+        html = (
+            "<h3>Page chrome</h3>"
+            "<center><span>warning</span></center>"
+            "<center><h3>Fish &amp; Chips</h3></center>"
+            "<center><h3>Later heading</h3></center>"
+        )
+        self.assertEqual(parse_overview_nation_name(html), "Fish & Chips")
+
+    def test_missing_heading_is_unknown(self):
+        self.assertIsNone(parse_overview_nation_name(page(APPLES, BAKERY)))
 
 
 class PanelPresentTests(unittest.TestCase):
@@ -123,6 +138,12 @@ class GameSourceAssumptionsTests(unittest.TestCase):
         source = self._read("overview.php")
         for heading in REQUIRED_PANELS:
             self.assertIn(f'<div class="panel-heading">{heading}</div>', source)
+
+    def test_overview_renders_the_active_nation_as_a_centred_h3(self):
+        self.assertIn(
+            '<center><h3>{$nationinfo[\'name\']}</h3></center>',
+            self._read("overview.php"),
+        )
 
     def test_footer_closes_the_document(self):
         self.assertTrue(self._read("footer.php").rstrip().endswith("EOFORM;\n?>".rstrip())

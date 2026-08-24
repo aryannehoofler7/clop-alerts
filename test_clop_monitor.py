@@ -2607,6 +2607,16 @@ class MarketDecisionTests(unittest.TestCase):
     def test_name_patterns_ignore_case(self):
         self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
 
+    def test_own_nation_is_silent_even_when_always_matches(self):
+        stock = Stockpiles({"Oil": 5}, {"Oil": 3}, nation_name="LUNA SUENO")
+        self.assertFalse(
+            self.decide(
+                self.order(is_friend=True, is_ally=True),
+                stock=stock,
+                always=("Luna %",),
+            )
+        )
+
     def test_none_reserve_still_requires_a_positive_quantity(self):
         self.assertFalse(
             self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 0}))
@@ -2846,6 +2856,7 @@ def market_overview(amounts=None, ticks=None):
     )
     return (
         AUTHENTICATED_HEADER
+        + "<center><h3>Our Nation</h3></center>"
         + '<div class="panel-heading">Resources</div><table>'
         '<tr><td style="text-align: right;">Resource</td><td>Qty</td><td>Generated</td>'
         "<td>Used</td><td>Loss</td><td>Net</td><td>Ticks-Worth</td></tr>"
@@ -3387,6 +3398,30 @@ class MarketThroughAPollTests(unittest.TestCase):
         for message in notifier.messages:
             self.assertIn("Buy orders for Machinery Parts:", message)
             self.assertIn("Luna Sueno (friend) wants 12 at 5,000 bits each", message)
+
+    def test_the_overview_nation_never_appears_in_a_market_alert(self):
+        client, _ = market_client(
+            self.pages(
+                {
+                    "10": [
+                        market_row(41, "Our Nation", "text-info", 99, "9,000"),
+                        market_row(42, "Other Nation", "text-info", 12, "5,000"),
+                    ]
+                }
+            )
+        )
+        notifier = self.RecordingNotifier()
+        settings = AlertCategorySettings(
+            market_goods=(
+                clop_monitor.WatchedGood("Machinery Parts", always=("Our Nation",)),
+            )
+        )
+
+        self.poll(client, None, notifier, settings)
+
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertNotIn("Our Nation", notifier.messages[0])
+        self.assertIn("Other Nation (friend) wants 12 at 5,000 bits each", notifier.messages[0])
 
     def test_a_muted_market_costs_no_request_across_a_whole_poll(self):
         # settings.json in, requests out: the marketplace is served here, so the only reason
