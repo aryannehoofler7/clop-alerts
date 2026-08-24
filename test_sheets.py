@@ -62,6 +62,28 @@ def html_page(body=b"<html><body>Sorry, unable to open the file at this time.</b
     return FakeResponse(body, content_type="text/html; charset=utf-8")
 
 
+def apps_script_error_page(message="Script function not found: doGet"):
+    """The real Apps Script error page, trimmed to the parts the reader keys off.
+
+    Captured from the live endpoint: ~5KB of ppConfig telemetry boilerplate wrapping one line of
+    monospace body text. The boilerplate is what makes a first-200-characters quote useless, so it
+    is kept here rather than tidied away.
+    """
+    return html_page(
+        b"<!DOCTYPE html><html><head><script nonce=\"cQ9OZR9PSnEF4FD8UuMogg\">"
+        b"window['ppConfig'] = {productName: '26981ed0d57bbad37e728ff58134270c', "
+        b"deleteIsEnforced:  false , sealIsEnforced:  false , heartbeatRate:  0.5 , "
+        b"periodicReportingRateMillis:  60000.0};</script>"
+        b"<link rel=\"shortcut icon\" href=\"//ssl.gstatic.com/docs/script/images/favicon.ico\">"
+        b"<title>Error</title><style type=\"text/css\">.errorMessage {font-weight: bold;}</style>"
+        b"</head><body style=\"margin:20px\"><div>"
+        b"<img alt=\"Google Apps Script\" src=\"//ssl.gstatic.com/docs/script/images/logo.png\">"
+        b"</div><div style=\"text-align:center;font-family:monospace\">"
+        + message.encode()
+        + b"</div></body></html>"
+    )
+
+
 def replies(*outcomes):
     """Return a stub handler that plays `outcomes` in order, raising any that are exceptions."""
     queued = list(outcomes)
@@ -266,6 +288,54 @@ class ErrorHandlingTests(unittest.TestCase):
                 GoogleSheet(retry_delays=()).read("T", "A1")
         self.assertIn("broke off part-way", str(ctx.exception))
 
+    def test_expired_result_link_is_named_not_dumped(self):
+        # The 5KB page quotes as nothing but ppConfig boilerplate, so the reader must pull out the
+        # one line of body text that says what actually went wrong.
+        with stub_urlopen(lambda req: apps_script_error_page()):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("Script function not found: doGet", message)
+        self.assertNotIn("ppConfig", message)
+
+    def test_expired_result_link_does_not_blame_the_deployment(self):
+        # The whole point of the change: this fault is Google being slow, and the dialog must not
+        # send the reader off to redeploy a healthy Apps Script.
+        with stub_urlopen(lambda req: apps_script_error_page()):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("clears on its own", message)
+        self.assertNotIn("'Anyone' access", message)
+
+    def test_expired_result_link_is_retried(self):
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(apps_script_error_page(), ok([[5]]))) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[5]])
+        self.assertEqual(len(calls), 2)
+
+    def test_other_apps_script_error_pages_are_reported_verbatim(self):
+        page = apps_script_error_page("Authorization is required to perform that action.")
+        with stub_urlopen(lambda req: page):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        message = str(ctx.exception)
+        self.assertIn("Authorization is required", message)
+        # Not the expiring-link fault, so it must not carry that fault's reassurance.
+        self.assertNotIn("clears on its own", message)
+
+    def test_sign_in_page_still_points_at_the_deployment(self):
+        # A page that is *not* an Apps Script error page keeps the old advice, which is right for it.
+        with stub_urlopen(lambda req: html_page(b"<html><body>Sign in to continue</body></html>")):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("'Anyone' access", str(ctx.exception))
+
+    def test_apps_script_error_reader_ignores_unrelated_html(self):
+        self.assertIsNone(sheets.apps_script_error(b"<html><body>Sign in</body></html>"))
+        self.assertIsNone(sheets.apps_script_error(b"<title>Error</title>"))  # marker alone
+        self.assertIsNone(sheets.apps_script_error(b"\xff\xfe not utf-8 at all"))
+
     def test_a_write_retried_after_a_garbled_reply_repeats_the_same_payload(self):
         # Retrying a write is only safe because the payload is an assignment, not an increment.
         # If this ever stops holding, the retry has to go.
@@ -331,6 +401,39 @@ class ErrorHandlingTests(unittest.TestCase):
                     GoogleSheet(retry_delays=(1.0, 3.0)).read("T", "A1")
         self.assertEqual(len(calls), 3)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 3.0])
+
+    def test_retry_flagged_protocol_error_is_retried(self):
+        # What the redeployed doGet answers when Google's one-shot result link has expired. It is
+        # {ok: false}, but it is the one {ok: false} that is worth asking again.
+        expired = FakeResponse(
+            json.dumps(
+                {"ok": False, "retry": True, "error": "this endpoint answers POST only."}
+            ).encode()
+        )
+        with mock.patch.object(sheets.time, "sleep"):
+            with stub_urlopen(replies(expired, ok([[9]]))) as calls:
+                self.assertEqual(GoogleSheet(retry_delays=(1.0,)).read("T", "A1"), [[9]])
+        self.assertEqual(len(calls), 2)
+
+    def test_retry_flagged_error_still_reports_its_message_when_persistent(self):
+        def boom(_req):
+            return FakeResponse(
+                json.dumps({"ok": False, "retry": True, "error": "answers POST only"}).encode()
+            )
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertIn("answers POST only", str(ctx.exception))
+
+    def test_protocol_error_without_the_flag_is_still_definitive(self):
+        # The flag must be opt-in: 'no such tab' will be just as true in three seconds.
+        with mock.patch.object(sheets.time, "sleep") as sleep:
+            with stub_urlopen(lambda req: no_such_tab("Ghost")) as calls:
+                with self.assertRaises(SheetError):
+                    GoogleSheet(retry_delays=(1.0, 3.0)).read("Ghost", "A1")
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
 
     def test_protocol_error_is_not_retried(self):
         with mock.patch.object(sheets.time, "sleep") as sleep:

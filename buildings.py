@@ -128,18 +128,38 @@ def locate_regions(column_a: Sequence[object]) -> Regions:
     return Regions(have_header, disabled_marker, have_rows, disabled_rows)
 
 
-def _read_columns(sheet: GoogleSheet, nation: str) -> Tuple[List[object], List[object]]:
+def read_columns(sheet: GoogleSheet, nation: str) -> Tuple[List[object], List[object]]:
+    """Read columns A and B of the nation tab in one round trip.
+
+    Public because ``sanity_check`` and ``reconcile`` both need it and always run back-to-back: a
+    caller that reads once and passes the result to both spends one Apps Script execution instead
+    of two, and -- the part that actually matters -- both then judge the *same* snapshot of the
+    sheet rather than two reads a few seconds apart.
+    """
     grid = sheet.read(nation, COLUMN_SCAN_RANGE)
     column_a = [row[0] if len(row) > 0 else "" for row in grid]
     column_b = [row[1] if len(row) > 1 else "" for row in grid]
     return column_a, column_b
 
 
+#: Retained so the older private name keeps working for anything that reached for it.
+_read_columns = read_columns
+
+Columns = Tuple[List[object], List[object]]
+
+
 def reconcile(
-    sheet: GoogleSheet, nation: str, overview: Dict[str, Tuple[int, int]]
+    sheet: GoogleSheet,
+    nation: str,
+    overview: Dict[str, Tuple[int, int]],
+    columns: Optional[Columns] = None,
 ) -> List[Correction]:
-    """Write the sheet cells whose have/disabled count is wrong; return the corrections made."""
-    column_a, column_b = _read_columns(sheet, nation)
+    """Write the sheet cells whose have/disabled count is wrong; return the corrections made.
+
+    ``columns`` is an already-read ``(column_a, column_b)`` from :func:`read_columns`; omit it and
+    this reads them itself.
+    """
+    column_a, column_b = read_columns(sheet, nation) if columns is None else columns
     regions = locate_regions(column_a)
     desired = desired_counts(overview)
 
@@ -162,10 +182,17 @@ def reconcile(
 
 
 def sanity_check(
-    sheet: GoogleSheet, nation: str, overview: Dict[str, Tuple[int, int]]
+    sheet: GoogleSheet,
+    nation: str,
+    overview: Dict[str, Tuple[int, int]],
+    columns: Optional[Columns] = None,
 ) -> List[str]:
-    """Return a list of structural/mapping problems (empty means the layout is trustworthy)."""
-    column_a, _ = _read_columns(sheet, nation)
+    """Return a list of structural/mapping problems (empty means the layout is trustworthy).
+
+    ``columns`` is an already-read ``(column_a, column_b)`` from :func:`read_columns`; omit it and
+    this reads them itself.
+    """
+    column_a, _ = read_columns(sheet, nation) if columns is None else columns
     regions = locate_regions(column_a)
     problems: List[str] = []
 

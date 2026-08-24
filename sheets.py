@@ -22,6 +22,7 @@ Everything here is Python standard library only, matching the rest of this proje
 
 from __future__ import annotations
 
+import html
 import http.client
 import json
 import os
@@ -51,18 +52,40 @@ SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 DEFAULT_TIMEOUT = 30.0
 
-#: One initial request plus these two retries. A few seconds is long enough to absorb the brief
-#: Google Apps Script glitches seen in production without holding the monitor up for an entire
-#: polling interval. Writes are explicit assignments, so repeating the identical payload is
-#: idempotent if Google applied it but dropped the response.
+#: One initial request plus these three retries. Writes are explicit assignments, so repeating the
+#: identical payload is idempotent if Google applied it but dropped the response.
 #:
 #: Everything that can go wrong *between* asking and being answered is retried, because none of it
 #: distinguishes "Google hiccuped" from "Google is broken" on a single sample: transport failures,
-#: the HTTP statuses below, a reply that dies mid-transfer, and -- the one this list was missing --
-#: a perfectly ordinary HTTP 200 whose body is not JSON. Only the endpoint's own protocol replies
-#: (``{ok: false}``, e.g. ``no such tab``) are definitive and fail on the first attempt.
-DEFAULT_RETRY_DELAYS = (1.0, 3.0)
+#: the HTTP statuses below, a reply that dies mid-transfer, and a perfectly ordinary HTTP 200 whose
+#: body is not JSON. Only the endpoint's own protocol replies (``{ok: false}``, e.g. ``no such
+#: tab``) are definitive and fail on the first attempt.
+#:
+#: The window widened from (1, 3) after a live failure took all three attempts inside about four
+#: seconds. Every retry is a fresh POST and so a fresh result link (see EXPIRING_LINK below), which
+#: is exactly the remedy for that fault -- it just needs longer than four seconds to find a good
+#: one when Google is having a bad minute.
+DEFAULT_RETRY_DELAYS = (1.0, 3.0, 8.0)
 RETRYABLE_HTTP_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
+
+#: How Google Apps Script answers a POST, and the failure mode that falls out of it.
+#:
+#: ``/exec`` does not return the result. It runs the script and then 302s to a one-shot
+#: ``script.googleusercontent.com/macros/echo?user_content_key=...`` link holding the output. That
+#: link is consumed by the first read **and** expires on a timer -- measured on this deployment as
+#: alive at 15 seconds and dead at 30. Read it twice, or late, and Google does not 404: it falls
+#: back to invoking the deployment over GET, which calls ``doGet``. A deployment that defines only
+#: ``doPost`` therefore answers ``Script function not found: doGet`` -- as an HTML page, with
+#: HTTP 200, which is why this looks like a clean success right up until the JSON parse.
+#:
+#: ``docs/apps-script/Code.gs`` now defines ``doGet`` so that fall-through returns JSON instead;
+#: until that is redeployed, the live endpoint still produces the HTML page and this client
+#: recognises it by name. See ``docs/apps-script/README.md``.
+EXPIRING_LINK = "Script function not found: doGet"
+
+#: Two markers that together identify a Google Apps Script HTML error page. Matched as a pair
+#: because either alone appears on unrelated Google pages.
+_APPS_SCRIPT_PAGE_MARKERS = ('alt="Google Apps Script"', "<title>Error</title>")
 
 #: Environment variable naming the sheet tab for your nation (its value is the exact tab name, e.g.
 #: ``LePone(Z)``). Set it in ``.env`` alongside CLOP_USERNAME / CLOP_PASSWORD.
@@ -139,6 +162,25 @@ def index_column(grid: Grid) -> Dict[str, List[int]]:
 
 class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
+
+
+def apps_script_error(raw: bytes) -> Optional[str]:
+    """Return the message from a Google Apps Script HTML error page, or ``None`` if not one.
+
+    These pages are ~5KB of telemetry boilerplate wrapped around a single line of monospace text,
+    so quoting the first 200 characters shows nothing but ``window['ppConfig'] = ...``. The line
+    that matters is the whole of the visible body: ``Script function not found: doGet``,
+    ``Authorization is required to perform that action``, an uncaught ``Exception: ...``.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not all(marker in text for marker in _APPS_SCRIPT_PAGE_MARKERS):
+        return None
+    start = text.find("<body")
+    body = text[start:] if start != -1 else text
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", body)).split()) or None
 
 
 def _snippet(raw: bytes, limit: int = 200) -> str:
@@ -338,28 +380,55 @@ class GoogleSheet:
             try:
                 body = json.loads(raw.decode("utf-8"))
             except (ValueError, UnicodeDecodeError) as exc:
-                # A 200 whose body is HTML rather than JSON. Google serves one both when a
-                # deployment is genuinely not public (a sign-in page) and when Apps Script simply
-                # stumbles on the googleusercontent hop it redirects to -- and a single sample
-                # cannot tell those apart, so this retries and quotes what arrived rather than
-                # naming a cause. Only a run of them points at the deployment.
-                self._retry_or_raise(
-                    f"unexpected non-JSON reply from sheet endpoint "
-                    f"(Content-Type: {content_type}): {_snippet(raw)}",
-                    attempt,
-                    exc,
-                    hint=(
+                # A 200 whose body is not JSON. Which one it is matters a great deal to whoever
+                # reads the dialog, so name it rather than dumping bytes: Apps Script's own error
+                # page is a Google-side fault that clears itself, while a sign-in page means the
+                # deployment needs redeploying. Telling the user to go and redeploy a perfectly
+                # healthy deployment is the wrong answer, and was the first version of this.
+                detail = apps_script_error(raw)
+                if detail and EXPIRING_LINK in detail:
+                    message = (
+                        "Google returned the sheet result too late to be read: "
+                        f"'{detail}'"
+                    )
+                    hint = (
+                        ". Nothing is wrong with your sheet, your data, or the deployment's "
+                        "access setting. Apps Script answers a POST by redirecting to a one-shot "
+                        "result link that also expires after about 20 seconds; read twice or read "
+                        "late, it falls back to running the script over GET, which this "
+                        "deployment does not implement. Every retry starts a fresh request, so "
+                        "this clears on its own once Google speeds back up"
+                    )
+                elif detail:
+                    message = f"the sheet endpoint returned an Apps Script error page: '{detail}'"
+                    hint = ""
+                else:
+                    message = (
+                        f"unexpected non-JSON reply from sheet endpoint "
+                        f"(Content-Type: {content_type}): {_snippet(raw)}"
+                    )
+                    hint = (
                         ". One garbled reply is a Google hiccup; several in a row usually mean "
                         "the Apps Script deployment has stopped being 'Anyone' access and Google "
                         "is serving a sign-in page instead"
-                    ),
-                )
+                    )
+                self._retry_or_raise(message, attempt, exc, hint=hint)
                 continue
 
             if not isinstance(body, dict) or not body.get("ok"):
                 message = ""
                 if isinstance(body, dict):
                     message = str(body.get("error", ""))
+                # ``retry: true`` is the endpoint saying "this one is worth asking again" -- the
+                # ``doGet`` reply uses it, because an expired result link is a Google-side hiccup
+                # and not the definitive verdict that every other {ok:false} represents. Without
+                # this flag, redeploying with doGet would trade an HTML page that gets retried for
+                # a JSON error that does not, which is a worse outcome, not a better one.
+                if isinstance(body, dict) and body.get("retry"):
+                    self._retry_or_raise(
+                        message or "sheet endpoint asked for the request to be repeated", attempt
+                    )
+                    continue
                 raise SheetError(message or "sheet endpoint reported failure")
             return body.get("values", [])
 

@@ -2021,7 +2021,13 @@ def sync_sheet_step(
     """
     # Imported here, not at module scope: sheets.py imports load_env_file from this module, so a
     # top-level import would be a cycle. Do not "tidy" these up to the top of the file.
-    from buildings import BuildingError, parse_overview_buildings, reconcile, sanity_check
+    from buildings import (
+        BuildingError,
+        parse_overview_buildings,
+        read_columns,
+        reconcile,
+        sanity_check,
+    )
     from sheets import SheetError
     from stockpiles import (
         NationStatus,
@@ -2037,7 +2043,11 @@ def sync_sheet_step(
 
         phase = "the building reconcile"
         overview = parse_overview_buildings(overview_html)
-        problems = sanity_check(sheet, nation, overview)
+        # One read feeding both: the check and the write then judge the same snapshot, and the
+        # phase costs one Apps Script execution rather than two. Fewer round trips also means
+        # fewer chances to draw one of Google's expiring result links (see sheets.EXPIRING_LINK).
+        columns = read_columns(sheet, nation)
+        problems = sanity_check(sheet, nation, overview, columns)
         if problems:
             notifier.notify_failure(
                 "Building sync skipped - the sheet layout or building mapping looks wrong, so no "
@@ -2046,7 +2056,7 @@ def sync_sheet_step(
                 + "\n".join(f"- {problem}" for problem in problems)
             )
         else:
-            corrections = reconcile(sheet, nation, overview)
+            corrections = reconcile(sheet, nation, overview, columns)
             if corrections:
                 notifier.notify(
                     "Building counts corrected on the sheet:\n\n"

@@ -682,26 +682,53 @@ Ranges use A1 notation. `write` accepts a scalar, a flat row, or a 2-D block and
 shape the range expects. Any failure — network, a non-JSON reply, or a server-side error such as an
 unknown tab — raises `sheets.SheetError`.
 
-Transient endpoint failures are retried before that error escapes: the original request, then two
-retries after 1 and 3 seconds. The rule is that **everything which can go wrong between asking and
-being answered is retried**, because none of it can be told apart from a passing Google hiccup on a
-single sample:
+Transient endpoint failures are retried before that error escapes: the original request, then three
+retries after 1, 3 and 8 seconds. The rule is that **everything which can go wrong between asking
+and being answered is retried**, because none of it can be told apart from a passing Google hiccup
+on a single sample:
 
 - network failures, and HTTP 404, 408, 425, 429 and 5xx responses;
 - a reply that times out or breaks off part-way through its body;
 - an HTTP **200 whose body is not JSON** — Google serves an HTML page for this, and it looks like a
-  clean success right up until the parse.
+  clean success right up until the parse;
+- an `{ok: false}` reply carrying `retry: true`, which is the endpoint itself saying "ask again".
 
 Apps Script protocol replies such as `no such tab` are definitive and fail immediately, on the first
 attempt. Writes assign explicit values rather than adjusting them, so repeating an identical write
 is safe whether or not the first one landed.
 
-The non-JSON case is worth knowing about, because its message used to name a cause it could not
-know. Google returns an HTML page both when the deployment has genuinely stopped being "Anyone"
-access — a sign-in page — and when Apps Script merely stumbles on the `googleusercontent.com` hop
-it redirects to. One occurrence cannot distinguish those, so the error now **quotes what actually
-arrived** (its `Content-Type` and the first 200 characters of the body) instead of guessing, and
-only points at the deployment after three failures in a row.
+#### Google's expiring result link
+
+This is the fault behind most `Sheet sync failed …` dialogs, and it is worth understanding because
+the obvious reading of the message — "something is wrong with my sheet or my deployment" — is wrong.
+
+`/exec` does not return the result of a POST. It runs the script and then **redirects to a one-shot
+link** (`script.googleusercontent.com/macros/echo?user_content_key=…`) holding the output. Measured
+on this deployment, that link is **consumed by the first read** and **expires after somewhere
+between 15 and 30 seconds**. Read twice, or read late, and Google does not return a 404 — it falls
+back to invoking the deployment over **GET**, which the original script did not implement. The
+answer is `Script function not found: doGet`, as a 5 KB HTML page carrying **HTTP 200**.
+
+The failure is Google being slow, nothing else. Caught live with both hops timed: after 56 clean
+polls answering in 3–6 seconds, one poll saw the script execution stretch to 21.8 seconds and the
+fetch of the result link take a further 16.3 — long enough for the link to expire *while that fetch
+was still in flight*. The client now names it exactly:
+
+> Google returned the sheet result too late to be read: 'Script function not found: doGet'. Nothing
+> is wrong with your sheet, your data, or the deployment's access setting. […] Every retry starts a
+> fresh request, so this clears on its own once Google speeds back up.
+
+Each retry is a fresh POST and therefore a fresh link, which is precisely the remedy — the retry
+window widened from 4 seconds to 12 after a live failure used up all three of the old attempts.
+
+A `doGet` that answers this honestly (JSON with `retry: true`, instead of an HTML page) is committed
+at **`docs/apps-script/Code.gs`**, along with a redeploy walkthrough at `docs/apps-script/README.md`.
+Redeploying is optional; the client handles both.
+
+Other non-JSON replies keep the older, blunter treatment: the error **quotes what actually arrived**
+(`Content-Type` plus the first 200 characters) rather than guessing, and points at the deployment's
+access setting only after repeated failures — that being the one cause a sign-in page really does
+indicate.
 
 ### Your nation tab
 
@@ -886,7 +913,9 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`resource '...' has an unreadable quantity`** | The game printed a quantity that is not a plain number. It is refused rather than guessed at, because guessing would write a wrong number — most likely a `0`, meaning "you have none of this". | Look at that resource on `overview.php` in a browser. If the game has started formatting quantities differently, `stockpiles.py` needs updating to match. **Nothing was written.** |
 | **`not logged in when reading overview.php`** | The session dropped and logging back in did not take. | Check `CLOP_USERNAME` and `CLOP_PASSWORD` in `.env`, and that you can sign in through a browser. **Nothing was written.** |
 | **`Sheet sync failed during ...`** | The catch-all. If the sentence after the colon matches a row above, use that row. Otherwise it is a network or Google Sheets problem rather than anything wrong with your data, and the message names which half it happened in. | For a plain network or Sheets problem: usually nothing, it clears by itself. If it persists, check your internet connection and that the sheet still opens in a browser. |
-| **`unexpected non-JSON reply from sheet endpoint`** | Google answered `200 OK` with an HTML page instead of the JSON the Apps Script endpoint should return. **It has already been tried three times** over about four seconds, so this is not a one-off blip. The message quotes the page's `Content-Type` and its first 200 characters. | Read the quoted snippet. If it looks like a Google sign-in page, the Apps Script deployment has lost its "Anyone" access — redeploy it from the source in `docs/superpowers/specs/2026-08-23-google-sheets-module-design.md`. If it is a Google "unable to open the file" or "temporarily unavailable" page, that is Google's end and it clears by itself. **Nothing was written on this attempt**, and the next poll retries from scratch. |
+| **`Google returned the sheet result too late to be read`** | **The common one, and it is not your fault.** Google answers a POST by redirecting to a single-use result link that expires in well under a minute; when it is read late, Google runs the script over `GET` instead and returns `Script function not found: doGet`. Already retried four times over twelve seconds, so Google was having a genuinely bad minute. | Nothing. It clears itself, and the next poll starts fresh. **Nothing was written on this attempt.** If it fires on most polls for an hour or more, redeploy the endpoint per `docs/apps-script/README.md` — that makes the failure legible but does not make Google faster. |
+| **`unexpected non-JSON reply from sheet endpoint`** | Google answered `200 OK` with an HTML page that is *not* an Apps Script error page. Already tried four times. The message quotes the page's `Content-Type` and its first 200 characters. | Read the quoted snippet. If it looks like a Google sign-in page, the deployment has lost its "Anyone" access — redeploy per `docs/apps-script/README.md`. If it is a Google "unable to open the file" page, that is Google's end and it clears by itself. **Nothing was written on this attempt.** |
+| **`the sheet endpoint returned an Apps Script error page`** | The script itself failed — e.g. `Authorization is required to perform that action`. This is the deployment, not the network. | Open the script (Extensions → Apps Script on the sheet) and check it still runs and is still deployed as *Execute as: Me* / *Who has access: Anyone*. `docs/apps-script/README.md` has the walkthrough. |
 | **`timed out reading the sheet endpoint's reply`** / **`the reply broke off part-way`** | The connection to Google opened but the answer never fully arrived. Also already retried three times. | Almost always the network or Google. It clears by itself; if it does not, check your connection. **Nothing was written on this attempt.** |
 
 Two details that will otherwise confuse you:

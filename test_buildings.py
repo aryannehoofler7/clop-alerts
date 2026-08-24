@@ -7,11 +7,13 @@ import buildings
 from building_map import GAME_TO_SHEET, SHEET_BUILDINGS
 from stockpiles import DASHBOARD_TAB
 from buildings import (
+    COLUMN_SCAN_RANGE,
     BuildingError,
     Correction,
     desired_counts,
     locate_regions,
     parse_overview_buildings,
+    read_columns,
     reconcile,
     sanity_check,
 )
@@ -118,8 +120,10 @@ class FakeSheet:
         self._dashboard = dashboard if dashboard is not None else dashboard_grid()
         self.writes = []   # (a1, value) from write_cell
         self.blocks = []   # (a1, values) from write
+        self.reads = []    # (tab, a1) -- one entry per round trip to the endpoint
 
     def read(self, tab, a1):
+        self.reads.append((tab, a1))
         if tab == DASHBOARD_TAB:
             return self._dashboard
         if a1.startswith("Q"):
@@ -394,6 +398,36 @@ class FakeNotifier:
     def notify_failure(self, message):
         self.failures.append(message)
         return False
+
+
+class SharedColumnReadTests(unittest.TestCase):
+    def test_passing_columns_in_costs_no_round_trip(self):
+        col_a, names = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        columns = read_columns(sheet, "T")
+        self.assertEqual(len(sheet.reads), 1)
+        sanity_check(sheet, "T", {}, columns)
+        reconcile(sheet, "T", {}, columns)
+        self.assertEqual(len(sheet.reads), 1)
+
+    def test_omitting_columns_still_reads_for_itself(self):
+        col_a, _ = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        sanity_check(sheet, "T", {})
+        self.assertEqual(len(sheet.reads), 1)
+
+    def test_sync_step_reads_the_buildings_range_once(self):
+        # Two separate reads of the same range used to run back-to-back every poll. Beyond the
+        # wasted execution, the check and the write judged different snapshots of the sheet.
+        from clop_monitor import sync_sheet_step
+
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Basic Mine")] = 8
+        sheet = FakeSheet(col_a, col_b)
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", FakeNotifier())
+        buildings_reads = [r for r in sheet.reads if r[1].startswith("A1:B")]
+        self.assertEqual(buildings_reads, [("T", COLUMN_SCAN_RANGE)])
 
 
 class SyncSheetStepTests(unittest.TestCase):

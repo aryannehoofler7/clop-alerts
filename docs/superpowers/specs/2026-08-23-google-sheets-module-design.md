@@ -42,8 +42,16 @@ Sheets `getValues()/setValues()` shape. Failures return `{ok:false, error:"..."}
 (Apps Script can't set arbitrary status codes reliably), so the client distinguishes success by
 the `ok` flag, not the HTTP status.
 
-The script text is committed to the repo (see `docs/` reference below) so any member can
-re-deploy it if the deployment is ever lost, but the **live `/exec` URL** is what the module uses.
+The script text is committed at **`docs/apps-script/Code.gs`**, with a redeploy walkthrough beside
+it in `docs/apps-script/README.md`, so any member can rebuild the deployment if it is ever lost. The
+**live `/exec` URL** is what the module uses.
+
+> This spec claimed that source was committed from the day it was written. It was not — the folder
+> was created later, while diagnosing the expiring-link fault below. Until then, losing the
+> deployment would have meant losing the server side entirely.
+
+`doGet` is defined as well as `doPost`, and only to make one specific failure honest — see
+[Google's expiring result link](#googles-expiring-result-link).
 
 ### 2. `sheets.py` (this repo, standard library only)
 
@@ -105,7 +113,9 @@ with a traceback and no dialog, which is the single outcome this project refuses
 | Body dies mid-transfer (`IncompleteRead`) | `SheetError` "… broke off part-way"       | yes      |
 | HTTP status in `RETRYABLE_HTTP_STATUSES` | `SheetError` with status + body snippet    | yes      |
 | Any other HTTP status != 200          | `SheetError` with status + body snippet       | no       |
-| Body not JSON (HTML page)             | `SheetError` quoting `Content-Type` + snippet | yes      |
+| Apps Script error page (HTML, HTTP 200) | `SheetError` naming the page's own message  | yes      |
+| Body not JSON, not that page          | `SheetError` quoting `Content-Type` + snippet | yes      |
+| `{ok:false, error, retry:true}`       | `SheetError(error)`                           | yes      |
 | `{ok:false, error}`                   | `SheetError(error)`                           | no       |
 | Unknown tab / bad range               | Surfaces as `{ok:false}` from the script      | no       |
 
@@ -126,6 +136,66 @@ characters of what arrived, and only names the deployment as a likely cause afte
 Retrying a **write** after a garbled reply is safe because the payload is an assignment, not an
 adjustment: if Google applied the first one and lost the response, the second writes the same value.
 A test pins that the retried payload is byte-identical, so this stops being true loudly.
+
+### Google's expiring result link
+
+The dominant failure in production, and the reason `doGet` exists. Established by direct
+measurement against the live endpoint, not inference:
+
+`/exec` **does not return the result of a POST.** It runs the script, then 302s to a one-shot
+`script.googleusercontent.com/macros/echo?user_content_key=…` link holding the output. That link:
+
+- is **consumed by the first read** — refetching the same link immediately returns the error page;
+- **expires on a timer** — measured alive at 15s, dead at 30s, on a link never read at all.
+
+Read twice or read late, Google does not 404. It **falls back to invoking the deployment over GET**.
+With only `doPost` defined that produced `Script function not found: doGet`, served as ~5KB of HTML
+with **HTTP 200** — a clean success by every signal except the JSON parse.
+
+Three consequences shaped the design:
+
+1. **It must be retried, and retrying is a real fix**, because every retry is a fresh POST and so a
+   fresh link. The window widened from `(1, 3)` to `(1, 3, 8)` after a live failure consumed all
+   three of the old attempts inside about four seconds.
+2. **The message must not blame the deployment.** The first version of this error asked "is the
+   deployment still 'Anyone' access?" — and 12 live calls immediately afterwards all returned clean
+   JSON, so the deployment was healthy and the advice would have sent the reader to redeploy for
+   nothing. The client now reads the page's own one line of body text and reports it.
+3. **`doGet` returns `{ok:false, retry:true}`, not a bare `{ok:false}`.** Every other `{ok:false}`
+   is a definitive verdict the client does not retry. Without the flag, redeploying would have
+   traded an HTML page that *is* retried for a JSON error that is *not* — a regression wearing the
+   costume of a fix.
+
+`doGet` cannot do the work itself: the fall-through GET carries only Google's `user_content_key` and
+`lib`, never the caller's action/tab/range. Reporting honestly is the most it can do.
+
+#### What actually trips it
+
+Caught live by a probe that timed the two hops separately. Across 56 clean polls the endpoint
+answered in 3–6 s; then, inside a single poll:
+
+```
+poll 14: hop1= 2.7s  hop2 HTTP 404
+poll 14: hop1=11.6s  hop2 HTTP 404
+poll 14: hop1=21.8s  hop2=16.3s  *** doGet error page, 5396 bytes ***
+```
+
+The trigger is **latency on the second hop**, not request rate (45 back-to-back reads reproduced
+nothing) and not cookie or opener state. Google slows down; the script execution stretches from
+2.7 s to 21.8 s; and the fetch of the result link itself takes 16.3 s — long enough that the link's
+15–30 s lifetime **runs out while that fetch is still in flight**. Google then falls back to the GET
+invocation and answers with the error page.
+
+The two `HTTP 404`s just before it are the same fault a moment earlier: the link already gone rather
+than expiring mid-fetch. 404 is in `RETRYABLE_HTTP_STATUSES`, so those were already being retried
+correctly — which is why only the third one reached the user.
+
+This also settles what *not* to do. Capping the first hop looks appealing but is useless: the link's
+clock starts when the 302 is issued, i.e. after hop 1 finishes, so a slow execution hands over a
+perfectly fresh link. Only hop 2's own latency can consume it.
+
+During a slow patch this severe, the four attempts inside 12 s will all fail — and that is the right
+outcome. The monitor reports it accurately, keeps polling, and the next poll 60 s later tries again.
 
 ## Testing
 
