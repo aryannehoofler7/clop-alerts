@@ -636,6 +636,49 @@ class NationFromEnvTests(unittest.TestCase):
         self.assertIn(NATION_ENV, str(ctx.exception))
 
 
+class TabMissingClassificationTests(unittest.TestCase):
+    """A missing tab is a configuration fault; everything else is weather. Callers act on that."""
+
+    def test_no_such_tab_is_its_own_exception_type(self):
+        with stub_urlopen(lambda req: no_such_tab("Ghost")):
+            with self.assertRaises(sheets.SheetTabMissing):
+                GoogleSheet().read("Ghost", "A1")
+
+    def test_it_is_still_a_sheet_error_so_existing_handlers_keep_working(self):
+        self.assertTrue(issubclass(sheets.SheetTabMissing, SheetError))
+
+    def test_a_timeout_is_not_classified_as_a_missing_tab(self):
+        # The distinction that decides whether sheet sync survives a passing Google outage.
+        def boom(_req):
+            return FailingReadResponse(TimeoutError("The read operation timed out"))
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).read("T", "A1")
+        self.assertNotIsInstance(ctx.exception, sheets.SheetTabMissing)
+
+    def test_other_protocol_errors_are_not_classified_as_a_missing_tab(self):
+        page = FakeResponse(json.dumps({"ok": False, "error": "unknown action: frobnicate"}).encode())
+        with stub_urlopen(lambda req: page):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet().read("T", "A1")
+        self.assertNotIsInstance(ctx.exception, sheets.SheetTabMissing)
+
+    def test_require_tab_raises_the_specific_type(self):
+        with stub_urlopen(lambda req: no_such_tab("Ghost")):
+            with self.assertRaises(sheets.SheetTabMissing):
+                GoogleSheet().require_tab("Ghost")
+
+    def test_require_tab_lets_an_outage_through_unchanged(self):
+        def boom(req):
+            raise urllib.error.URLError("name resolution failed")
+
+        with stub_urlopen(boom):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet(retry_delays=()).require_tab("LePone(Z)")
+        self.assertNotIsInstance(ctx.exception, sheets.SheetTabMissing)
+
+
 class TabExistsTests(unittest.TestCase):
     def test_true_when_read_succeeds(self):
         with stub_urlopen(lambda req: ok([[""]])):

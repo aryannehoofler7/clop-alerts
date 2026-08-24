@@ -2089,7 +2089,7 @@ def sync_sheet_step(
         reconcile,
         sanity_check,
     )
-    from sheets import SheetError
+    from sheets import SheetError, SheetTabMissing
     from stockpiles import (
         NationStatus,
         NationStatusError,
@@ -2150,6 +2150,9 @@ def sync_sheet_step(
         if problems or stock_problems:
             return last_synced
         return fingerprint
+    except SheetTabMissing:
+        # Not weather: the caller switches sync off rather than let this repeat every poll.
+        raise
     except (
         MonitorError,
         SheetError,
@@ -2503,7 +2506,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Sheet sync (buildings + stockpiles) is on whenever CLOP_NATION names a tab in the shared
         # sheet. Unset -> the monitor runs exactly as before; a missing/unreachable tab -> warn and
         # stay off rather than fail every poll.
-        from sheets import GoogleSheet, SheetError, nation_from_env
+        from sheets import GoogleSheet, SheetError, SheetTabMissing, nation_from_env
 
         sync_sheet: Optional[GoogleSheet] = None
         sync_nation: Optional[str] = None
@@ -2530,9 +2533,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "only touched when the game's numbers actually change.",
                     flush=True,
                 )
-            except SheetError as error:
-                notifier.notify_failure(f"Sheet sync is off: {error}")
+            except SheetTabMissing as error:
+                # Definitive: the tab is not there, and it will not be there in a minute either.
+                # Somebody has to fix .env or the sheet, so stay off rather than nag every poll.
+                notifier.notify_failure(
+                    f"Sheet sync is off: {error}\n\n"
+                    "Fix CLOP_NATION or the sheet, then restart the monitor."
+                )
                 sync_sheet = None
+            except SheetError as error:
+                # Weather, not configuration. Switching sync off here meant one passing Google
+                # outage at startup killed the sheet for the whole session -- with the monitor
+                # looking perfectly healthy while the tab silently went stale. Stay on; the first
+                # poll checks again, and reports properly if it is still broken.
+                notifier.notify_failure(
+                    f"Could not reach the shared sheet at startup: {error}\n\n"
+                    "This looks like a passing outage rather than a configuration problem, so "
+                    "sheet sync stays ON and the first poll will try again."
+                )
+                print(
+                    f"Sheet sync on (unverified -- the startup check could not reach Google) "
+                    f"for {sync_nation!r}.",
+                    flush=True,
+                )
 
         loaded = LoadedSettings(settings, settings_source)
         # Digest of the last fully clean sheet sync; None means "nothing cached", which is what
@@ -2558,15 +2581,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # Sheet sync still fires before the regular alerts. Without a watched market
                 # it reads overview itself; with one it receives the object prepared above.
                 if sync_sheet is not None and sync_nation is not None:
-                    sheet_synced = sync_sheet_step(
-                        client,
-                        sync_sheet,
-                        sync_nation,
-                        notifier,
-                        overview_html,
-                        stockpiles,
-                        sheet_synced,
-                    )
+                    try:
+                        sheet_synced = sync_sheet_step(
+                            client,
+                            sync_sheet,
+                            sync_nation,
+                            notifier,
+                            overview_html,
+                            stockpiles,
+                            sheet_synced,
+                        )
+                    except SheetTabMissing as error:
+                        notifier.notify_failure(
+                            f"Sheet sync is off: {error}\n\nFix CLOP_NATION or the sheet, then "
+                            "restart the monitor. Everything else keeps working."
+                        )
+                        sync_sheet = None
                 current, _ = check_and_notify(
                     client,
                     previous,

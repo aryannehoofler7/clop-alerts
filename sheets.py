@@ -184,6 +184,22 @@ class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
 
 
+class SheetTabMissing(SheetError):
+    """A named tab is genuinely absent from the sheet.
+
+    Kept apart from every other ``SheetError`` because the difference decides whether a caller
+    should give up or try again. A missing tab is a configuration fault: it will still be a fault
+    in a minute, and somebody has to go and fix it. A timeout or an unreachable endpoint is
+    weather. Treating the second as the first is how one passing Google outage at startup used to
+    switch sheet sync off for an entire session.
+    """
+
+
+#: The endpoint's wording for a missing tab, matched to raise ``SheetTabMissing``. Load-bearing on
+#: both sides -- ``docs/apps-script/Code.gs`` says so too. Do not reword either without the other.
+TAB_MISSING = "no such tab"
+
+
 def visible_text(markup: str) -> str:
     """Reduce an HTML page to the words a person would actually see, on one line.
 
@@ -323,23 +339,21 @@ class GoogleSheet:
     def tab_exists(self, tab: str) -> bool:
         """Return whether ``tab`` is a tab in the sheet.
 
-        Probes with a trivial read of ``A1``: a success means the tab is there. The endpoint reports
-        a missing tab as ``no such tab: <name>`` (its documented protocol error), which we map to
-        ``False``; any other failure -- a network drop, a dead endpoint -- propagates as ``SheetError``
-        so a mere outage is never mistaken for a missing tab.
+        Probes with a trivial read of ``A1``: a success means the tab is there. The endpoint's
+        documented ``no such tab: <name>`` arrives as ``SheetTabMissing`` and maps to ``False``;
+        any other failure -- a network drop, a dead endpoint -- propagates, so a mere outage is
+        never mistaken for a missing tab.
         """
         try:
             self.read(tab, "A1")
-        except SheetError as exc:
-            if "no such tab" in str(exc).lower():
-                return False
-            raise
+        except SheetTabMissing:
+            return False
         return True
 
     def require_tab(self, tab: str) -> None:
-        """Raise ``SheetError`` unless ``tab`` exists in the sheet."""
+        """Raise ``SheetTabMissing`` unless ``tab`` exists; other failures propagate as-is."""
         if not self.tab_exists(tab):
-            raise SheetError(
+            raise SheetTabMissing(
                 f"nation tab {tab!r} does not exist in the shared sheet. Check {NATION_ENV} names a "
                 "tab exactly -- it is case-, spacing-, and punctuation-sensitive."
             )
@@ -564,6 +578,8 @@ class GoogleSheet:
                         started=started,
                     )
                     continue
+                if TAB_MISSING in message.lower():
+                    raise SheetTabMissing(message)
                 raise SheetError(message or "sheet endpoint reported failure")
             return body.get("values", [])
 
@@ -591,12 +607,16 @@ if __name__ == "__main__":
     # round trip. Read-only -- it never edits the sheet.
     from clop_monitor import popup_failure
 
+    # The read is inside the guard too, not just the startup check. It used to sit outside, so a
+    # tab that resolved followed by a slow endpoint killed this script with a raw traceback -- the
+    # exact thing the guard exists to prevent, in the one script whose whole job is diagnosing the
+    # endpoint. Every other standalone here wraps its whole body; this one now does as well.
     try:
         sheet, nation = startup_check()
+        print(f"Nation tab {nation!r} found.")
+        print(f"{nation}!R11 = {sheet.read_cell(nation, 'R11')!r}")
     except SheetError as error:
         # A dialog, not a terminal line -- the same rule the monitor and the other two scripts
         # follow. A failure nobody sees is the one this project refuses to ship.
-        popup_failure(f"The sheet startup check failed: {error}")
+        popup_failure(f"The sheet check failed: {error}")
         sys.exit(1)
-    print(f"Nation tab {nation!r} found.")
-    print(f"{nation}!R11 = {sheet.read_cell(nation, 'R11')!r}")

@@ -585,8 +585,10 @@ This holds everywhere, not just in the polling loop, because a printed failure i
 sees — and a monitor that is quietly doing nothing is indistinguishable from one with nothing to
 report. So it also covers:
 
-- **Sheet sync being off.** If `CLOP_NATION` is not set, the monitor still polls and still alerts
-  while never writing a single cell to your tab. You get a dialog at startup saying so.
+- **Sheet sync being off.** If `CLOP_NATION` is not set, or your tab genuinely does not exist, the
+  monitor still polls and still alerts while never writing a single cell to your tab. You get a
+  dialog at startup saying so. A sheet that is merely *unreachable* does **not** switch sync off —
+  see [Sheet sync](#sheet-sync).
 - **The two hand-run scripts.** `python .\stockpiles.py` and `python .\buildings.py` raise the
   dialog too, not just terminal output — they are what the monitor's own dialogs tell you to run.
 - **A broken notification channel.** If the webhook stops accepting alerts you get a dialog; if the
@@ -821,7 +823,23 @@ time" — it stops advancing while nothing changes. That is the more useful of t
 honest one for a value that has not moved in two hours.
 
 Sheet sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the tab
-is missing or unreachable. The monitor's message/news/report alerting is never affected either way.
+**is genuinely missing**. The monitor's message/news/report alerting is never affected either way.
+
+A tab that is merely *unreachable* is treated completely differently, and the distinction matters:
+
+| At startup the tab check… | Result |
+|---|---|
+| succeeds | Sheet sync on, as normal |
+| says the tab does not exist | Sheet sync **off** for the session — fix `CLOP_NATION` or the sheet and restart |
+| cannot reach Google at all (timeout, outage) | Sheet sync **stays on**; you get one dialog, and the first poll checks again |
+
+That last row used to behave like the middle one, and it was the worst bug in this area: a single
+passing Google timeout at startup switched sheet sync off for the entire run, and the monitor then
+looked perfectly healthy — polling, alerting, saying nothing — while the tab silently went stale.
+An outage is weather; a missing tab is a configuration fault. Only the second is worth giving up on.
+
+The same distinction applies while polling: if the tab goes missing mid-run, sync switches off with
+one dialog rather than raising an identical one every 60 seconds forever.
 
 Before it writes anything, the monitor checks that the page it just fetched really is a complete,
 normal overview page. **If it is not, nothing at all is written** and you get a dialog. This matters
@@ -966,6 +984,8 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`no 'Server time:' stamp on the page`** | The page arrived without the clock the monitor stamps into `W10`. Every normal CLOP page carries one, logged in or not, so this means the page is not a normal one. | Same as the first row: check the site in a browser, then `docs/OUTAGES.md`. If the site is fine and this keeps firing, the game's page layout has changed and `stockpiles.py` needs updating. **Nothing was written.** |
 | **`resource '...' has an unreadable quantity`** | The game printed a quantity that is not a plain number. It is refused rather than guessed at, because guessing would write a wrong number — most likely a `0`, meaning "you have none of this". | Look at that resource on `overview.php` in a browser. If the game has started formatting quantities differently, `stockpiles.py` needs updating to match. **Nothing was written.** |
 | **`not logged in when reading overview.php`** | The session dropped and logging back in did not take. | Check `CLOP_USERNAME` and `CLOP_PASSWORD` in `.env`, and that you can sign in through a browser. **Nothing was written.** |
+| **`Could not reach the shared sheet at startup`** | The startup tab check could not get through to Google. **Sheet sync is still on** — this is an outage, not a configuration fault, and the first poll checks again. | Nothing. If it is still failing minutes later, check the sheet opens in a browser. |
+| **`Sheet sync is off:`** | Your tab genuinely is not in the sheet, or `CLOP_NATION` is unset. This one *does* stop sheet sync for the session. | Check `CLOP_NATION` in `.env` against the tab names — it is case-, spacing- and punctuation-sensitive — then restart the monitor. Messages, news and reports keep working meanwhile. |
 | **`Sheet sync failed during ...`** | The catch-all. If the sentence after the colon matches a row above, use that row. Otherwise it is a network or Google Sheets problem rather than anything wrong with your data, and the message names which half it happened in. | For a plain network or Sheets problem: usually nothing, it clears by itself. If it persists, check your internet connection and that the sheet still opens in a browser. |
 | **`Google returned the sheet result too late to be read`** | **The common one, and it is not your fault.** Google answers a POST by redirecting to a single-use result link that expires in well under a minute; when it is read late, Google runs the script over `GET` instead and returns `Script function not found: doGet`. Already retried four times over twelve seconds, so Google was having a genuinely bad minute. | Nothing. It clears itself, and the next poll starts fresh. **Nothing was written on this attempt.** If it fires on most polls for an hour or more, redeploy the endpoint per `docs/apps-script/README.md` — that makes the failure legible but does not make Google faster. |
 | **`unexpected non-JSON reply from sheet endpoint`** | Google answered `200 OK` with an HTML page that is *not* an Apps Script error page. Already tried four times. The message quotes the page's `Content-Type` and its first 200 characters. | Read the quoted snippet. If it looks like a Google sign-in page, the deployment has lost its "Anyone" access — redeploy per `docs/apps-script/README.md`. If it is a Google "unable to open the file" page, that is Google's end and it clears by itself. **Nothing was written on this attempt.** |

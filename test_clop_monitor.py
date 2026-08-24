@@ -4608,6 +4608,123 @@ class NoTerminalOnlyFailuresTests(unittest.TestCase):
         )
 
 
+class StartupSheetCheckTests(SettingsReloadThroughMainTests):
+    """What the startup tab check does to the rest of the session, driven through main().
+
+    This is the gap that let a single passing Google timeout switch sheet sync off for a whole
+    run: the startup check caught every SheetError alike and set sync_sheet = None, so the monitor
+    went on looking perfectly healthy while the tab silently went stale. The old test for this
+    inspected main()'s source text for a string, which could never have noticed.
+    """
+
+    def _drive(self, require_tab_raises, polls_wanted=2):
+        """Run main() with CLOP_NATION set and a GoogleSheet whose require_tab misbehaves."""
+        import sheets
+
+        synced = []
+
+        class Sheet:
+            def __init__(self, *a, **k):
+                pass
+
+            def require_tab(self, tab):
+                if require_tab_raises is not None:
+                    raise require_tab_raises
+
+        def fake_step(*args, **kwargs):
+            synced.append(args[2])       # the nation
+            return "digest"
+
+        notifiers = self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) >= polls_wanted:
+                    raise KeyboardInterrupt
+
+            with mock.patch.object(sheets, "GoogleSheet", Sheet), mock.patch.object(
+                clop_monitor, "sync_sheet_step", fake_step
+            ):
+                _, code = self._run(
+                    directory,
+                    {"cache": {"persist_to_file": False}},
+                    sleep,
+                    env={"CLOP_NATION": "LePone(Z)"},
+                )
+        self.assertEqual(code, 0)
+        return notifiers[1].failures, synced
+
+    def test_a_timeout_at_startup_leaves_sheet_sync_running(self):
+        # The production failure, exactly: "timed out reading the sheet endpoint's reply after 2
+        # attempts in 45s". Weather. It must not cost the session its sheet sync.
+        from sheets import SheetError
+
+        failures, synced = self._drive(
+            SheetError("timed out reading the sheet endpoint's reply after 2 attempts in 45s")
+        )
+        self.assertTrue(synced, "sheet sync was switched off by a passing outage")
+        self.assertTrue(any("stays ON" in f for f in failures))
+        self.assertFalse(any("Sheet sync is off" in f for f in failures))
+
+    def test_a_missing_tab_at_startup_switches_sheet_sync_off(self):
+        # Definitive: it will still be missing next minute, and somebody has to go and fix it.
+        from sheets import SheetTabMissing
+
+        failures, synced = self._drive(SheetTabMissing("nation tab 'Ghost' does not exist"))
+        self.assertEqual(synced, [])
+        self.assertTrue(any("Sheet sync is off" in f for f in failures))
+
+    def test_a_clean_startup_check_syncs_every_poll(self):
+        _failures, synced = self._drive(None, polls_wanted=3)
+        self.assertEqual(synced, ["LePone(Z)"] * 3)
+
+
+class MissingTabDuringPollingTests(SettingsReloadThroughMainTests):
+    def test_a_missing_tab_found_while_polling_switches_sync_off_once(self):
+        # Otherwise it is an identical blocking dialog every 60 seconds, forever.
+        import sheets
+
+        calls = []
+
+        class Sheet:
+            def __init__(self, *a, **k):
+                pass
+
+            def require_tab(self, tab):
+                return None
+
+        def fake_step(*args, **kwargs):
+            calls.append(1)
+            raise sheets.SheetTabMissing("no such tab: Ghost")
+
+        notifiers = self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) >= 4:
+                    raise KeyboardInterrupt
+
+            with mock.patch.object(sheets, "GoogleSheet", Sheet), mock.patch.object(
+                clop_monitor, "sync_sheet_step", fake_step
+            ):
+                _, code = self._run(
+                    directory,
+                    {"cache": {"persist_to_file": False}},
+                    sleep,
+                    env={"CLOP_NATION": "LePone(Z)"},
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1, "sync kept running after a definitive tab failure")
+        off = [f for f in notifiers[1].failures if "Sheet sync is off" in f]
+        self.assertEqual(len(off), 1)
+
+
 class SheetSyncOffTests(unittest.TestCase):
     def test_missing_nation_raises_a_dialog_not_a_terminal_line(self):
         """Sheet sync silently doing nothing is indistinguishable from it working.
