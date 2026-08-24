@@ -26,6 +26,12 @@ label) normalises to ``0`` and so compares equal for a good the nation holds non
 garbage in place while the timestamp declared the row freshly verified. Overwriting always costs one
 call per run and removes that hole.
 
+That still holds, and nothing here diffs the sheet. What *does* skip work now lives one level up:
+``clop_monitor.sync_sheet_step`` compares this poll's parsed game data against the last data it
+successfully wrote, and does not call in here at all when they match. The distinction is the whole
+point -- it trusts its own record of what it sent, never the sheet's account of what it holds -- so
+when it does call in, the write is as unconditional as it ever was.
+
 The two regions are **independent**: a layout problem on one is reported and skipped without
 stopping the other. A transport failure is not a layout problem and aborts both, deliberately -- it
 means the shared connection is down, so retrying the other half would only produce a second popup

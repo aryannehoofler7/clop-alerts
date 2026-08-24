@@ -224,6 +224,54 @@ interval or the monitor stops doing its real job.
 During a slow patch this severe the attempts will all fail anyway — and that is the right outcome.
 The monitor reports it accurately, keeps polling, and the next poll tries again with a clean budget.
 
+#### Why this surfaced when it did — and the real fix
+
+The client-side work above makes the fault survivable. It does not explain why the monitor met it so
+often, and that explanation turned out to matter more than any of the handling.
+
+A poll ran **15 sheet round trips** (11 with no building corrections outstanding), measured directly
+off `sync_sheet_step` against the offline fake:
+
+```
+read  <nation> A1:B130          write_cell B11, B15, B64, B28
+read  <nation> Q1:W60           write R11:R16 ; write_cell W10
+read  Dashboard A1:Z80          write C2:C5, C7:C12, C14:C15, C17:C27, C29:C34, C36:C49
+```
+
+At ~3.5 s each that is 40–50 seconds of Google traffic inside every 60-second poll — near-continuous
+load. The Dashboard sync (`ff39678`, `db66103`, 2026-08-24) contributed 7 of those calls and took a
+poll from ~4 round trips to ~11. If one call fails with probability *p*, a poll survives with
+(1−p)^N, so N: 4 → 11 more than doubles the per-poll failure rate **with Google behaving
+identically**. "It used to work, now it is intermittent" and that commit are the same event.
+
+And every one of those calls was redundant. The game tick is ~2 hours; stockpiles, buildings and
+status only move on a tick or on a player trade. The sync rewrote identical numbers ~120 times per
+tick.
+
+`sync_sheet_step` now keeps a digest of the last fully clean sync (`sheet_fingerprint`) and returns
+it to the caller to pass back next poll. Matching digest ⇒ the step is skipped entirely, zero round
+trips. Ten polls cost ~22 round trips instead of 110; across a full tick the saving is >99%.
+
+Three things make it correct rather than merely cheaper:
+
+1. **It compares against what it last wrote, not against the sheet.** `stockpiles.py`'s docstring
+   rejects diff-against-the-sheet for a good reason — an unreadable cell normalises to `0` and
+   compares equal for a good the nation holds none of, so the garbage survives while the timestamp
+   claims the row was verified. Trusting its own record of what it sent has no such hole, and when
+   it does write, the write is as unconditional as it ever was.
+2. **`server_time` is excluded from the digest.** It advances every poll, so including it would make
+   every poll look like a change and skip nothing. This is the trap that would have silently
+   disabled the whole thing, so there is a test named for it.
+3. **Only a fully clean run is cached.** A failure, or a region skipped for a layout problem, leaves
+   the sheet disagreeing with the game; caching that as "in sync" would bury the disagreement until
+   the numbers happened to move.
+
+The cost is a real one and is documented in the README: `W10` changes meaning from *last checked* to
+*last changed*, so it is no longer a strict dead-man's switch. A tick always moves something, so a
+`W10` older than a couple of hours still indicts the monitor — but between ticks a static stamp is
+now normal. Stamping `W10` alone every poll would restore the switch for 1 round trip instead of 11
+if that trade is ever wanted.
+
 #### The other face of the same fault
 
 An expired link does not always reach `doGet`. Caught a beat earlier, Google's Drive front-end

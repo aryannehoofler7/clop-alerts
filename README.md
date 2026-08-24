@@ -795,6 +795,31 @@ overview and writes the sheet.
 The three are independent. If one is skipped because that part of the sheet has been rearranged, the
 other two still run, and the dialog says which.
 
+### It only writes when something has actually changed
+
+**The first poll after startup writes everything.** That is the reconcile that proves your sheet
+matches the game. After it, the monitor keeps the parsed numbers in memory and compares each poll
+against them; while nothing has moved, **the sheet is not touched at all — no reads, no writes, no
+requests to Google**. When something does move it writes the lot again, exactly as before.
+
+This is not an optimisation for its own sake. A game tick is about two hours, so writing everything
+every 60 seconds rewrote identical numbers roughly 120 times per tick, at **11–15 Google round trips
+each time**. That is some 45 seconds of Google traffic inside every 60-second poll — and it is why
+Google's occasional slow minutes surfaced as `Sheet sync failed …` dialogs so often. Ten polls now
+cost about 22 round trips instead of 110, and over a full tick the saving is upwards of 99%.
+
+Two consequences worth knowing:
+
+- **Your trades show up immediately.** The comparison is against the game, not a clock, so buying or
+  selling something is picked up on the very next poll — a tick-shaped schedule would have missed it.
+- **A hand-edit to the sheet is not noticed** until the game's numbers next move, or until you
+  restart the monitor. Restarting always re-reconciles, so that is the fix if you have been editing
+  cells by hand and want the monitor to reassert them.
+
+`W10` therefore means "these are the numbers as at this time" rather than "the monitor looked at this
+time" — it stops advancing while nothing changes. That is the more useful of the two claims, and the
+honest one for a value that has not moved in two hours.
+
 Sheet sync is **off** if `CLOP_NATION` is unset, and turns itself off (with one warning) if the tab
 is missing or unreachable. The monitor's message/news/report alerting is never affected either way.
 
@@ -845,12 +870,22 @@ A few things worth knowing before you read those cells:
   not a fault: stored as a date, Sheets would quietly reinterpret the game's clock as being in the
   *spreadsheet's* timezone and be wrong by that offset without ever looking wrong. If you want to
   calculate with it, convert it explicitly in your own formula, in a different cell.
-- **`W10` means *last checked*, not *last changed*.** It is rewritten every single poll, even when
-  none of your quantities moved. So an old `W10` does not mean "nothing has happened" — it means
-  **the snapshot has stopped running**, and the numbers beside it should not be trusted. That is the
-  whole point of the cell: it is your dead-man's switch.
-- **A routine update is silent.** No dialog, no sound, nothing in the way. At a 60-second poll a
-  popup saying "stockpiles updated" would never stop firing. Only problems interrupt you.
+- **`W10` means *last changed*, not *last checked*** — this changed, and it matters. It used to be
+  rewritten every single poll, which made it a dead-man's switch: an old `W10` could only mean the
+  snapshot had stopped running. Now that the monitor only writes when the numbers actually move,
+  `W10` stops advancing while nothing is happening, and an old one has two possible meanings.
+
+  It is still a usable staleness signal, just a blunter one: **a game tick is about two hours, and a
+  tick always moves something**, so a `W10` more than a couple of hours old does mean something is
+  wrong — either the monitor is not running or it cannot reach the sheet. Between ticks, though, a
+  static `W10` is normal and expected.
+
+  If you want the strict dead-man's switch back, it can be had for one Google request per poll
+  instead of eleven — stamping `W10` every poll while still skipping the thirteen value writes. Say
+  the word; it is a small change.
+- **A routine update is silent.** No dialog, no sound, nothing in the way. Only problems interrupt
+  you. (Building *corrections* still pop up, because those are the monitor disagreeing with the
+  sheet rather than simply refreshing it.)
 - **A good you hold none of is written back as `0`**, not left alone. The game only lists goods you
   actually have, so an absent good means zero, and the sheet is made to say so.
 - **`NEED`, `BUY` and `TICKS` are never touched.** Those columns are yours — your formulas and your

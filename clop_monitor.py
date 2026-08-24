@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import http.client
 import http.cookiejar
 import json
@@ -1988,6 +1989,49 @@ def read_overview_stockpiles(client: ClopClient) -> Tuple[str, Stockpiles]:
         raise MonitorError(str(error)) from error
 
 
+def sheet_fingerprint(
+    overview_buildings: Dict[str, Tuple[int, int]],
+    stock: "Stockpiles",
+    status: object,
+) -> str:
+    """A digest of everything a sheet sync would write -- and nothing else.
+
+    Every cell the sync touches is a pure function of these three parsed objects, so an identical
+    digest means an identical set of writes: the sheet already holds them and there is nothing to
+    send. That is what lets a poll cost zero round trips instead of eleven.
+
+    **``server_time`` is deliberately excluded.** It is the one field that changes every single
+    poll, so including it would make the digest differ every time and skip nothing at all. Leaving
+    it out is also what changes the meaning of the nation tab's timestamp from "the monitor looked
+    at this time" to "these are the numbers as at this time" -- which is the more useful of the two
+    claims, and the honest one for a value that has not moved in two hours.
+    """
+    from goods import GOODS
+
+    payload = {
+        "buildings": {
+            name: list(counts) for name, counts in sorted(overview_buildings.items())
+        },
+        "goods": {good.game_name: stock.get(good.game_name) for good in GOODS},
+        "ticks": (
+            None
+            if stock.ticks_worth is None
+            else {good.game_name: stock.ticks(good.game_name) for good in GOODS}
+        ),
+        "status": [
+            status.government,
+            status.economy,
+            status.satisfaction.display(),
+            status.se.display(),
+            status.nlr.display(),
+            status.gdp,
+            status.funds,
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def sync_sheet_step(
     client: ClopClient,
     sheet: object,
@@ -1995,7 +2039,8 @@ def sync_sheet_step(
     notifier: Notifier,
     overview_html: Optional[str] = None,
     stock: Optional[Stockpiles] = None,
-) -> None:
+    last_synced: Optional[str] = None,
+) -> Optional[str]:
     """Sync the nation's tab from overview.php, ahead of the regular alerting.
 
     Three syncs off one page fetch, in this order:
@@ -2004,6 +2049,22 @@ def sync_sheet_step(
     2. **Stockpiles** -- snapshot the nation tab's six goods and stamp its timestamp.
     3. **Dashboard** -- write the nation's own column on the alliance-wide tab: all 31 goods and
        the six status rows.
+
+    **Most polls do none of it.** ``last_synced`` is the digest returned by the last fully clean
+    run; when this poll's parse produces the same digest, every cell the sync would write already
+    holds the value it would be given, so the whole step is skipped and costs nothing. The digest
+    to remember is returned -- pass it back next poll.
+
+    Why that matters: the game tick is about two hours, so a full sync every 60 seconds rewrote
+    identical numbers roughly 120 times per tick, at 11-15 Apps Script round trips a go. That is
+    ~45 seconds of Google traffic inside every 60-second poll, and it is what made Google's
+    occasional slow minutes land on this monitor so often (see ``sheets.EXPIRING_LINK``). Changes
+    are still picked up on the very next poll -- including trades, which a tick-shaped schedule
+    would have missed -- because the comparison is against the game, not against a clock.
+
+    The first poll after startup always has nothing cached and therefore always runs in full: that
+    is the one reconcile that proves the sheet matches the game. A hand-edit to the sheet after
+    that point is not noticed until the game data next moves, or until the monitor is restarted.
 
     Steps 2 and 3 are one call into ``stockpiles.snapshot``, off one parse. They guard different
     regions of the sheet and are independent of each other and of the buildings step: one being
@@ -2043,6 +2104,13 @@ def sync_sheet_step(
 
         phase = "the building reconcile"
         overview = parse_overview_buildings(overview_html)
+
+        # Nothing the sheet holds has moved since the last clean sync, so there is nothing to
+        # send. This is the whole point of the cache: no reads, no writes, no round trips.
+        fingerprint = sheet_fingerprint(overview, stock, status)
+        if fingerprint is not None and fingerprint == last_synced:
+            return last_synced
+
         # One read feeding both: the check and the write then judge the same snapshot, and the
         # phase costs one Apps Script execution rather than two. Fewer round trips also means
         # fewer chances to draw one of Google's expiring result links (see sheets.EXPIRING_LINK).
@@ -2063,8 +2131,8 @@ def sync_sheet_step(
                     + "\n".join(f"- {correction.describe()}" for correction in corrections)
                 )
 
-        # The snapshot is a scheduled refresh rather than an event, so a successful write is
-        # deliberately silent -- at a 60s poll a popup for it would never stop firing.
+        # A successful snapshot is deliberately silent: it is a refresh, not an event, and the
+        # player already knows they traded.
         phase = "the stockpile snapshot"
         _report, stock_problems = snapshot(sheet, nation, stock, status)
         if stock_problems:
@@ -2075,6 +2143,13 @@ def sync_sheet_step(
                 "read-only report of where the script currently thinks each block is.\n\n"
                 + "\n".join(f"- {problem}" for problem in stock_problems)
             )
+
+        # Remember only a run that wrote everything it meant to. A region skipped for a layout
+        # problem leaves the sheet disagreeing with the game, and caching that as "in sync" would
+        # bury the disagreement until the numbers happened to move again.
+        if problems or stock_problems:
+            return last_synced
+        return fingerprint
     except (
         MonitorError,
         SheetError,
@@ -2085,6 +2160,9 @@ def sync_sheet_step(
         notifier.notify_failure(
             f"Sheet sync failed during {phase}: {error}\n\nThe monitor continues polling."
         )
+        # Deliberately not cached: a failed sync must be retried on the next poll, and a partial
+        # one -- some blocks written before the endpoint died -- must not be trusted either.
+        return last_synced
 
 
 def check_and_notify(
@@ -2448,7 +2526,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sync_sheet.require_tab(sync_nation)
                 print(
                     f"Sheet sync on: reconciling buildings and snapshotting stockpiles for "
-                    f"{sync_nation!r} each poll before alerting.",
+                    f"{sync_nation!r}. The first poll writes everything; after that the sheet is "
+                    "only touched when the game's numbers actually change.",
                     flush=True,
                 )
             except SheetError as error:
@@ -2456,6 +2535,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sync_sheet = None
 
         loaded = LoadedSettings(settings, settings_source)
+        # Digest of the last fully clean sheet sync; None means "nothing cached", which is what
+        # makes the first poll write everything. Held here rather than in a module global so a
+        # restart always re-reconciles and the tests can drive it directly.
+        sheet_synced: Optional[str] = None
         while True:
             # Before the check rather than after it, so that an edit takes effect on the very
             # next poll rather than the one after.
@@ -2475,13 +2558,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 # Sheet sync still fires before the regular alerts. Without a watched market
                 # it reads overview itself; with one it receives the object prepared above.
                 if sync_sheet is not None and sync_nation is not None:
-                    sync_sheet_step(
+                    sheet_synced = sync_sheet_step(
                         client,
                         sync_sheet,
                         sync_nation,
                         notifier,
                         overview_html,
                         stockpiles,
+                        sheet_synced,
                     )
                 current, _ = check_and_notify(
                     client,

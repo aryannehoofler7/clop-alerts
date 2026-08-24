@@ -430,6 +430,101 @@ class SharedColumnReadTests(unittest.TestCase):
         self.assertEqual(buildings_reads, [("T", COLUMN_SCAN_RANGE)])
 
 
+class SyncCacheTests(unittest.TestCase):
+    """The sheet is touched when the game's numbers move, not once a minute regardless."""
+
+    def _sheet_in_sync(self):
+        # A sheet that already matches LOGGED_IN_OVERVIEW, so a first sync writes nothing but
+        # still reads, and returns a digest to cache.
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Bakery")] = 2
+        col_b[8 + names.index("Basic Mine")] = 10
+        col_b[8 + names.index("Gem Mine")] = 1
+        col_b[57 + names.index("Basic Mine")] = 1
+        return FakeSheet(col_a, col_b)
+
+    def _sync(self, sheet, notifier=None, last=None):
+        from clop_monitor import sync_sheet_step
+
+        return sync_sheet_step(
+            FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier or FakeNotifier(), None, None, last
+        )
+
+    def test_first_poll_writes_everything_and_returns_a_digest(self):
+        sheet = self._sheet_in_sync()
+        digest = self._sync(sheet)
+        self.assertIsNotNone(digest)
+        self.assertTrue(sheet.reads)
+        self.assertTrue(sheet.blocks)
+
+    def test_second_poll_with_identical_data_touches_nothing(self):
+        sheet = self._sheet_in_sync()
+        digest = self._sync(sheet)
+        sheet.reads.clear(); sheet.writes.clear(); sheet.blocks.clear()
+        again = self._sync(sheet, last=digest)
+        self.assertEqual(again, digest)
+        self.assertEqual(sheet.reads, [])
+        self.assertEqual(sheet.writes, [])
+        self.assertEqual(sheet.blocks, [])
+
+    def test_the_server_clock_alone_does_not_count_as_a_change(self):
+        # The trap that would silently disable the whole cache: server_time advances every poll,
+        # so including it in the digest would make every poll look like a change.
+        sheet = self._sheet_in_sync()
+        digest = self._sync(sheet)
+        later = LOGGED_IN_OVERVIEW.replace("2026-08-23 03:23:44", "2026-08-23 05:59:59")
+        self.assertIn("05:59:59", later)   # the fixture really did change
+
+        from clop_monitor import sync_sheet_step
+
+        sheet.reads.clear(); sheet.writes.clear(); sheet.blocks.clear()
+        again = sync_sheet_step(
+            FakeClient(later), sheet, "T", FakeNotifier(), None, None, digest
+        )
+        self.assertEqual(again, digest)
+        self.assertEqual(sheet.reads, [])
+
+    def test_a_changed_quantity_resyncs(self):
+        sheet = self._sheet_in_sync()
+        digest = self._sync(sheet)
+        traded = LOGGED_IN_OVERVIEW.replace(">1,226<", ">1,190<")
+        self.assertNotEqual(traded, LOGGED_IN_OVERVIEW)   # the fixture really did change
+
+        from clop_monitor import sync_sheet_step
+
+        sheet.reads.clear(); sheet.blocks.clear()
+        again = sync_sheet_step(
+            FakeClient(traded), sheet, "T", FakeNotifier(), None, None, digest
+        )
+        self.assertNotEqual(again, digest)
+        self.assertTrue(sheet.blocks)
+        self.assertEqual(dict(sheet.blocks)["R11:R16"][0], [1190])
+
+    def test_a_failed_sync_is_not_cached(self):
+        # Otherwise one bad poll would convince the monitor the sheet was fine indefinitely.
+        class Broken(FakeSheet):
+            def read(self, tab, a1):
+                from sheets import SheetError
+
+                raise SheetError("could not reach sheet endpoint: boom")
+
+        col_a, _ = full_column_a()
+        notifier = FakeNotifier()
+        self.assertIsNone(self._sync(Broken(col_a, [""] * 130), notifier, last=None))
+        self.assertTrue(notifier.failures)
+
+    def test_a_skipped_region_is_not_cached(self):
+        # A layout problem means the sheet still disagrees with the game; caching that as "synced"
+        # would bury the disagreement until the numbers happened to move.
+        col_a, _ = full_column_a()
+        col_a[3] = "not the Building header"
+        broken_labels = FakeSheet(col_a, [""] * 130, stock_labels=["apple", "oil"])
+        notifier = FakeNotifier()
+        self.assertIsNone(self._sync(broken_labels, notifier))
+        self.assertTrue(notifier.failures)
+
+
 class SyncSheetStepTests(unittest.TestCase):
     def test_corrections_alert_and_write(self):
         from clop_monitor import sync_sheet_step
