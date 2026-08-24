@@ -50,22 +50,36 @@ EXEC_URL = (
 #: (``https://docs.google.com/spreadsheets/d/<id>/export?format=csv``), which need no endpoint.
 SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
-#: Budget for the first hop -- POSTing to /exec, which runs the script. Legitimately slow: 21.8
-#: seconds has been measured on a healthy call.
-DEFAULT_TIMEOUT = 30.0
+#: Budget for the first hop -- POSTing to /exec, which runs the script.
+DEFAULT_TIMEOUT = 20.0
 
-#: Budget for the second hop -- fetching the one-shot result link. Far tighter, and deliberately
-#: so: that link only lives 15-30 seconds (see EXPIRING_LINK), so a fetch still running at 12 is
-#: overwhelmingly likely to be handed a corpse. Sampled during a bad Google patch, successful round
-#: trips took 3.5-6.5s while every single failure took 18-33s -- a wide, clean gap to cut in.
-#: Abandoning early and re-POSTing for a fresh link beats waiting for a dead one.
-CONTENT_TIMEOUT = 12.0
+#: Budget for the second hop -- fetching the one-shot result link.
+#:
+#: Set from measurement, and the single most important number here. Timed separately over many
+#: calls, hop 2 is bimodal with nothing in between:
+#:
+#:     succeeds -> 0.5, 0.6, 0.5, 0.6 seconds
+#:     fails    -> 10.2, 10.3, 14.3 seconds, then a dead-link 404
+#:
+#: There is no such thing as a slow success. A hop 2 still running at 3 seconds has already failed
+#: and is merely taking its time to say so, and every one of those seconds is stolen from the
+#: retries that would actually have fixed the call. At 12 seconds two doomed attempts ate a whole
+#: 45-second budget, which is exactly what "after 2 attempts in 45s" meant. At 3 seconds a doomed
+#: attempt costs hop 1 plus 3, so the same budget buys five or six rolls of the dice instead.
+CONTENT_TIMEOUT = 3.0
 
-#: Ceiling on the total time one read or write may spend, retries included. Without it four
-#: attempts could block a 60-second poll for minutes, starving the monitor of the message, news and
-#: report checks that are its actual job. Retries stop once the next delay would cross this; the
-#: attempt in flight is always allowed to finish.
-DEFAULT_DEADLINE = 45.0
+#: Backstop against a hung endpoint -- NOT a retry budget. It is set high enough that ordinary
+#: retrying never reaches it, and only a genuinely wedged call does.
+#:
+#: The earlier 45 seconds was an invented constraint. It was justified by "the monitor polls every
+#: 60 seconds, so a sheet call must not stall it", and that premise is simply false: the loop is
+#: work-then-``sleep(interval)``, so the interval is a fixed pause *between* cycles, not a
+#: schedule a cycle has to fit inside. Nothing queues up behind a slow cycle and nothing overlaps.
+#: The only real cost was that sheet sync ran before the alerting, so its seconds were the alerts'
+#: seconds -- and that is fixed properly by running it last, not by cutting the retries short.
+#: Strangling the retries to satisfy a constraint that did not exist is what produced "after 2
+#: attempts in 45s" on a call that had eight attempts available to it.
+DEFAULT_DEADLINE = 180.0
 
 #: Floor on a clamped hop timeout. A budget that has almost run out must still leave enough for a
 #: connection to be attempted rather than collapsing to zero, which means "non-blocking" and fails
@@ -81,11 +95,17 @@ MIN_TIMEOUT = 1.0
 #: body is not JSON. Only the endpoint's own protocol replies (``{ok: false}``, e.g. ``no such
 #: tab``) are definitive and fail on the first attempt.
 #:
-#: The window widened from (1, 3) after a live failure took all three attempts inside about four
-#: seconds. Every retry is a fresh POST and so a fresh result link (see EXPIRING_LINK below), which
-#: is exactly the remedy for that fault -- it just needs longer than four seconds to find a good
-#: one when Google is having a bad minute.
-DEFAULT_RETRY_DELAYS = (1.0, 3.0, 8.0)
+#: Many cheap attempts, barely any sleeping.
+#:
+#: Failures here are independent, not sustained: timed back to back, successes and failures
+#: interleave (ok, ok, fail, ok, fail, fail) rather than arriving in blocks. So a fresh POST really
+#: is a fresh roll of the dice, and the way to make a call reliable is to roll more often -- not to
+#: wait politely between rolls, which only spends the budget on sleeping. The old (1, 3, 8) burnt
+#: 12 of 45 seconds doing nothing at all.
+#:
+#: Nine attempts at a measured ~50% per-attempt success during a bad patch puts a single call's
+#: failure odds near 0.2%; the deadline stops it early when attempts are running slow.
+DEFAULT_RETRY_DELAYS = (0.0, 0.25, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0)
 RETRYABLE_HTTP_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
 #: How Google Apps Script answers a POST, and the failure mode that falls out of it.

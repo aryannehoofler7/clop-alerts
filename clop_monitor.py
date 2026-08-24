@@ -2041,7 +2041,7 @@ def sync_sheet_step(
     stock: Optional[Stockpiles] = None,
     last_synced: Optional[str] = None,
 ) -> Optional[str]:
-    """Sync the nation's tab from overview.php, ahead of the regular alerting.
+    """Sync the nation's tab from overview.php, after the regular alerting.
 
     Three syncs off one page fetch, in this order:
 
@@ -2578,8 +2578,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if goods_to_watch(settings.alerts):
                     overview_html, stockpiles = read_overview_stockpiles(client)
 
-                # Sheet sync still fires before the regular alerts. Without a watched market
-                # it reads overview itself; with one it receives the object prepared above.
+                current, _ = check_and_notify(
+                    client,
+                    previous,
+                    notifier,
+                    args.state,
+                    settings.alerts,
+                    settings.cache.persist_to_file,
+                    stockpiles,
+                )
+                previous = current
+
+                # Sheet sync goes LAST, after the alerting it used to precede. Alerting is what
+                # this program is for; the sheet is bookkeeping. Ordered this way a slow or
+                # heavily-retried sheet call cannot hold up a message, news or report alert by so
+                # much as a second -- it only delays the sleep that follows, and that sleep is a
+                # fixed pause between cycles rather than a schedule to keep up with.
+                #
+                # That ordering is also what lets the sheet retry as long as it genuinely needs
+                # to. It previously ran first, which made every second it spent a second the
+                # alerts were late, which is what a tight retry budget was invented to protect --
+                # a constraint that simply does not exist once the order is right.
+                #
+                # Without a watched market this reads overview itself; with one it receives the
+                # object prepared above.
                 if sync_sheet is not None and sync_nation is not None:
                     try:
                         sheet_synced = sync_sheet_step(
@@ -2597,16 +2619,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             "restart the monitor. Everything else keeps working."
                         )
                         sync_sheet = None
-                current, _ = check_and_notify(
-                    client,
-                    previous,
-                    notifier,
-                    args.state,
-                    settings.alerts,
-                    settings.cache.persist_to_file,
-                    stockpiles,
-                )
-                previous = current
                 print(
                     f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
                     f"checked: user={current.user_messages}, "

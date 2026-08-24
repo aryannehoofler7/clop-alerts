@@ -4682,6 +4682,61 @@ class StartupSheetCheckTests(SettingsReloadThroughMainTests):
         self.assertEqual(synced, ["LePone(Z)"] * 3)
 
 
+class SheetSyncRunsLastTests(SettingsReloadThroughMainTests):
+    """Alerting is the job; the sheet is bookkeeping. A slow sheet must never delay an alert.
+
+    This ordering is load-bearing: it is the whole reason the sheet may retry for as long as it
+    needs to. While sheet sync ran first, every second it spent was a second the alerts were late,
+    which is what a too-tight retry budget was invented to protect -- a constraint that does not
+    exist once the order is right.
+    """
+
+    def test_alerting_happens_before_the_sheet_is_touched(self):
+        import sheets
+
+        order = []
+
+        class Sheet:
+            def __init__(self, *a, **k):
+                pass
+
+            def require_tab(self, tab):
+                return None
+
+        def fake_step(*args, **kwargs):
+            order.append("sheet")
+            return "digest"
+
+        real_check = clop_monitor.check_and_notify
+
+        def watched_check(*args, **kwargs):
+            order.append("alert")
+            return real_check(*args, **kwargs)
+
+        self._record_notifiers()
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                if len(polls) >= 2:
+                    raise KeyboardInterrupt
+
+            with mock.patch.object(sheets, "GoogleSheet", Sheet), mock.patch.object(
+                clop_monitor, "sync_sheet_step", fake_step
+            ), mock.patch.object(clop_monitor, "check_and_notify", watched_check):
+                _, code = self._run(
+                    directory,
+                    {"cache": {"persist_to_file": False}},
+                    sleep,
+                    env={"CLOP_NATION": "LePone(Z)"},
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(order[:2], ["alert", "sheet"])
+        self.assertEqual(order, ["alert", "sheet"] * (len(order) // 2))
+
+
 class MissingTabDuringPollingTests(SettingsReloadThroughMainTests):
     def test_a_missing_tab_found_while_polling_switches_sync_off_once(self):
         # Otherwise it is an identical blocking dialog every 60 seconds, forever.

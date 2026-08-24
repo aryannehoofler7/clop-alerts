@@ -201,28 +201,52 @@ Following on from the above, `_fetch` makes both hops itself instead of letting 
 redirect, so each gets its own timeout. A later sample during a bad patch made the case plainly —
 2 of 6 calls succeeded in 3.5–6.5 s while all 4 failures took 18–33 s:
 
+Timed apart over many calls, hop 2 turns out to be **bimodal with nothing in between**:
+
+```
+hop 2 succeeds -> 0.5, 0.6, 0.5, 0.6 s
+hop 2 fails    -> 10.2, 10.3, 14.3 s, then a dead-link 404
+```
+
+There is no such thing as a slow success. That single fact sets the budgets:
+
 | Hop | Budget | Why |
 |---|---|---|
-| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` 30 s | Legitimately slow; 21.8 s measured on a call that then succeeded |
-| 2 — GET the result link | `CONTENT_TIMEOUT` 12 s | The link is dead by ~20 s, so waiting longer collects a corpse rather than an answer |
+| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` 20 s | Genuinely variable: ~3 s typical, 21.8 s seen on a call that still succeeded |
+| 2 — GET the result link | `CONTENT_TIMEOUT` **3 s** | Success is 0.5 s. Anything still running at 3 has already failed and is taking its time to say so |
 
-One number covering both meant spending 30 s to receive something guaranteed worthless. Abandoning
-hop 2 early and re-POSTing for a fresh link is strictly better, and is the actual remedy.
+`CONTENT_TIMEOUT` is the most important number in this module. At 12 s, two doomed attempts consumed
+an entire budget — which is exactly what the production message `after 2 attempts in 45s` meant. At
+3 s a doomed attempt costs hop 1 plus 3, so the same wall-clock funds five or six attempts.
 
-#### The deadline
+#### Retry shape
 
-`DEFAULT_DEADLINE` caps one read or write at 45 s including retries, and each hop's timeout is
-clamped to what is left of it (floored at `MIN_TIMEOUT`, since a timeout of zero means
-"non-blocking" and fails instantly with a misleading error).
+`DEFAULT_RETRY_DELAYS` is `(0, 0.25, 0.5, 0.5, 1, 1, 2, 2)` — nine attempts, almost no sleeping.
+Failures are **independent, not sustained**: timed back to back, successes and failures interleave
+(ok, ok, fail, ok, fail, fail) rather than arriving in blocks, so a fresh POST is a genuinely fresh
+roll of the dice. Backing off politely just spends the budget on sleeping; the previous `(1, 3, 8)`
+burnt 12 of 45 seconds doing nothing.
 
-The clamp is not decoration. Stopping only the *next* retry lets the attempt already in flight run
-on past the deadline: measured at 50.7 s against a 45 s budget, and 41.9 s once clamped. The bound
-exists because the monitor polls every 60 s, and `sync_sheet_step` aborts the whole step on the
-first `SheetError` — so the worst case per poll is one call's full budget, which must stay under one
-interval or the monitor stops doing its real job.
+#### The deadline, and the constraint that was invented
 
-During a slow patch this severe the attempts will all fail anyway — and that is the right outcome.
-The monitor reports it accurately, keeps polling, and the next poll tries again with a clean budget.
+`DEFAULT_DEADLINE` is 180 s: a backstop against a wedged call, **not** a retry budget. Ordinary
+retrying never reaches it. Each hop's timeout is still clamped to what is left (floored at
+`MIN_TIMEOUT`, since zero means "non-blocking" and fails instantly with a misleading error) —
+without that clamp the deadline only stops the *next* retry while the attempt in flight runs on,
+measured at 50.7 s against a 45 s budget.
+
+The earlier value was 45 s, justified like this: *the monitor polls every 60 s, so a sheet call must
+not stall it.* **That premise was false.** The polling loop is work-then-`sleep(interval)` — the
+interval is a fixed pause *between* cycles, not a schedule a cycle must fit inside. Nothing queues
+behind a slow cycle and nothing overlaps.
+
+The one real cost was ordering: `sync_sheet_step` ran *before* `check_and_notify`, so every second
+the sheet spent was a second the alerts were late. The fix is to run the sheet **last**, not to cut
+the retries short — and a test pins that order, because it is what licenses the generous retrying.
+
+Measured after the change, against the same endpoint that had been failing 3 of 6: **12 of 12
+succeeded, median 3.2 s**. One took 61 s of retrying and still got through, where the old budget
+would have given up and raised a dialog.
 
 #### Why this surfaced when it did — and the real fix
 

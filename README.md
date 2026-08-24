@@ -723,24 +723,40 @@ was still in flight*. The client now names it exactly:
 Each retry is a fresh POST and therefore a fresh link, which is precisely the remedy — the retry
 window widened from 4 seconds to 12 after a live failure used up all three of the old attempts.
 
-**The two hops are timed separately**, because they need very different budgets. Sampled during a
-bad Google patch:
+**The two hops are timed separately**, because measurement says they behave completely differently.
+Timed apart over many calls, the second hop is bimodal with nothing in between:
 
-| Outcome | End-to-end |
+| Hop 2 | Time |
 |---|---|
-| Success | 3.5–6.5 s |
-| Failure | 18–33 s |
+| succeeds | 0.5 – 0.6 s |
+| fails | 10 – 14 s, then a dead-link 404 |
 
-A wide, clean gap. Running the script (hop 1) can legitimately take 30 seconds; *fetching* the
-finished result (hop 2) cannot usefully take more than about 12, because the link is dead by then
-and waiting only collects a corpse. So hop 2 gets its own tighter timeout, and a slow one is
-abandoned in favour of a fresh POST — which is what actually fixes it.
+**There is no such thing as a slow success.** A hop 2 still running at 3 seconds has already failed
+and is just taking its time to say so. So hop 2 is capped at 3 seconds and the attempt is abandoned
+for a fresh POST — which gets a fresh link, and is the only thing that actually fixes it.
 
-There is also a **total deadline of 45 seconds per read or write**, retries included, and each hop's
-timeout is clamped to whatever is left of it. Without the clamp the deadline only stopped the *next*
-retry while the attempt already in flight ran on — measured at 50.7 s against a 45 s budget; it is
-41.9 s now. The bound matters because the monitor polls every 60 seconds, and a poll stuck waiting
-on Google is a poll not watching for messages, news or reports.
+That single number is what made retries work. At the old 12-second cap, two doomed attempts ate an
+entire budget — which is precisely what `after 2 attempts in 45s` meant. At 3 seconds the same
+wall-clock buys five or six rolls of the dice instead of two.
+
+The delays between attempts are correspondingly small (0, ¼, ½, ½, 1, 1, 2, 2 seconds — nine
+attempts). Failures here are *independent*, not sustained: timed back to back, successes and
+failures interleave rather than arriving in blocks, so a fresh POST really is a fresh roll. Waiting
+politely between rolls only spends the budget on sleeping; the old 1/3/8 burnt 12 seconds doing
+nothing.
+
+There is a **180-second ceiling** per read or write, retries included, with each hop's timeout
+clamped to what is left. It is a backstop against a wedged call, **not** a retry budget — ordinary
+retrying never reaches it.
+
+> An earlier version set that ceiling at 45 seconds, reasoning that the monitor polls every 60
+> seconds so a sheet call must not stall it. **That premise was wrong.** The loop is
+> work-then-`sleep(interval)`, so the interval is a fixed pause *between* cycles, not a schedule a
+> cycle must fit inside — nothing queues up behind a slow cycle and nothing overlaps. The one real
+> cost was that sheet sync used to run *before* the alerting, making its seconds the alerts'
+> seconds. That is fixed by running it **last**, not by cutting the retries short. Measured after
+> the change: 12 of 12 calls succeeded, median 3.2 s; one took 61 s of retrying and still got
+> through, where the old budget would have given up.
 
 A `doGet` that answers this honestly (JSON with `retry: true`, instead of an HTML page) is committed
 at **`docs/apps-script/Code.gs`**, along with a redeploy walkthrough at `docs/apps-script/README.md`.
@@ -788,11 +804,17 @@ source and the redeploy steps — paste it back onto the sheet and replace `EXEC
 
 ## Sheet sync
 
-When `CLOP_NATION` is set, the monitor runs one extra step **first each poll, before the regular
+When `CLOP_NATION` is set, the monitor runs one extra step **each poll, after the regular
 alerting**: it fetches `overview.php` once and uses that single page to update three parts of the
 sheet — your **building counts** and your **stockpiles** on your own nation tab, and your **column
 on the alliance-wide `Dashboard-Stockpile` tab**. Nothing on the game is ever changed; this only reads
 overview and writes the sheet.
+
+**After, deliberately.** Alerting is what this program is for; the sheet is bookkeeping. Ordered
+this way a slow or heavily-retried sheet call cannot delay a message, news or report alert by so
+much as a second — it only delays the pause that follows. It also means the sheet may retry for as
+long as it genuinely needs to, which is what makes it reliable. It used to run first, and that is
+the entire reason its retries were once capped too tightly to succeed.
 
 The three are independent. If one is skipped because that part of the sheet has been rearranged, the
 other two still run, and the dialog says which.
