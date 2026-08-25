@@ -93,7 +93,46 @@ whichever option above. Parse the stamp explicitly rather than relying on the pa
 
 The `*12` trick works because a day holds exactly twelve two-hour ticks and the day boundary is
 itself a tick boundary — so flooring a serial datetime to twelfths of a day lands exactly on the
-even UTC hours.
+even UTC hours. Verified 2026-08-25 by evaluating the same serial arithmetic outside Sheets: every
+block start across a full day lands on `00:00, 02:00 … 22:00`, midnight crossings included.
+
+### How stale is a stamp, in ticks
+
+This is the staleness question the sheet actually wants answered, so it is worth stating on its
+own. With `$A$1` holding game-now and the stamp in `W10`:
+
+```
+=FLOOR($A$1*12) - FLOOR((DATEVALUE(LEFT(W10,10))+TIMEVALUE(MID(W10,12,8)))*12)
+```
+
+If either cell might be text *or* a real datetime — a hand-typed cell, a reformatted one — this
+form takes both and shows `?` rather than `#VALUE!` on junk:
+
+```
+=IFERROR(LET(p, LAMBDA(c, IF(ISNUMBER(c), c, DATEVALUE(LEFT(c,10))+TIMEVALUE(MID(c,12,8)))),
+             FLOOR(p($A$1)*12) - FLOOR(p(W10)*12)), "?")
+```
+
+**It counts tick boundaries crossed, not elapsed time** — which is the useful definition, because
+what makes a stamp stale is a tick having *run*, not an interval having passed:
+
+| stamp | now | ticks | why |
+|---|---|---|---|
+| `09:58:31` | `10:09:00` | 1 | the 10:00 tick ran |
+| `10:00:04` | `11:59:59` | 0 | same block — nothing has run, however old the stamp looks |
+| `09:59:59` | `10:00:01` | 1 | two seconds apart, but a boundary fell between them |
+| `2026-08-24 23:10` | `2026-08-25 01:10` | 1 | across midnight |
+| `2026-08-23 12:00:04` | `2026-08-25 10:09` | 23 | |
+
+Three things it deliberately does not do:
+
+- **It is not clamped at zero.** A negative result means the stamp is *ahead* of the reference —
+  clock skew or a mis-parsed cell. `MAX(0, …)` would turn a visible fault into a plausible `0`.
+- **It cannot see the cron's lag.** The tick fires within a few seconds *after* the boundary, so a
+  stamp taken in that window counts as 0 ticks stale while predating that tick's effects. No
+  formula can resolve this; only the game knows.
+- **It inherits `NOW()`'s recalc lag** (below) — for up to a minute after a boundary it can still
+  say 0.
 
 **Gotcha worth knowing before trusting a `NOW()` cell:** by default a spreadsheet recalculates
 volatile functions **on change only**, so a "game now" cell can sit stale for hours. File →
