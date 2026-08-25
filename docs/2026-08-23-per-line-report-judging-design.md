@@ -3,6 +3,14 @@
 **Date:** 2026-08-23
 **Status:** implemented
 
+**Amended 2026-08-25:** per-line judging is still the safety mechanism, and it is now what makes an
+*unconditional* tick collapse safe. Every tick report becomes
+`[TICK HAPPENED - check details in game] (Satisfaction N)` followed by any line the routine
+catalogue could not account for. `Tick` in `reports.ignore` is no longer how the catalogue gets
+applied -- it is applied always -- and survives only as an escape hatch suppressing a tick that
+carried no warnings. The design below still describes the mechanism correctly; what changed is that
+it is no longer opt-in. See `docs/superpowers/specs/2026-08-25-tick-report-squash-design.md`.
+
 **Amended 2026-08-24:** per-line judging is still the safety mechanism, but users no longer have to
 configure one pattern per internal tick sentence family. `reports.ignore` now accepts the logical
 selector `Tick`, which expands to those routine families in code and leaves unmatched warning lines

@@ -236,22 +236,26 @@ poll.
 ### Ignoring routine reports
 
 Most reports are the game's own bookkeeping — trades you made, the two-hourly tick, a building you
-queued — and alerting on them buries the ones that matter. `reports.ignore` is a list of things you
-do not want to hear about. The two multi-line forms have logical selectors:
+queued — and alerting on them buries the ones that matter.
 
-- `Tick` means the game's one two-hourly tick report;
+**The two-hourly tick is always collapsed. That is not a setting.** See
+[Silencing the two-hourly tick](#silencing-the-two-hourly-tick).
+
+`reports.ignore` is a list of *further* things you do not want to hear about. Two entries are
+logical selectors rather than text patterns:
+
+- `Tick` is an escape hatch: switch it on and a tick that carried **no** warnings raises no alert at
+  all. A tick that did carry a warning always alerts.
 - `Action: <recipe-name pattern>` means one completed game action, including its spent, paid,
   gained, relation, and satisfaction lines.
 
-The monitor still judges their contents line by line internally. A tick can contain forty routine
-lines and `You couldn't pay the upkeep for your First Cavalry and it's gone!` in the middle. `Tick`
-removes the routine bookkeeping but keeps that warning, so users configure one report while the
-alert contains only the line that matters.
+The monitor judges a report's contents line by line, so a selector can silence forty routine lines
+of a report while still alerting on the one line in it that matters.
 
 **A pattern starting with `#` is switched off.** JSON has no comment syntax, so this is how a pattern
 is commented out: it stays in the list where you can see it, and you delete the two characters to
-switch it on. Every shipped pattern is commented out, so the monitor silences nothing until you say
-so:
+switch it on. Every shipped pattern is commented out, so beyond the tick collapse the monitor
+silences nothing until you say so:
 
 ```json
 "reports": {
@@ -266,8 +270,9 @@ so:
 }
 ```
 
-That file silences ticks and completed actions whose recipe name begins `Build`; Burn Oil,
-Distribute Pies, purchases, and transfers remain switched off. Leading spaces before `#` are fine.
+That file silences warning-free ticks entirely, and completed actions whose recipe name begins
+`Build`; Burn Oil, Distribute Pies, purchases, and transfers remain switched off. Leading spaces
+before `#` are fine.
 The `#` only means "off" at the start of an entry, so `Report #% filed` remains a normal custom
 pattern.
 
@@ -297,17 +302,51 @@ Failed and refused builds produce no report at all, so nothing here can hide one
 
 #### Silencing the two-hourly tick
 
-The tick is the noisiest thing the game writes and it is one report, so it is one setting: `Tick`.
-That selector covers every routine family found in `cron/frequent.php`: the Show/Hide wrapper,
+The tick is the noisiest thing the game writes — one report row carrying forty-odd lines, almost
+none of them worth reading. **It is always collapsed to a single line**, with no setting to turn
+that off:
+
+```
+[TICK HAPPENED - check details in game] (Satisfaction -412)
+https://4clop.org/reports.php
+```
+
+**The satisfaction figure is always on the marker.** It is the game's own
+`Change in Satisfaction:` number, sign included, and it is there because the collapse hides every
+line that explains it. Satisfaction is what ends a nation: your ponies revolt below -100, -300 or
+-500 depending on government, and below -5000 the nation is deleted. `(Satisfaction 0)` is worth
+seeing too — a stalled economy otherwise looks exactly like a healthy one.
+
+What the collapse absorbs is every routine family in `cron/frequent.php`: the Show/Hide wrapper,
 production and consumption, relation and satisfaction effects, caps, government/economy/military
-upkeep, stockpile siphons, Empire jealousy, and environmental repair. A tick containing any of
+upkeep, stockpile siphons, Empire jealousy, environmental repair, and the five standing satisfaction
+penalties you brought on yourself — disabled buildings, military size, empire size, owning no
+buildings, and pollution. You already know you did those, and the empire one fires on *every* tick,
+which would otherwise stop the tick ever collapsing.
 
-- `You couldn't pay the upkeep for your First Cavalry and it's gone!`
-- `Too many Basic Oil Wells cause environmental damage! (-5 sat)`
-- `You don't have enough Oil to run your 3 Basic Factory!`
-- `Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)`
+**Warnings are never collapsed.** They print in full underneath the marker. A tick containing any of
 
-still alerts with that line, and with only that line.
+- `You don't have enough Oil to run your 3 Basic Factory!` — a building starved of its input
+- `Your government lacks the gasoline and vehicle parts to function properly! (-20 sat)`
+- `Your economy lacks the cider to function properly! (-25 sat, unable to make deals)`
+- `You couldn't pay the upkeep for your First Cavalry and it's gone!` — starved, and gone for good
+- combat, a revolt, an airstrike, or the forbidden research
+
+alerts like this:
+
+```
+[TICK HAPPENED - check details in game] (Satisfaction -31)
+You don't have enough Oil to run your 3 Basic Factory!
+https://4clop.org/reports.php
+```
+
+The `Tick` entry in `reports.ignore` is the one escape hatch, and it only reaches a tick that
+carried **no** warnings at all. Switch it on and a quiet tick goes completely silent; a tick that
+went wrong still alerts, marker included.
+
+> **If you hand-wrote your own per-line patterns to silence the tick before this change**, you will
+> now get the one-line marker every two hours where you used to get silence. That is one line
+> instead of forty. Add `Tick` to `reports.ignore` to go back to full silence on a quiet tick.
 
 **Nothing that happens *to* you ships as a pattern.** Every shipped pattern is the game's own
 bookkeeping or something you just did, so an unedited settings file cannot hide a warning. That is

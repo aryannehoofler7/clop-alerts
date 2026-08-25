@@ -16,6 +16,9 @@ import clop_monitor
 from goods import Stockpiles
 from clop_monitor import (
     DEFAULT_WAV_PATH,
+    REPORT_BODY_LIMIT,
+    TICK_COLLAPSED_MARKER,
+    TICK_ROUTINE_PATTERNS,
     AlertCategorySettings,
     ArchivedThreadError,
     ClopClient,
@@ -24,6 +27,8 @@ from clop_monitor import (
     Notifier,
     Snapshot,
     build_alerts,
+    report_alert_text,
+    tick_satisfaction_change,
     check_and_notify,
     main,
     parse_report_rows,
@@ -787,7 +792,7 @@ IGNORABLE_REPORTS = [
 #: from the game at D:\Koan\clop\clop. This is the coverage target: the shipped patterns must
 #: silence all of it, and no shipped pattern may be droppable while it still does, which is
 #: what stops the list drifting back into a pattern per wording.
-ROUTINE_REPORTS = [
+ROUTINE_ACTION_REPORTS = [
     # backend_actions.php:240 / :189 / :232 / :235 / :216 - a finished action, whatever its name
     "Dig Basic Copper Mine completed successfully.",
     "Build Advanced Factory completed successfully.",
@@ -797,6 +802,13 @@ ROUTINE_REPORTS = [
     "You paid 50,000 bits.",
     "You gained 50,000 bits.",
     "You gained 5 Oil.",
+]
+
+#: Every routine sentence cron/frequent.php can put inside the two-hourly tick report. Kept as
+#: its own list rather than a slice of ROUTINE_REPORTS: the tick fixture used to be built from
+#: a hard-coded ROUTINE_REPORTS[8:44], so inserting a line here pushed families off the end and
+#: the coverage test stayed green while covering less. A named list cannot do that.
+ROUTINE_TICK_REPORTS = [
     # frequent.php:327 / :335 - the tick's production and consumption
     "You gained 5 Oil from your 1 Basic Oil Well.",
     "Your 3 Basic Factory used up 5 Oil.",
@@ -846,6 +858,20 @@ ROUTINE_REPORTS = [
     "Some of the environmental damage has been repaired. (5 sat)",
     "The Solar Empire doesn't like your good relations with the New Lunar Republic. (-3)",
     "The New Lunar Republic doesn't like your good relations with the Solar Empire. (-3)",
+    # frequent.php:269 / :661 / :161 / :647 / :281 - standing satisfaction penalties for a
+    # choice the player made. Filed as Notable until 2026-08-25 on the "did this happen *to*
+    # the player" split; moved here on "does the player already know they did this". The
+    # figures are what the game's own formulae produce: :157 gives (3-1)^2*20 = 80 for three
+    # nations, :657 gives ceil((300-20)/2) = 140 for a military of 300.
+    "You lose 4 satisfaction for having 4 disabled buildings.",
+    "You lost 140 satisfaction for having a military of total size 300.",
+    "You lose 80 sat for having an empire of 3 nations.",
+    "You lost 5 satisfaction for not having any buildings!",
+    "Too many Basic Oil Wells cause environmental damage! (-5 sat)",
+]
+
+#: Routine sentences written by the trading and force-building pages rather than by the tick.
+ROUTINE_TRADE_REPORTS = [
     # backend_marketplace.php:207 / backend_transfer.php:60 / :151 - trades you made
     "You bought 50 Apples from Luna Sueno for 55,000 bits.",
     "You transferred 20 Oil to Buenos Mares for 40,000 bits.",
@@ -857,6 +883,8 @@ ROUTINE_REPORTS = [
     # backend_createforces.php:99
     "You have created the military force First Cavalry.",
 ]
+
+ROUTINE_REPORTS = ROUTINE_ACTION_REPORTS + ROUTINE_TICK_REPORTS + ROUTINE_TRADE_REPORTS
 
 #: Every line from the catalogue's "Notable" list, with the wording the game writes. No
 #: shipped pattern may silence any of these: an unedited monitor must not be able to hide a
@@ -879,14 +907,20 @@ NOTABLE_REPORTS = [
     "hate for you by 50.)",
     "The Solar Empire has attacked you for daring to ascend! (-50)",
     "You don't have enough Oil to run your 3 Basic Factory!",
-    "Too many Basic Oil Wells cause environmental damage! (-5 sat)",
-    "You lose 4 satisfaction for having 4 disabled buildings.",
-    "You lost 5 satisfaction for not having any buildings!",
-    "You lost 30 satisfaction for having a military of total size 300.",
-    "You lose 10 sat for having an empire of 3 nations.",
-    "Your Democracy lacks the gasoline and vehicle parts to function properly! (-20 sat)",
+    # frequent.php:499 / :519 / :539 / :559 - running out of the good a government needs, in
+    # all the wordings the game actually writes. There is no "Your Democracy lacks ..."
+    # sentence: the Democracy branch at :539 writes "Your government lacks ...", and a
+    # fabricated Democracy wording sat here until 2026-08-25 while the two real variants
+    # below it were missing entirely.
+    "Your Independence lacks the gasoline and vehicle parts to function properly! (-100 sat)",
+    "Your decentralized government lacks the gasoline and vehicle parts to function "
+    "properly! (-100 sat)",
+    "Your government lacks the gasoline and vehicle parts to function properly! (-20 sat)",
     "Your government lacks the gasoline to function properly! (-50 sat)",
+    "Your government lacks the gasoline and machinery parts to function properly! (-400 sat)",
     "Your economy lacks the cider to function properly! (-25 sat, unable to make deals)",
+    "Your economy lacks the coffee to function properly! "
+    "(-25 sat, trading efficiency eliminated)",
     "Your deal with Luna Sueno was rejected.",
     "Your deal with Luna Sueno was accepted.",
     "Your deal with Luna Sueno was canceled.",
@@ -1353,9 +1387,7 @@ class ShippedPatternSafetyTests(unittest.TestCase):
         self.assertEqual(shipped_report_patterns(), [pattern for pattern, _ in IGNORABLE_REPORTS])
 
     def test_tick_is_one_choice_covering_every_routine_tick_family_from_the_source(self):
-        # ROUTINE_REPORTS[8:44] is the complete frequent.php tick corpus above: production,
-        # consumption, upkeep, effects, wrapper, caps, decay, siphons, repair and jealousy.
-        report = tick_report(ROUTINE_REPORTS[8:44])
+        report = tick_report(ROUTINE_TICK_REPORTS)
         page_lines = parse_report_rows(reports_page([report]))[0][0]
         self.assertEqual(surviving_report_lines(page_lines, ["Tick"]), [])
 
@@ -1396,18 +1428,22 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
         lost = "You couldn't pay the upkeep for your First Cavalry and it's gone!"
         alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [lost])])
         self.assertEqual(len(alerts), 1)
-        self.assertIn(f": {lost}\n", alerts[0])
+        self.assertIn(f"\n{lost}\n", alerts[0])
         for routine in ROUTINE_TICK_DETAILS:
             self.assertNotIn(routine, alerts[0])
 
     def test_every_notable_line_survives_the_tick_it_arrives_in(self):
+        """The whole safety property: the squash may never swallow a warning.
+
+        Each Notable line is placed last, because that is the position the game's own report
+        format makes riskiest: only a </div> separates it from "Change in Satisfaction:".
+        """
         for notable in NOTABLE_REPORTS:
             with self.subTest(message=notable[:50]):
-                # Last, because that is the position the game's own report format makes
-                # riskiest: only a </div> separates it from "Change in Satisfaction:".
                 alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [notable])])
                 self.assertEqual(len(alerts), 1)
-                self.assertIn(f": {notable}\n", alerts[0])
+                self.assertIn(f"\n{notable}\n", alerts[0])
+                self.assertTrue(alerts[0].startswith(TICK_COLLAPSED_MARKER))
 
     def test_a_finished_action_is_completely_silent(self):
         report = action_report(
@@ -1434,10 +1470,16 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
         alerts = self.alerts_for([merged])
         self.assertEqual(len(alerts), 1)
         self.assertIn(
-            ": You couldn't pay the upkeep for your First Cavalry and it's gone!\n", alerts[0]
+            "\nYou couldn't pay the upkeep for your First Cavalry and it's gone!\n", alerts[0]
         )
 
-    def test_switched_off_as_shipped_the_whole_tick_alerts(self):
+    def test_switched_off_as_shipped_the_tick_still_collapses(self):
+        """The collapse is unconditional, so the shipped default no longer prints the tick.
+
+        This replaces test_switched_off_as_shipped_the_whole_tick_alerts, whose name recorded
+        the opposite contract: with nothing configured at all, the forty-odd routine lines used
+        to be the alert. That is the behaviour this feature exists to remove.
+        """
         page = reports_page([tick_report(ROUTINE_TICK_DETAILS)])
         rows = parse_report_rows(page)
         previous = Snapshot(0, 0, None, reports_checked=True, report_rows=())
@@ -1446,8 +1488,154 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
         )
         alerts = build_alerts(previous, current)
         self.assertEqual(len(alerts), 1)
+        self.assertTrue(alerts[0].startswith(TICK_COLLAPSED_MARKER))
         for routine in ROUTINE_TICK_DETAILS:
-            self.assertIn(routine, alerts[0])
+            self.assertNotIn(routine, alerts[0])
+
+
+class TickRoutineCatalogueTests(unittest.TestCase):
+    """The two properties docs/2026-08-23-clop-report-formats.md claimed were tested.
+
+    They were not: until 2026-08-25 that document named
+    test_the_shipped_set_silences_every_routine_line_the_game_writes and
+    test_no_shipped_pattern_is_redundant, and neither existed anywhere in the repo. The
+    catalogue's safety therefore rested on a hand-check. These are the invariants, over
+    TICK_ROUTINE_PATTERNS, which is what the squash actually applies.
+    """
+
+    def test_the_catalogue_silences_every_routine_tick_line_the_game_writes(self):
+        for line in ROUTINE_TICK_REPORTS:
+            with self.subTest(line=line[:60]):
+                self.assertEqual(surviving_report_lines(line, TICK_ROUTINE_PATTERNS), [])
+
+    def test_no_catalogue_pattern_is_redundant(self):
+        for dropped in TICK_ROUTINE_PATTERNS:
+            remainder = [p for p in TICK_ROUTINE_PATTERNS if p != dropped]
+            still_covered = [
+                line
+                for line in ROUTINE_TICK_REPORTS
+                if not surviving_report_lines(line, remainder)
+            ]
+            with self.subTest(dropped=dropped):
+                self.assertNotEqual(
+                    len(still_covered),
+                    len(ROUTINE_TICK_REPORTS),
+                    f"{dropped!r} can be removed without any routine line alerting again",
+                )
+
+    def test_no_catalogue_pattern_silences_a_notable_line(self):
+        for line in NOTABLE_REPORTS:
+            with self.subTest(line=line[:60]):
+                self.assertEqual(
+                    surviving_report_lines(line, TICK_ROUTINE_PATTERNS), [line]
+                )
+
+
+class TickSquashTests(unittest.TestCase):
+    """The collapse is unconditional; only a warning-free tick can be silenced."""
+
+    def alert(self, cell, patterns=()):
+        return report_alert_text(
+            parse_report_rows(reports_page([cell]))[0][0],
+            "2026-08-17 08:00:00",
+            patterns,
+        )
+
+    def test_a_quiet_tick_collapses_to_the_marker_and_the_link(self):
+        alert = self.alert(tick_report(ROUTINE_TICK_DETAILS, satisfaction="-412"))
+        self.assertEqual(
+            alert,
+            f"{TICK_COLLAPSED_MARKER} (Satisfaction -412)\nhttps://4clop.org/reports.php",
+        )
+
+    def test_the_marker_is_the_heading_so_no_report_heading_is_added(self):
+        self.assertNotIn("New CLOP report", self.alert(tick_report(ROUTINE_TICK_DETAILS)))
+
+    def test_the_tick_selector_silences_a_warning_free_tick(self):
+        self.assertIsNone(self.alert(tick_report(ROUTINE_TICK_DETAILS), ("Tick",)))
+
+    def test_the_selector_is_case_insensitive_for_the_escape_hatch(self):
+        # surviving_report_lines casefolds the selector, so an exact membership test here
+        # would collapse a lower-case user's tick and then alert about it anyway.
+        self.assertIsNone(self.alert(tick_report(ROUTINE_TICK_DETAILS), ("tick",)))
+
+    def test_the_selector_does_not_silence_a_tick_carrying_a_warning(self):
+        starved = "You don't have enough Oil to run your 3 Basic Factory!"
+        alert = self.alert(
+            tick_report(ROUTINE_TICK_DETAILS + [starved], satisfaction="-31"), ("Tick",)
+        )
+        self.assertEqual(
+            alert,
+            f"{TICK_COLLAPSED_MARKER} (Satisfaction -31)\n{starved}"
+            "\nhttps://4clop.org/reports.php",
+        )
+
+    def test_the_players_own_patterns_cannot_switch_the_collapse_off(self):
+        # The accepted behaviour change: hand-written patterns that used to silence a whole
+        # tick now leave the marker. One line beats forty, and `Tick` is the remedy.
+        own = tuple(TICK_ROUTINE_PATTERNS)
+        alert = self.alert(tick_report(ROUTINE_TICK_DETAILS), own)
+        self.assertTrue(alert.startswith(TICK_COLLAPSED_MARKER))
+
+    def test_no_configuration_prints_the_routine_tick_lines(self):
+        for patterns in ((), ("Tick",), ("tick",), tuple(TICK_ROUTINE_PATTERNS)):
+            with self.subTest(patterns=patterns):
+                starved = "You don't have enough Oil to run your 3 Basic Factory!"
+                alert = self.alert(
+                    tick_report(ROUTINE_TICK_DETAILS + [starved]), patterns
+                )
+                for routine in ROUTINE_TICK_DETAILS:
+                    self.assertNotIn(routine, alert)
+
+    def test_the_satisfaction_figure_keeps_the_games_own_sign(self):
+        for written in ("-412", "0", "5"):
+            with self.subTest(satisfaction=written):
+                alert = self.alert(tick_report(ROUTINE_TICK_DETAILS, satisfaction=written))
+                self.assertIn(f"(Satisfaction {written})", alert)
+
+    def test_the_satisfaction_line_is_read_before_the_catalogue_removes_it(self):
+        lines = parse_report_rows(
+            reports_page([tick_report(ROUTINE_TICK_DETAILS, satisfaction="-412")])
+        )[0][0].split("\n")
+        self.assertEqual(tick_satisfaction_change(lines), "-412")
+        self.assertEqual(surviving_report_lines("\n".join(lines), ("Tick",)), [])
+
+    def test_the_marker_and_link_survive_a_body_over_the_cap(self):
+        warning = "You don't have enough Oil to run your 3 Basic Factory!"
+        many = [f"{warning} ({index})" for index in range(200)]
+        alert = self.alert(tick_report(ROUTINE_TICK_DETAILS + many, satisfaction="-99"))
+        self.assertTrue(alert.startswith(f"{TICK_COLLAPSED_MARKER} (Satisfaction -99)"))
+        self.assertTrue(alert.endswith("https://4clop.org/reports.php"))
+        body = alert.split("\n")[1:-1]
+        self.assertLessEqual(len("\n".join(body)), REPORT_BODY_LIMIT)
+
+    def test_a_report_that_is_not_a_tick_keeps_its_heading_and_gains_no_marker(self):
+        alert = self.alert(action_report("Government changed to Democracy."))
+        self.assertIn("New CLOP report (2026-08-17 08:00:00):", alert)
+        self.assertNotIn(TICK_COLLAPSED_MARKER, alert)
+
+    def test_each_reclassified_line_is_routine_and_named_in_the_catalogue(self):
+        reclassified = [
+            "You lose 4 satisfaction for having 4 disabled buildings.",
+            "You lost 140 satisfaction for having a military of total size 300.",
+            "You lose 80 sat for having an empire of 3 nations.",
+            "You lost 5 satisfaction for not having any buildings!",
+            "Too many Basic Oil Wells cause environmental damage! (-5 sat)",
+        ]
+        for line in reclassified:
+            with self.subTest(line=line[:50]):
+                self.assertIn(line, ROUTINE_TICK_REPORTS)
+                self.assertEqual(surviving_report_lines(line, TICK_ROUTINE_PATTERNS), [])
+
+    def test_satisfaction_for_having_does_not_reach_for_not_having(self):
+        # The trap in collapsing two penalties into one pattern.
+        self.assertEqual(
+            surviving_report_lines(
+                "You lost 5 satisfaction for not having any buildings!",
+                ("satisfaction for having",),
+            ),
+            ["You lost 5 satisfaction for not having any buildings!"],
+        )
 
 
 class UpgradedMarkerTests(unittest.TestCase):

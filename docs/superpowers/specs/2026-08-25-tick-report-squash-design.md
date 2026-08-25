@@ -1,7 +1,9 @@
 # Squashing the tick report in the alert — design
 
 **Date:** 2026-08-25
-**Status:** designed, not yet implemented
+**Status:** implemented. `clop_monitor.py` (`TICK_ROUTINE_PATTERNS`, `TICK_COLLAPSED_MARKER`,
+`tick_satisfaction_change`, `report_alert_text`), with the documentation and corpus corrections
+below applied. Suite: 599 passing, up from 328 in `test_clop_monitor.py` alone before the change.
 **Revised the same day** after an adversarial review against the game source and against a working
 prototype of the rule. Every claim below that the first draft asserted has now been measured; where
 the measurement contradicted the draft, the design changed rather than the wording. The changes are

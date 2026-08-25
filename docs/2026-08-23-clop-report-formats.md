@@ -8,6 +8,13 @@ recipes since could differ.
 Written because the monitor's shipped ignore-pattern `Build % completed successfully.` turned out to
 miss most of what it was meant to cover. This is the catalogue that replaced it.
 
+**Interface amendment, 2026-08-25.** The `Tick` selector described below is no longer what applies
+this catalogue. The collapse is **unconditional**: every tick report becomes
+`[TICK HAPPENED - check details in game] (Satisfaction N)` plus any warning lines, and `Tick` in
+`reports.ignore` is now only an escape hatch that suppresses a tick carrying no warnings at all.
+The satisfaction total is lifted onto the marker because this catalogue silences every line that
+explains it. See `docs/superpowers/specs/2026-08-25-tick-report-squash-design.md`.
+
 **Interface amendment, 2026-08-24.** The sentence-family catalogue below remains the internal
 safety corpus, but it is no longer dumped into `settings.example.json`. The game writes one tick
 report, so settings now expose one `Tick` selector; the monitor applies the catalogue internally to
@@ -123,6 +130,12 @@ for the common ones, all commented out.
   enemy forgets eventually; …`
 - `As you have more than 50,000 %, % was siphoned off.` / `As you have more than 1,000 %, % were
   siphoned off.`
+- **Standing satisfaction penalties for a choice the player made** (moved here from Notable on
+  2026-08-25 — see the amendment under that heading): `You lose % satisfaction for having %
+  disabled buildings.` (`frequent.php:269`, and `$disabled` sums `resources.disabled`, which only
+  the player sets), `You lost % satisfaction for having a military of total size %.` (`:661`),
+  `You lose % sat for having an empire of % nations.` (`:161`), `You lost 5 satisfaction for not
+  having any buildings!` (`:647`), `Too many % cause environmental damage! (-% sat)` (`:281`)
 - `Even for the Solar Empire, there are limits to hate. (+%)` and the NLR twin
   (`frequent.php:745`, `:752`) — the floor on hate, the mirror of the relationship caps above
 - `Some of the environmental damage has been repaired. (% sat)` (`frequent.php:355`)
@@ -144,6 +157,21 @@ for the common ones, all commented out.
 
 Something happened *to* the player, or they are losing something.
 
+**Amended 2026-08-25.** Five standing satisfaction penalties moved out of this list and into
+Routine, because for them the better test is *"does the player already know they did this"* — a
+deterministic penalty for a choice they made, recurring identically every tick, is bookkeeping
+however unwelcome the number. They are listed with the routine families above:
+`You lose % satisfaction for having % disabled buildings.` (`frequent.php:269`),
+`You lost % satisfaction for having a military of total size %.` (`:661`),
+`You lose % sat for having an empire of % nations.` (`:161`),
+`You lost 5 satisfaction for not having any buildings!` (`:647`) and
+`Too many % cause environmental damage! (-% sat)` (`:281`). The empire one is the decisive case: it
+fires on every tick for anyone holding more than one nation, so leaving it here stopped the tick
+report ever collapsing. See `docs/superpowers/specs/2026-08-25-tick-report-squash-design.md`.
+
+The "happened *to* the player" split still governs everything else in this list; the amendment is
+five named lines, not a new general rule.
+
 - `You couldn't pay the upkeep for your % and it's gone!` — permanent loss of a force
 - `Your % scattered to the four winds!` / `Your % lost % size!` — combat losses
 - `Your % (size %) were hit by %'s % (size %) for % damage (% hits)` — being attacked
@@ -151,12 +179,12 @@ Something happened *to* the player, or they are losing something.
 - `The Solar Empire hates you enough to send an airstrike …` and the NLR twin, plus
   `The % has attacked you for daring to ascend! (%)`
 - `You don't have enough % to run your % %!` — production silently failing
-- `Too many % cause environmental damage! (-% sat)`
-- `You lose % satisfaction for having % disabled buildings.`
-- `You lost 5 satisfaction for not having any buildings!`
-- `You lost % satisfaction for having a military of total size %.`
-- `You lose % sat for having an empire of % nations.`
-- `Your % government lacks the % to function properly!` — the nation is starving
+- `Your government lacks the % to function properly!` — the nation is starving. The wordings are
+  `Your Independence lacks …` (`:499`), `Your decentralized government lacks …` (`:519`) and four
+  `Your government lacks …` variants (`:539`, `:559`, `:574`, `:591`). **There is no
+  `Your Democracy lacks …` sentence** — the Democracy branch at `:539` writes `Your government
+  lacks …`. A fabricated Democracy wording sat in the test corpus until 2026-08-25.
+- `Your economy lacks the cider to function properly!` (`:615`) and the coffee twin (`:631`)
 - `Your deal with % was rejected.` / `was accepted.`, `You received % % as part of your deal.`,
   `This nation received % % from %.` — **someone else acted on you**, which is why these sit here
   rather than with the trades above
@@ -225,17 +253,26 @@ because each is a decision rather than an oversight:
   `Nation name changed from % to %`. A player takes one perhaps twice a year; seeing it confirmed is
   the point. (Several have no trailing full stop, and the game's own typo `Government revered from
   … to …` appears in five of them, so covering them would take three patterns for no benefit.)
-- **`You lose % sat for having an empire of % nations.`** — a standing penalty worth watching, and
-  filed under Notable above.
+*(A third entry stood here until 2026-08-25: `You lose % sat for having an empire of % nations.`,
+left uncovered as "a standing penalty worth watching". It is now routine and covered by
+`sat for having an empire of` — see the amendment under Notable.)*
 
 ## The rule the list is held to
 
-Two properties, both tested, and they are what stop the list growing back:
+Two properties, and they are what stop the list growing back:
 
-1. **Coverage** — the shipped set silences every line in the routine catalogue.
-   (`test_the_shipped_set_silences_every_routine_line_the_game_writes`)
+1. **Coverage** — the catalogue silences every routine tick line the game writes.
+   (`test_the_catalogue_silences_every_routine_tick_line_the_game_writes`)
 2. **No redundancy** — remove any one pattern and some routine line starts alerting again.
-   (`test_no_shipped_pattern_is_redundant`)
+   (`test_no_catalogue_pattern_is_redundant`)
+
+**Corrected 2026-08-25.** This section previously named
+`test_the_shipped_set_silences_every_routine_line_the_game_writes` and
+`test_no_shipped_pattern_is_redundant` and called both properties "tested". **Neither test
+existed** — the names appeared only in this document, `TICK_ROUTINE_PATTERNS` was not imported by
+the test file at all, and both properties were in fact hand-checks. The two tests named above now
+exist, over `TICK_ROUTINE_PATTERNS` and `ROUTINE_TICK_REPORTS`, which is what the collapse actually
+applies. A third, `test_no_catalogue_pattern_silences_a_notable_line`, holds the safety direction.
 
 Together they force one pattern per *family of game sentence* rather than one per wording, which is
 the distinction the first list lost. The mechanism that makes families collapsible is that
@@ -283,8 +320,15 @@ arrived inside the tick — the lost force, the environmental damage, the starvi
 other pattern did any better, because the routine and the notable text share a row.
 
 Judging each line separately is what fixed it: the phrase silences only the line it appears on.
-The tick still takes an internal matcher per routine line to go quiet; the user-facing `Tick`
-selector applies the complete safe set as one option.
+The tick still takes an internal matcher per routine line to go quiet.
+
+**Amended 2026-08-25 — the phrase is silenced, and the number is not.** Silencing
+`Change in Satisfaction:` was safe while the *reasons* satisfaction moved still alerted. Once the
+five standing penalties above became routine, every cause was silenced and so was the total: a tick
+shedding several hundred satisfaction would have reported nothing about it. The value is therefore
+read off the line before the catalogue removes it and carried on the collapse marker, always. It is
+the number that ends the game — revolt below -100/-300/-500 by government (`frequent.php:916-926`),
+deletion below -5000 (`:811`).
 
 ## Known gaps in this catalogue
 
@@ -292,8 +336,10 @@ selector applies the complete safe set as one option.
   cannot currently fire.
 - `Serious empire problem - Report this bug!` (`frequent.php:42`, `allfunctions.php:143`) is
   unreachable — every call site passes a valid empire name.
-- Nation-death paths (`frequent.php:903`, `:1516`, `:1536`) write to `messages` and `news`, not
-  `reports`.
+- Nation-death paths write to `graveyard`, `messages` and `news`, never `reports`: uprising death
+  at `frequent.php:861`/`:904`/`:912`, conquest at `:1474`/`:1516`/`:1536`. The scariest event in
+  the game is structurally invisible to this channel, and afterwards the nation row is deleted
+  (`:869`, `:1482`) so `needsnation()` redirects the scrape entirely.
 - **Seven** tick reports contain a literal newline mid-sentence, in two shapes: `frequent.php:952`
   (the revolt), `:985` and `:1014` (the two airstrikes) are two-line double-quoted strings, and
   `:1296`, `:1302`, `:1309` and `:1315` are three-line heredocs (the four combat lines). The

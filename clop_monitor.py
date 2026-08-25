@@ -1021,6 +1021,17 @@ TICK_ROUTINE_PATTERNS: Tuple[str, ...] = (
     "siphoned off.",
     "environmental damage has been repaired.",
     "doesn't like your good relations with",
+    # Standing satisfaction penalties for a choice the player made and knows about: disabled
+    # buildings (frequent.php:269), military size (:661), empire size (:161), owning nothing
+    # (:647) and pollution (:281). Filed as warnings until 2026-08-25 on the "did this happen
+    # *to* the player" split; reclassified on "does the player already know they did this",
+    # which is the better test for a penalty that recurs identically every tick. The empire
+    # one fires on every tick for anyone holding more than one nation, so leaving it out
+    # would stop the tick ever collapsing.
+    "satisfaction for having",
+    "sat for having an empire of",
+    "for not having any buildings!",
+    "cause environmental damage!",
 )
 
 #: Companion lines written before ``<recipe name> completed successfully.`` by
@@ -1106,6 +1117,89 @@ def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
             )
 
     return [line for index, line in enumerate(lines) if not ignored[index]]
+
+
+#: What a collapsed tick report becomes. The game writes forty-odd routine lines per tick and
+#: almost none of them are worth reading, so the alert names the event and sends the reader to
+#: the game for the detail. The brackets are part of the text.
+TICK_COLLAPSED_MARKER = "[TICK HAPPENED - check details in game]"
+
+#: How much of a report body an alert shows. The Windows dialog takes 2,000 characters
+#: (``_desktop_notification``), so this leaves room for a tick marker and the trailing link
+#: while still bounding a report that arrives with a very long list of warnings.
+REPORT_BODY_LIMIT = 1500
+
+REPORTS_URL = "https://4clop.org/reports.php"
+
+_SATISFACTION_PREFIX = "change in satisfaction:"
+
+
+def tick_satisfaction_change(lines: Sequence[str]) -> Optional[str]:
+    """The tick's own satisfaction total, read before the catalogue silences that line.
+
+    ``cron/frequent.php:794`` writes it on every tick as ``Change in Satisfaction: N``, and the
+    shipped ``Change in %:`` pattern silences it as routine. That was harmless while the
+    *reasons* satisfaction moved still alerted, but the five standing penalties above are now
+    routine too -- so without lifting the number onto the marker, a tick that quietly shed
+    several hundred satisfaction would report nothing at all about it.
+
+    It is the number that ends the game: revolt fires below -100, -300 or -500 depending on
+    government (``frequent.php:916-926``) and a nation below -5000 is deleted outright (``:811``).
+    """
+    for line in lines:
+        if line.casefold().startswith(_SATISFACTION_PREFIX):
+            return line[len(_SATISFACTION_PREFIX) :].strip()
+    return None
+
+
+def _capped(body: str) -> str:
+    return body if len(body) <= REPORT_BODY_LIMIT else body[: REPORT_BODY_LIMIT - 3] + "..."
+
+
+def report_alert_text(
+    message: str, posted: str, patterns: Sequence[str]
+) -> Optional[str]:
+    """What one report should alert with, or ``None`` if it raises no alert.
+
+    A tick report always collapses: the alert is the marker carrying the satisfaction change,
+    then every line the routine catalogue could not account for -- a starved building, a
+    government out of gasoline, a force that starved and is gone. There is no configuration in
+    which the routine lines are printed instead, because printing them is the problem this
+    exists to remove. The one escape hatch is a ``Tick`` entry in ``reports.ignore``, which
+    suppresses a tick that carried no warnings at all.
+
+    The marker and the link sit outside the length cap. Folding them into the capped body would
+    spend the marker's characters out of the budget meant for warnings and make truncation more
+    likely, which is backwards: the marker is the one line guaranteed to be worth keeping.
+    """
+    lines = message.split("\n")
+    if not _is_tick_report(lines):
+        surviving = surviving_report_lines(message, patterns)
+        if not surviving:
+            return None
+        preview = _capped("\n".join(surviving))
+        return f"New CLOP report ({posted}): {preview}\n{REPORTS_URL}"
+
+    warnings = surviving_report_lines(
+        message, tuple(patterns) + (TICK_REPORT_SELECTOR,)
+    )
+    if not warnings and any(
+        # casefold, because surviving_report_lines reads the selector case-insensitively.
+        # An exact test here would collapse a lower-case user's tick and then alert anyway.
+        entry.casefold() == TICK_REPORT_SELECTOR.casefold()
+        for entry in patterns
+    ):
+        return None
+
+    change = tick_satisfaction_change(lines)
+    marker = TICK_COLLAPSED_MARKER
+    if change is not None:
+        marker = f"{marker} (Satisfaction {change})"
+    parts = [marker]
+    if warnings:
+        parts.append(_capped("\n".join(warnings)))
+    parts.append(REPORTS_URL)
+    return "\n".join(parts)
 
 
 def new_reports_since(
@@ -1708,15 +1802,9 @@ def build_alerts(
             (current.latest_report,) if current.latest_report is not None else ()
         )
         for message, posted in new_reports_since(previous.latest_report, rows):
-            surviving = surviving_report_lines(message, settings.report_ignore)
-            if not surviving:
-                continue
-            body = "\n".join(surviving)
-            preview = body if len(body) <= 800 else body[:797] + "..."
-            alerts.append(
-                f"New CLOP report ({posted}): {preview}\n"
-                "https://4clop.org/reports.php"
-            )
+            alert = report_alert_text(message, posted, settings.report_ignore)
+            if alert is not None:
+                alerts.append(alert)
     # No previous to compare against, unlike the branches above: a standing buy order is a
     # current fact, not an event, so it alerts every poll for as long as it is pending.
     # goods_to_watch, rather than an inline market_orders check, so that "muted means nothing
