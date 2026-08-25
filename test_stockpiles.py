@@ -50,9 +50,9 @@ def nation_grid(header_row=10, have_at=1, labels=None, stamp="2026-08-23 11:42:1
 GOODS_LABELS = [
     "Energy", "Apples", "Coffee", "Oil", "Gas", "Gems", "Cider", "Pies", "Toys",
     "Tungsten", "Plastics",
-    "",  # spacer, row 28
+    "",  # spacer, row 29
     "Drugs", "Copper", "M Parts", "V Parts", "P Parts", "Composites",
-    "",  # spacer, row 35
+    "",  # spacer, row 36
     "Forbidden Research", "Apotheosis Serum",
     "DNA - Burro - Central", "DNA - Burro - North", "DNA - Burro - South",
     "DNA - Prze - Central", "DNA - Prze - North", "DNA - Prze - South",
@@ -60,38 +60,52 @@ GOODS_LABELS = [
     "DNA - Zebrica - Central", "DNA - Zebrica - North", "DNA - Zebrica - South",
 ]
 
-NATIONS = ["READ ONLY", "TOTAL", "LePone(Z)", "quaity(P)", "Pure Apple Acres(B)", "#N/A"]
+#: Row 1 of the live tab. A1 holds the sheet's own "game now" clock (it used to read `READ ONLY`)
+#: and B1 the totals column; the nations start at C. Neither of the first two is a nation name, and
+#: nothing in the code reads them -- they are here so the fixture is the sheet as it stands.
+NATIONS = [
+    "2026-08-25 10:19:48", "TOTAL (or min)",
+    "LePone(Z)", "quaity(P)", "Pure Apple Acres(B)", "#N/A",
+]
+
+#: The sheet's own row, inserted 2026-08-25 between the header and the first block: a per-nation
+#: staleness formula reading A1 against that nation's `Active` stamp. It is **not** one of
+#: DASHBOARD_LABELS, so the monitor never locates it and must never write into it.
+FORMULA_LABEL = "Ticks Since Recorded"
+FORMULA_ROW = 2
 
 #: The blank rows in the live layout. Nothing may ever be written into one of these.
-SPACER_ROWS = (6, 13, 16, 28, 35)
+SPACER_ROWS = (7, 14, 17, 29, 36)
 
 
 def dashboard_grid(nations=None, labels=None, offset=0):
     """The alliance tab as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels.
 
-    This is the live layout as of 2026-08-24: status rows 2-5, the tick block 7-12, GDP/Bits 14-15,
-    then the goods from 17. ``offset`` inserts that many blank rows below row 1, moving the whole
-    block down -- which nothing should notice, because every row is found by its label.
+    This is the live layout as of 2026-08-25: the sheet's own `Ticks Since Recorded` formula at
+    row 2, status rows 3-6, the tick block 8-13, GDP/Bits 15-16, then the goods from 18 to 50.
+    ``offset`` inserts that many blank rows below row 1, moving the whole block down -- which
+    nothing should notice, because every row is found by its label.
     """
     nations = NATIONS if nations is None else nations
     labels = GOODS_LABELS if labels is None else labels
     grid = [list(nations)]
     grid.extend([[""] for _ in range(offset)])
+    grid.append([FORMULA_LABEL])   # row 2 -- the sheet's, not ours
     grid.append(["Active"])
     grid.append(["Sat"])
     grid.append(["NLR"])
     grid.append(["SE"])
-    grid.append([""])          # spacer row 6
+    grid.append([""])          # spacer row 7
     grid.append(["Apple - tick"])
     grid.append(["Oil - tick"])
     grid.append(["Coffee - tick"])
     grid.append(["M Part - tick"])
     grid.append(["V Part - tick"])
     grid.append(["Gems - tick"])
-    grid.append([""])          # spacer row 13
+    grid.append([""])          # spacer row 14
     grid.append(["GDP"])
     grid.append(["Bits"])
-    grid.append([""])          # spacer row 16
+    grid.append([""])          # spacer row 17
     grid.extend([[label] for label in labels])
     return grid
 
@@ -198,17 +212,24 @@ class LocateDashboardBlockTests(unittest.TestCase):
         block, problems = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
         self.assertEqual(problems, [])
         self.assertEqual(block.column, "C")
-        self.assertEqual(block.rows["Active"], 2)
-        self.assertEqual(block.rows["Apple - tick"], 7)
-        self.assertEqual(block.rows["Gems - tick"], 12)
-        self.assertEqual(block.rows["GDP"], 14)
-        self.assertEqual(block.rows["Bits"], 15)
-        self.assertEqual(block.rows["Energy"], 17)
-        self.assertEqual(block.rows["Plastics"], 27)
-        self.assertEqual(block.rows["Drugs"], 29)
-        self.assertEqual(block.rows["Composites"], 34)
-        self.assertEqual(block.rows["Forbidden Research"], 36)
-        self.assertEqual(block.rows["DNA - Zebrica - South"], 49)
+        self.assertEqual(block.rows["Active"], 3)
+        self.assertEqual(block.rows["Apple - tick"], 8)
+        self.assertEqual(block.rows["Gems - tick"], 13)
+        self.assertEqual(block.rows["GDP"], 15)
+        self.assertEqual(block.rows["Bits"], 16)
+        self.assertEqual(block.rows["Energy"], 18)
+        self.assertEqual(block.rows["Plastics"], 28)
+        self.assertEqual(block.rows["Drugs"], 30)
+        self.assertEqual(block.rows["Composites"], 35)
+        self.assertEqual(block.rows["Forbidden Research"], 37)
+        self.assertEqual(block.rows["DNA - Zebrica - South"], 50)
+
+    def test_the_sheets_own_formula_row_is_not_located(self):
+        # 'Ticks Since Recorded' is a label in column A that is none of ours. It must resolve to
+        # nothing at all, so that no run can ever be extended over row 2 and wipe the formulas.
+        block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
+        self.assertNotIn(FORMULA_LABEL, block.rows)
+        self.assertNotIn(FORMULA_ROW, set(block.rows.values()))
 
     def test_all_forty_three_labels_located(self):
         block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
@@ -222,8 +243,8 @@ class LocateDashboardBlockTests(unittest.TestCase):
     def test_inserted_row_shifts_every_row(self):
         block, problems = locate_dashboard_block(dashboard_grid(offset=3), "LePone(Z)")
         self.assertEqual(problems, [])
-        self.assertEqual(block.rows["Active"], 5)
-        self.assertEqual(block.rows["Energy"], 20)
+        self.assertEqual(block.rows["Active"], 6)
+        self.assertEqual(block.rows["Energy"], 21)
 
     def test_nation_not_found_names_row_one(self):
         block, problems = locate_dashboard_block(dashboard_grid(), "Nowhere(X)")
@@ -262,8 +283,10 @@ class LocateDashboardBlockTests(unittest.TestCase):
         block, _ = locate_dashboard_block(dashboard_grid(), "LePone(Z)")
         spans = [(run[0][0], run[-1][0]) for run in contiguous_runs(block.rows)]
         self.assertEqual(
-            spans, [(2, 5), (7, 12), (14, 15), (17, 27), (29, 34), (36, 49)]
+            spans, [(3, 6), (8, 13), (15, 16), (18, 28), (30, 35), (37, 50)]
         )
+        # The first run starts at 3, not 2: nothing reaches back over the sheet's formula row.
+        self.assertEqual(spans[0][0], FORMULA_ROW + 1)
 
 
 STATUS = NationStatus(
@@ -360,7 +383,7 @@ class SnapshotTests(unittest.TestCase):
         self.run_snapshot(sheet)
         ranges = [block[1] for block in sheet.blocks if block[0] == DASHBOARD_TAB]
         self.assertEqual(
-            ranges, ["C2:C5", "C7:C12", "C14:C15", "C17:C27", "C29:C34", "C36:C49"]
+            ranges, ["C3:C6", "C8:C13", "C15:C16", "C18:C28", "C30:C35", "C37:C50"]
         )
 
     def test_dashboard_status_run_payload(self):
@@ -368,7 +391,7 @@ class SnapshotTests(unittest.TestCase):
         self.run_snapshot(sheet)
         payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
         self.assertEqual(
-            payload["C2:C5"],
+            payload["C3:C6"],
             [
                 [as_sheet_text("2026-08-23 11:42:12")],
                 ["218 (-5)"],
@@ -376,7 +399,7 @@ class SnapshotTests(unittest.TestCase):
                 ["-120 (3)"],
             ],
         )
-        self.assertEqual(payload["C14:C15"], [[60900], [1234567]])
+        self.assertEqual(payload["C15:C16"], [[60900], [1234567]])
 
     def test_dashboard_tick_run_payload(self):
         sheet = FakeSheet()
@@ -386,7 +409,7 @@ class SnapshotTests(unittest.TestCase):
         # where it does not print a number. Coffee/M Part/V Part are not on the page at all, which
         # the game itself would render as "N/A".
         self.assertEqual(
-            payload["C7:C12"], [[13], ["N/A"], ["N/A"], ["N/A"], ["N/A"], ["NONE"]]
+            payload["C8:C13"], [[13], ["N/A"], ["N/A"], ["N/A"], ["N/A"], ["NONE"]]
         )
 
     def test_dashboard_goods_run_payload(self):
@@ -395,7 +418,7 @@ class SnapshotTests(unittest.TestCase):
         payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
         # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
         self.assertEqual(
-            payload["C17:C27"],
+            payload["C18:C28"],
             [[0], [1226], [0], [80], [0], [6], [0], [0], [4], [0], [0]],
         )
 
@@ -403,7 +426,7 @@ class SnapshotTests(unittest.TestCase):
         sheet = FakeSheet()
         self.run_snapshot(sheet)
         payload = dict((b[1], b[2]) for b in sheet.blocks if b[0] == DASHBOARD_TAB)
-        self.assertEqual(payload["C36:C49"], [[0]] * 14)
+        self.assertEqual(payload["C37:C50"], [[0]] * 14)
 
     def test_no_ticks_column_leaves_the_tick_rows_alone(self):
         # "We could not read it" and "you have none" are different claims. The tick rows keep
@@ -411,9 +434,9 @@ class SnapshotTests(unittest.TestCase):
         sheet = FakeSheet()
         _report, problems = snapshot(sheet, "LePone(Z)", STOCK_NO_TICKS, STATUS)
         ranges = [block[1] for block in sheet.blocks if block[0] == DASHBOARD_TAB]
-        self.assertNotIn("C7:C12", ranges)
-        self.assertIn("C2:C5", ranges)
-        self.assertIn("C17:C27", ranges)
+        self.assertNotIn("C8:C13", ranges)
+        self.assertIn("C3:C6", ranges)
+        self.assertIn("C18:C28", ranges)
         self.assertEqual(len(problems), 1)
         self.assertIn("Ticks-Worth", problems[0])
 
@@ -430,8 +453,23 @@ class SnapshotTests(unittest.TestCase):
             self.assertNotIn(spacer, touched)
         self.assertTrue(touched)  # ...and it did write something, so this is not vacuously true
 
+    def test_the_sheets_own_rows_are_never_written(self):
+        # Row 1 is the nation header and row 2 the sheet's staleness formulas. Both sit inside the
+        # scanned region, above the first block we do write, and neither is ours to touch.
+        sheet = FakeSheet()
+        self.run_snapshot(sheet)
+        touched = set()
+        for tab, a1, _values in sheet.blocks:
+            if tab != DASHBOARD_TAB:
+                continue
+            first, last = a1.split(":")
+            touched.update(range(int(first[1:]), int(last[1:]) + 1))
+        self.assertNotIn(1, touched)
+        self.assertNotIn(FORMULA_ROW, touched)
+        self.assertEqual(min(touched), FORMULA_ROW + 1)
+
     def test_dashboard_problem_does_not_stop_the_nation_tab(self):
-        sheet = FakeSheet(dashboard=dashboard_grid(nations=["READ ONLY", "TOTAL"]))
+        sheet = FakeSheet(dashboard=dashboard_grid(nations=NATIONS[:2]))
         _report, problems = self.run_snapshot(sheet)
         self.assertTrue(problems)
         self.assertTrue(any(block[0] == "LePone(Z)" for block in sheet.blocks))

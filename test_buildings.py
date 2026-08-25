@@ -63,10 +63,11 @@ OVERVIEW_HTML = """
 """
 
 
-#: The alliance tab's column A, in the live order: four status rows, the six "- tick" rows,
-#: GDP/Bits, then the 31 goods -- with a blank spacer between each block. Nation "T" is column C.
+#: The alliance tab's column A, in the live order: the sheet's own "Ticks Since Recorded" formula
+#: row, four status rows, the six "- tick" rows, GDP/Bits, then the 31 goods -- with a blank spacer
+#: between each block. Nation "T" is column C.
 DASHBOARD_COLUMN_A = (
-    ["Active", "Sat", "NLR", "SE", ""]
+    ["Ticks Since Recorded", "Active", "Sat", "NLR", "SE", ""]
     + ["Apple - tick", "Oil - tick", "Coffee - tick",
        "M Part - tick", "V Part - tick", "Gems - tick", ""]
     + ["GDP", "Bits", ""]
@@ -81,7 +82,7 @@ DASHBOARD_COLUMN_A = (
 )
 
 
-def dashboard_grid(nations=("READ ONLY", "TOTAL", "T", "other(P)")):
+def dashboard_grid(nations=("2026-08-25 10:19:48", "TOTAL (or min)", "T", "other(P)")):
     """The alliance tab as read by DASHBOARD_SCAN_RANGE: row 1 nations, column A labels."""
     return [list(nations)] + [[label] for label in DASHBOARD_COLUMN_A]
 
@@ -634,18 +635,18 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
         # ...and the same numbers reach the Dashboard, alongside the status rows.
         self.assertEqual(
-            blocks["C2:C5"],
+            blocks["C3:C6"],
             [["'2026-08-23 03:23:44"], ["218 (-5)"], ["1500 (Ascending)"], ["-120 (3)"]],
         )
-        self.assertEqual(blocks["C14:C15"], [[60900], [1234567]])
+        self.assertEqual(blocks["C15:C16"], [[60900], [1234567]])
         # Apple, Oil, Coffee, M Part, V Part, Gems -- the Ticks-Worth column, the game's own words
         # where it prints one. Only Apples and Gems are on this page; the rest read as "N/A".
         self.assertEqual(
-            blocks["C7:C12"], [[87], ["N/A"], ["N/A"], ["N/A"], ["N/A"], [6]]
+            blocks["C8:C13"], [[87], ["N/A"], ["N/A"], ["N/A"], ["N/A"], [6]]
         )
         # Energy, Apples, Coffee, Oil, Gas, Gems, Cider, Pies, Toys, Tungsten, Plastics
         self.assertEqual(
-            blocks["C17:C27"], [[0], [1226], [0], [0], [0], [6], [0], [0], [0], [0], [0]]
+            blocks["C18:C28"], [[0], [1226], [0], [0], [0], [6], [0], [0], [0], [0], [0]]
         )
         # A routine snapshot is a scheduled refresh, not an event: no popup for it.
         self.assertEqual(notifier.failures, [])
@@ -687,7 +688,8 @@ class SyncSheetStepTests(unittest.TestCase):
 
         col_a, _ = full_column_a()
         sheet = FakeSheet(col_a, [""] * 130,
-                          dashboard=dashboard_grid(nations=("READ ONLY", "TOTAL", "somebody(P)")))
+                          dashboard=dashboard_grid(
+                              nations=("2026-08-25 10:19:48", "TOTAL (or min)", "somebody(P)")))
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
         self.assertEqual(len(notifier.failures), 1)
@@ -717,7 +719,7 @@ class SyncSheetStepTests(unittest.TestCase):
         sheet = FakeSheet(
             sheet_column_a(), [""] * 130,               # buildings missing -> sanity fails
             stock_labels=["apple", "oil", "coffee", "mpart", "vpart", "rocks"],
-            dashboard=dashboard_grid(nations=("READ ONLY", "TOTAL")),
+            dashboard=dashboard_grid(nations=("2026-08-25 10:19:48", "TOTAL (or min)")),
         )
         notifier = FakeNotifier()
         sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
@@ -857,7 +859,7 @@ class SyncSheetStepTests(unittest.TestCase):
         self.assertEqual(notifier.failures, [])
         self.assertEqual(dict(sheet.blocks)["R11:R16"], [[7], [0], [0], [0], [0], [0]])
         self.assertIn(("W10", "'2026-08-23 03:23:44"), sheet.writes)
-        self.assertEqual(dict(sheet.blocks)["C14:C15"], [[60900], [1234567]])
+        self.assertEqual(dict(sheet.blocks)["C15:C16"], [[60900], [1234567]])
 
 
 if __name__ == "__main__":

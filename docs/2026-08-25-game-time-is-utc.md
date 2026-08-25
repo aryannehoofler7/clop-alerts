@@ -99,7 +99,15 @@ block start across a full day lands on `00:00, 02:00 … 22:00`, midnight crossi
 ### How stale is a stamp, in ticks
 
 This is the staleness question the sheet actually wants answered, so it is worth stating on its
-own. With `$A$1` holding game-now and the stamp in `W10`:
+own.
+
+**It is now live on the shared sheet.** `Dashboard-Stockpile!A1` holds game-now, and row 2 —
+`Ticks Since Recorded`, inserted 2026-08-25 — runs this per nation column against that column's
+`Active` stamp. See [`2026-08-23-dashboard-goods-map.md`](2026-08-23-dashboard-goods-map.md). The
+monitor does not write either of those rows; what it owes them is that `Active` keeps going in as
+**text**, which is what the `DATEVALUE`/`TIMEVALUE` parse below depends on.
+
+With `$A$1` holding game-now and the stamp in `W10`:
 
 ```
 =FLOOR($A$1*12) - FLOOR((DATEVALUE(LEFT(W10,10))+TIMEVALUE(MID(W10,12,8)))*12)

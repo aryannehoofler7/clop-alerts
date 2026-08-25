@@ -1017,9 +1017,15 @@ visibly stops claiming to be current.
 
 ### The `Dashboard-Stockpile` tab
 
-The shared `Dashboard-Stockpile` is the alliance-wide view: one column per nation, `TOTAL` in
-column B. Its `A1` says `READ ONLY` — that is aimed at **people**, not at this tool. Do not fill it
-in by hand.
+The shared `Dashboard-Stockpile` is the alliance-wide view: one column per nation, `TOTAL (or min)`
+in column B. Do not fill the grid in by hand — the monitor is the intended writer.
+
+Two rows on that tab belong to the **sheet**, not to this tool, and it never writes either:
+
+- **`A1`** — the sheet's own "game now" clock. (It used to hold a `READ ONLY` notice.)
+- **Row 2, `Ticks Since Recorded`** — a per-nation formula measuring how stale that column is:
+  `A1` against that column's `Active` stamp, counted in tick boundaries crossed rather than hours
+  elapsed. `docs/2026-08-25-game-time-is-utc.md` has the formula and why it counts ticks.
 
 Off the same page read, the monitor writes your own column, in four blocks:
 
@@ -1030,20 +1036,22 @@ Off the same page read, the monitor writes your own column, in four blocks:
   out) or `NONE` (already less than one tick's worth left);
 - **`Active`**, a last-updated timestamp;
 - **`Sat`, `NLR`, `SE`** as `current (per tick)`, exactly as the game shows them, and **`GDP`** and
-  **`Bits`** as plain numbers so the `TOTAL` column can add them up.
+  **`Bits`** as plain numbers so the `TOTAL (or min)` column can add them up.
 
 Your column is found by matching your `CLOP_NATION` against the names in row 1, and each row by
 looking its label up in column A — so, again, no fixed addresses. **If your nation is not named in
 row 1, nothing on the Dashboard is written** and the dialog prints what row 1 actually contains, so
 you can see whether your tab is spelled differently. Your own nation tab still updates.
 
-Only your column is ever written. Nobody else's numbers, and never the `TOTAL` column.
+Only your column is ever written. Nobody else's numbers, never the `TOTAL (or min)` column, and
+never rows 1 or 2 — the first block written starts below them.
 
 `docs/2026-08-23-dashboard-goods-map.md` is the full row-by-row map of that tab.
 
-The tab was called `Dashboard` until 2026-08-24, and its blocks have been rearranged since. Only the
-tab *name* needed a code change: every row and column is found by looking its label up, so moving
-them around is something the monitor simply follows.
+The tab was called `Dashboard` until 2026-08-24, and its blocks have been rearranged twice since —
+most recently on 2026-08-25, when `Ticks Since Recorded` was inserted as row 2 and pushed every
+block below it down by one. Only the tab *name* has ever needed a code change: every row and column
+is found by looking its label up, so moving them around is something the monitor simply follows.
 
 ### Checking it yourself
 
