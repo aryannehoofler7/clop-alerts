@@ -5122,6 +5122,115 @@ class SheetSyncRunsLastTests(SettingsReloadThroughMainTests):
         self.assertEqual(order, ["alert", "sheet"] * (len(order) // 2))
 
 
+class PageReconciledAgainstIsNewerThanTheDialogTests(SettingsReloadThroughMainTests):
+    """The sheet must never be reconciled against a page fetched before a dialog paused the poll.
+
+    A desktop alert is modal: nothing is polled while it is on screen. The overview page the sheet
+    sync uses is fetched at the top of the poll, *before* the alerting -- so with a dialog standing
+    for half an hour, that page is half an hour old by the time the sync gets to it, and every
+    building the player raised or razed meanwhile reads as the sheet being wrong. It then overwrites
+    correct cells and reports it as an ordinary "Building counts corrected" popup, which is
+    indistinguishable from a real correction.
+
+    Seen in production on LePone(Z), 2026-08-25: a report alert went up at 17:01 UTC and stood for
+    38 minutes; a second Toy Factory was built while it was up; dismissing it wrote
+    ``Toy Factory have 2 -> 1`` over a sheet cell that was already right.
+    """
+
+    class Client(PollingClient):
+        """Two unread messages every poll, and a snapshot that accepts the stockpiles main hands it.
+
+        ``PollingClient.snapshot`` takes no ``stockpiles``, which the loop only passes when a good
+        is watched -- and a watched good is exactly what makes the loop read overview up front.
+        """
+
+        def snapshot(self, include_market=True, stockpiles=None):
+            del include_market, stockpiles
+            return Snapshot(2, 0, None)
+
+    def _drive(self, paused):
+        """One poll with a watched good, returning the page the sheet sync reconciled against."""
+        import sheets
+
+        fetched = []
+        reconciled = []
+
+        def fake_read(client):
+            del client
+            # The game moves while the dialog is up, so a later read sees a different page.
+            page = "before-the-dialog" if not fetched else "after-the-dialog"
+            fetched.append(page)
+            return page, f"stock-{page}"
+
+        def fake_step(client, sheet, nation, notifier, overview_html=None, stock=None, last=None):
+            del sheet, nation, notifier, stock, last
+            # Mirrors the real step: no page handed in means it reads one for itself.
+            if overview_html is None:
+                overview_html, _ = fake_read(client)
+            reconciled.append(overview_html)
+            return "digest"
+
+        class Sheet:
+            def __init__(self, *a, **k):
+                pass
+
+            def require_tab(self, tab):
+                return None
+
+        class PausingNotifier(Notifier):
+            def notify(self, message):
+                del message
+                return paused
+
+            def notify_failure(self, message):
+                del message
+                return True
+
+        good = {
+            "friends": True,
+            "alliance": True,
+            "reserve": "none",
+            "reserve_amount": 0,
+            "always": [],
+            "never": [],
+        }
+        polls = []
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            def sleep(seconds):
+                del seconds
+                polls.append(1)
+                raise KeyboardInterrupt
+
+            with mock.patch.object(clop_monitor, "Notifier", PausingNotifier), mock.patch.object(
+                sheets, "GoogleSheet", Sheet
+            ), mock.patch.object(
+                clop_monitor, "read_overview_stockpiles", fake_read
+            ), mock.patch.object(clop_monitor, "sync_sheet_step", fake_step):
+                _, code = self._run(
+                    directory,
+                    {
+                        "cache": {"persist_to_file": False},
+                        "alerts": {"market_orders": True},
+                        "market": {"goods": {"Cider": good}},
+                    },
+                    sleep,
+                    client=self.Client,
+                    env={"CLOP_NATION": "LePone(Z)"},
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 1)
+        return reconciled
+
+    def test_a_dialog_that_paused_the_poll_costs_the_page_its_currency(self):
+        self.assertEqual(self._drive(paused=True), ["after-the-dialog"])
+
+    def test_an_unpaused_poll_still_reconciles_off_the_page_it_already_read(self):
+        # The other half of the rule: no dialog means no lost time, so re-reading here would
+        # double this poll's overview fetches for a page that is already current.
+        self.assertEqual(self._drive(paused=False), ["before-the-dialog"])
+
+
 class MissingTabDuringPollingTests(SettingsReloadThroughMainTests):
     def test_a_missing_tab_found_while_polling_switches_sync_off_once(self):
         # Otherwise it is an identical blocking dialog every 60 seconds, forever.

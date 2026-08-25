@@ -2754,7 +2754,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if goods_to_watch(settings.alerts):
                     overview_html, stockpiles = read_overview_stockpiles(client)
 
-                current, _ = check_and_notify(
+                current, paused_for_alert = check_and_notify(
                     client,
                     previous,
                     notifier,
@@ -2764,6 +2764,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     stockpiles,
                 )
                 previous = current
+
+                # A dialog is modal, so the poll stood still for as long as it was on screen, and
+                # the page read above is that old. Reconciling the sheet against it writes whatever
+                # the game looked like when the dialog went up over cells that may since have become
+                # right -- and reports it as an ordinary "Building counts corrected" popup, which
+                # reads exactly like a real correction. Dropping it makes the sync read a current
+                # page for itself; the cost is one overview fetch on the polls that paused, which
+                # are the polls that were never in a hurry.
+                if paused_for_alert:
+                    overview_html = None
+                    stockpiles = None
 
                 # Sheet sync goes LAST, after the alerting it used to precede. Alerting is what
                 # this program is for; the sheet is bookkeeping. Ordered this way a slow or

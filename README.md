@@ -1010,6 +1010,13 @@ Two things stretch that window further, and both are worth knowing:
 
 - **A dialog freezes the monitor.** Desktop alerts are modal — nothing is polled while one is on
   screen. Anything you disable while reading an alert waits for the poll *after* you dismiss it.
+  Dismissing one also **throws away the page** the sync was going to use, because that page was
+  fetched before the dialog went up and is therefore as old as the dialog was long. It reads a
+  current one instead. This is not a nicety: while it did not, a report alert left standing for 38
+  minutes had a Toy Factory built behind it, and dismissing it wrote `Toy Factory have 2 -> 1` over
+  a sheet cell that was already right — a *false* correction, in the same dialog real ones use. See
+  [The sheet is never reconciled against a page older than the
+  dialog](docs/2026-08-26-stale-page-after-a-dialog-design.md).
 - **A cell that is wrong on its own stays wrong.** See [It only writes when something has actually
   changed](#it-only-writes-when-something-has-actually-changed): while the game's numbers have not
   moved the sheet is not even read, so a hand-edit — or a stale value left over from an earlier
