@@ -253,6 +253,16 @@ For each order under a watched good, in this order:
 4. `alliance` is true and the buyer is in your alliance → alert
 5. otherwise → skip
 
+> **Amended 2026-08-26:** this list is no longer the whole rule, and was already one step short
+> when it was written. Two steps have been added around it since, both of them *skips*, so
+> everything the list says still holds — an order it silences is still silenced, and nothing it
+> alerts on is alerted on for a new reason. Ahead of step 1, an order placed by **your own active
+> nation** is discarded (added 2026-08-24, commit `b1c8e3b`). Between steps 4 and 5, an alerting
+> order must clear the good's **reserve**, which stands on `Qty - Used` — see
+> [the reserve floor design](2026-08-26-market-reserve-used-floor-design.md). The reserve is why
+> "always beats both relation checks" is not quite "always alerts": it cannot alert on stock you
+> have not got spare.
+
 `never` beating `always` makes the blacklist absolute, which is what "never alert on" says.
 `always` beating both relation checks means a named nation alerts even when it is an enemy, and
 even with `friends` and `alliance` both false — so those two false plus a populated `always`

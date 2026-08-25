@@ -2834,7 +2834,7 @@ class MarketDecisionTests(unittest.TestCase):
         return clop_monitor.MarketOrder("Oil", 1, name, 5, 1000, **flags)
 
     def decide(self, order, **knobs):
-        stock = knobs.pop("stock", Stockpiles({"Oil": 5}, {"Oil": 3}))
+        stock = knobs.pop("stock", Stockpiles({"Oil": 5}, {"Oil": 3}, used={"Oil": 0}))
         return clop_monitor.market_order_alerts(
             order, clop_monitor.WatchedGood("Oil", **knobs), stock
         )
@@ -2892,7 +2892,7 @@ class MarketDecisionTests(unittest.TestCase):
         self.assertFalse(self.decide(self.order(is_friend=True), never=("luna sueno",)))
 
     def test_own_nation_is_silent_even_when_always_matches(self):
-        stock = Stockpiles({"Oil": 5}, {"Oil": 3}, nation_name="LUNA SUENO")
+        stock = Stockpiles({"Oil": 5}, {"Oil": 3}, nation_name="LUNA SUENO", used={"Oil": 0})
         self.assertFalse(
             self.decide(
                 self.order(is_friend=True, is_ally=True),
@@ -2903,19 +2903,19 @@ class MarketDecisionTests(unittest.TestCase):
 
     def test_none_reserve_still_requires_a_positive_quantity(self):
         self.assertFalse(
-            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 0}))
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 0}, used={"Oil": 0}))
         )
         self.assertTrue(
-            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 1}))
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 1}, used={"Oil": 0}))
         )
 
     def test_qty_reserve_requires_strictly_more_than_the_threshold(self):
         good = {"reserve": "qty", "reserve_amount": 5}
         self.assertFalse(
-            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 5}), **good)
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 5}, used={"Oil": 0}), **good)
         )
         self.assertTrue(
-            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 6}), **good)
+            self.decide(self.order(is_friend=True), stock=Stockpiles({"Oil": 6}, used={"Oil": 0}), **good)
         )
 
     def test_ticks_reserve_requires_strictly_more_than_the_threshold(self):
@@ -2923,14 +2923,14 @@ class MarketDecisionTests(unittest.TestCase):
         self.assertFalse(
             self.decide(
                 self.order(is_friend=True),
-                stock=Stockpiles({"Oil": 10}, {"Oil": 3}),
+                stock=Stockpiles({"Oil": 10}, {"Oil": 3}, used={"Oil": 0}),
                 **good,
             )
         )
         self.assertTrue(
             self.decide(
                 self.order(is_friend=True),
-                stock=Stockpiles({"Oil": 10}, {"Oil": 4}),
+                stock=Stockpiles({"Oil": 10}, {"Oil": 4}, used={"Oil": 0}),
                 **good,
             )
         )
@@ -2940,14 +2940,14 @@ class MarketDecisionTests(unittest.TestCase):
         self.assertTrue(
             self.decide(
                 self.order(is_friend=True),
-                stock=Stockpiles({"Oil": 10}, {"Oil": "N/A"}),
+                stock=Stockpiles({"Oil": 10}, {"Oil": "N/A"}, used={"Oil": 0}),
                 **good,
             )
         )
         self.assertFalse(
             self.decide(
                 self.order(is_friend=True),
-                stock=Stockpiles({"Oil": 10}, {"Oil": "NONE"}),
+                stock=Stockpiles({"Oil": 10}, {"Oil": "NONE"}, used={"Oil": 0}),
                 **good,
             )
         )
@@ -2958,7 +2958,7 @@ class MarketDecisionTests(unittest.TestCase):
                 self.order(is_friend=True),
                 reserve="ticks",
                 reserve_amount=0,
-                stock=Stockpiles({}, {}),
+                stock=Stockpiles({}, {}, used={}),
             )
         )
 
@@ -2968,8 +2968,73 @@ class MarketDecisionTests(unittest.TestCase):
                 self.order(is_friend=True),
                 reserve="ticks",
                 reserve_amount=0,
-                stock=Stockpiles({"Oil": 10}),
+                stock=Stockpiles({"Oil": 10}, used={"Oil": 0}),
             )
+
+
+class MarketReserveFloorTests(unittest.TestCase):
+    """Every mode stands on the same floor: the nation's own Used amount comes off first.
+
+    A tick's consumption has to be on hand whatever the mode says, so the pool a reserve then
+    measures is Qty - Used, never the raw Qty. See the 2026-08-26 design note.
+    """
+
+    def order(self, good="Gems"):
+        return clop_monitor.MarketOrder(good, 1, "Luna Sueno", 5, 1000, is_friend=True)
+
+    def decide(self, quantity, used, ticks="N/A", **knobs):
+        stock = Stockpiles({"Gems": quantity}, {"Gems": ticks}, used={"Gems": used})
+        return clop_monitor.market_order_alerts(
+            self.order(), clop_monitor.WatchedGood("Gems", **knobs), stock
+        )
+
+    def test_no_mode_alerts_when_every_unit_is_already_spent(self):
+        # The reported bug: 6 gems held, 6 gems used, and an alert on every poll.
+        for mode in ("none", "qty", "ticks"):
+            with self.subTest(reserve=mode):
+                self.assertFalse(self.decide(6, 6, reserve=mode, reserve_amount=0))
+
+    def test_no_mode_alerts_when_the_stock_is_short_of_what_it_owes(self):
+        for mode in ("none", "qty", "ticks"):
+            with self.subTest(reserve=mode):
+                self.assertFalse(self.decide(4, 6, ticks="NONE", reserve=mode, reserve_amount=0))
+
+    def test_none_alerts_on_the_one_unit_above_used(self):
+        self.assertTrue(self.decide(7, 6, reserve="none", reserve_amount=0))
+
+    def test_qty_counts_its_threshold_from_the_spare_not_the_raw_quantity(self):
+        # 20 held, 6 spent, so 14 spare: a reserve of 14 is not cleared and 13 is.
+        self.assertFalse(self.decide(20, 6, reserve="qty", reserve_amount=14))
+        self.assertTrue(self.decide(20, 6, reserve="qty", reserve_amount=13))
+
+    def test_ticks_at_na_still_needs_something_spare(self):
+        # N/A means net production >= 0, so the stock never runs out -- but a stock entirely
+        # spoken for by this tick has nothing to sell out of regardless.
+        self.assertFalse(self.decide(6, 6, ticks="N/A", reserve="ticks", reserve_amount=0))
+        self.assertTrue(self.decide(7, 6, ticks="N/A", reserve="ticks", reserve_amount=0))
+
+    def test_ticks_is_not_charged_the_used_amount_twice(self):
+        # overview.php already divides Qty - Used by the net, so the number the page prints is
+        # spare-based; the floor must not deduct Used from it a second time.
+        self.assertTrue(self.decide(100, 6, ticks=4, reserve="ticks", reserve_amount=3))
+        self.assertFalse(self.decide(100, 6, ticks=3, reserve="ticks", reserve_amount=3))
+
+    def test_a_missing_used_column_is_a_monitor_error_not_a_free_pass(self):
+        with self.assertRaisesRegex(MonitorError, "no Used column"):
+            clop_monitor.market_order_alerts(
+                self.order(),
+                clop_monitor.WatchedGood("Gems"),
+                Stockpiles({"Gems": 10}, {"Gems": "N/A"}),
+            )
+
+    def test_the_floor_is_checked_after_never_and_before_always(self):
+        # never still wins outright, and always cannot invent stock that is not there.
+        self.assertFalse(
+            self.decide(6, 6, reserve="none", always=("Luna %",))
+        )
+        self.assertFalse(
+            self.decide(60, 6, reserve="none", never=("Luna %",))
+        )
 
 
 class MarketAlertTests(unittest.TestCase):
@@ -2980,7 +3045,7 @@ class MarketAlertTests(unittest.TestCase):
             0,
             None,
             market_orders=tuple(orders),
-            stockpiles=Stockpiles(quantities),
+            stockpiles=Stockpiles(quantities, used={}),
         )
 
     def settings(self, *goods):
@@ -3134,13 +3199,14 @@ def market_responder(rows_by_resource_id):
     return serve
 
 
-def market_overview(amounts=None, ticks=None):
+def market_overview(amounts=None, ticks=None, used=None):
     """A valid overview carrying enough stock data for market-reserve decisions."""
     amounts = amounts or {"Machinery Parts": 100, "Oil": 100, "Apples": 100}
     ticks = ticks or {}
+    used = used or {}
     rows = "".join(
         f'<tr><td style="text-align: right;">{name}</td>'
-        f"<td>{amount}</td><td>0</td><td>0</td><td>0</td><td>0</td>"
+        f"<td>{amount}</td><td>0</td><td>{used.get(name, 0)}</td><td>0</td><td>0</td>"
         f"<td>{ticks.get(name, 'N/A')}</td></tr>"
         for name, amount in amounts.items()
     )
@@ -3405,7 +3471,7 @@ class MarketFetchTests(unittest.TestCase):
             },
             alliance_id=0,
         )
-        stock = Stockpiles({"Machinery Parts": 12})
+        stock = Stockpiles({"Machinery Parts": 12}, used={})
         snapshot = client.snapshot(stockpiles=stock)
         self.assertIs(snapshot.stockpiles, stock)
         self.assertNotIn("overview.php", [path for path, _ in calls])
@@ -3618,7 +3684,7 @@ class OverrideNameIsTheNationTests(unittest.TestCase):
         good = clop_monitor.WatchedGood("Machinery Parts", never=("Fish Bucket",))
         self.assertFalse(
             clop_monitor.market_order_alerts(
-                self.orders()[0], good, Stockpiles({"Machinery Parts": 1})
+                self.orders()[0], good, Stockpiles({"Machinery Parts": 1}, used={})
             )
         )
 
@@ -3627,7 +3693,7 @@ class OverrideNameIsTheNationTests(unittest.TestCase):
         # The ally still alerts: the username never reached the comparison.
         self.assertTrue(
             clop_monitor.market_order_alerts(
-                self.orders()[0], good, Stockpiles({"Machinery Parts": 1})
+                self.orders()[0], good, Stockpiles({"Machinery Parts": 1}, used={})
             )
         )
 
@@ -3670,6 +3736,35 @@ class MarketThroughAPollTests(unittest.TestCase):
                 client, previous, notifier, state, settings, persist_state=False
             )
         return current
+
+    def gems_poll(self, quantity, used):
+        """One poll with an ally buying Gems and the nation holding ``quantity`` of them."""
+        pages = self.pages({"26": [market_row(42, "Luna Sueno", "text-info", 12, "900")]})
+        pages["overview.php"] = market_overview({"Gems": quantity}, used={"Gems": used})
+        client, _ = market_client(pages, goods=(("Gems", 26),))
+        notifier = self.RecordingNotifier()
+        current = self.poll(
+            client,
+            None,
+            notifier,
+            AlertCategorySettings(market_goods=(clop_monitor.WatchedGood("Gems"),)),
+        )
+        return current, notifier.messages
+
+    def test_a_stock_entirely_spent_each_tick_raises_no_alert(self):
+        # The reported bug, end to end: 6 gems held and 6 gems spent every tick is nothing
+        # spare, so a friend's standing order for gems must not reach the notifier. The order
+        # is still fetched -- what changed is the answer, not whether the question is asked.
+        current, messages = self.gems_poll(quantity=6, used=6)
+        self.assertEqual(len(current.market_orders), 1)
+        self.assertEqual(messages, [])
+
+    def test_one_unit_above_the_used_amount_is_enough_to_alert(self):
+        # The other side of the same floor, so the silence above is the reserve talking and
+        # not the gems order having gone missing on the way through.
+        _current, messages = self.gems_poll(quantity=7, used=6)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Buy orders for Gems:", messages[0])
 
     def test_a_pending_order_alerts_on_every_poll_it_is_still_pending_for(self):
         # The premise of the whole feature: an order is a standing fact, not an event, so an

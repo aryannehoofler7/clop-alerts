@@ -534,18 +534,40 @@ same way.
 #### Keeping a reserve
 
 Every buyer match is filtered against the stockpile read from `overview.php` before the buyer's
-market is checked. `reserve` is a string with exactly three valid values, and an invalid value
-refuses the settings file instead of silently choosing a fallback:
+market is checked.
 
-- `"none"` alerts only while current `Qty` is above zero. `reserve_amount` is ignored.
-- `"qty"` alerts only when `Qty - reserve_amount > 0`. With a reserve of 100, a stockpile of 100
-  stays silent and 101 alerts.
-- `"ticks"` alerts only when the Resources panel's `Ticks-Worth` is greater than
-  `reserve_amount`. The game's `N/A` means the stock never runs out and passes any finite ticks
-  reserve; `NONE` means less than one tick and does not pass. Positive `Qty` is still required.
+**Your own `Used` amount comes off first, in every mode.** The Resources panel's `Used` column is
+what one tick of your own consumption takes off the stock, and that has to stay on hand whatever
+you are willing to sell — so what a reserve measures is never the raw `Qty` but the **spare**:
+
+```
+spare = Qty - Used
+```
+
+No spare, no alert, whatever else is configured. Hold 6 Gems and spend 6 Gems a tick and every
+mode is silent on Gems, because there is not one unit in that stockpile you are not already
+committed to.
+
+`reserve` then sets what else must be true of that spare. It is a string with exactly three valid
+values, and an invalid value refuses the settings file instead of silently choosing a fallback:
+
+- `"none"` alerts while the spare is above zero. `reserve_amount` is ignored.
+- `"qty"` alerts when `spare - reserve_amount > 0`. Holding 20 and spending 6 leaves 14 spare, so
+  a reserve of 14 stays silent and 13 alerts.
+- `"ticks"` alerts when the Resources panel's `Ticks-Worth` is greater than `reserve_amount`.
+  That number is **not** charged for `Used` a second time: the game computes it as
+  `floor((Qty - Used) / |Net|)`, so it is already counting spare, and it is compared as it stands.
+  What the spare floor adds here is the game's `N/A`, which the page prints for any non-negative
+  `Net` without regard to how much is spare — `N/A` still means the stock never runs out, but it
+  can no longer alert on a stockpile that is entirely spoken for. `NONE` is `Qty` below `Used`,
+  which the floor has already refused.
 
 `reserve_amount` must be a non-negative whole number. Reserves are absolute: `always` can override
 the friend/alliance checks, but it cannot alert when there is no excess stock to contribute.
+
+If `overview.php` ever renders without its `Used` column, the poll raises rather than assuming you
+spend none — the same rule the `Ticks-Worth` column has always followed. "We could not read it"
+must not quietly become "you have it all to spare".
 
 ```json
 "Machinery Parts": {
@@ -1109,6 +1131,8 @@ The first column is the phrase to look for in the dialog, not the whole text.
 | **`overview.php lists no resources and no buildings at all`** | The game's own database query failed. The page renders fine but both tables come back empty, which is why this is caught rather than believed. Also fires legitimately for a **brand-new nation before its first tick**, which really does have nothing. | If the nation is new, wait for the first tick and it clears itself. Otherwise it is a game-side fault: see `docs/OUTAGES.md`. **Nothing was written.** |
 | **`Stockpile snapshot: some cells were not written`** | Something could not be located or read. The rest of the dialog names every problem found; anything it does not mention was written as usual. | Run `python .\stockpiles.py` — it shows where each lookup resolved to, which is usually enough to spot what moved. Fix the sheet, then rerun it to confirm. **A region that was skipped is untouched, and its timestamp will go stale on purpose** until it is. |
 | **`overview.php has no Ticks-Worth column`** | The game's Resources table no longer has the column the `- tick` rows come from. Those six rows are **left exactly as they are** rather than zeroed, because "we could not read it" and "you have none" are different claims. Everything else on the tab was written. | Look at `overview.php` in a browser. If the game has genuinely dropped or renamed that column, `TICKS_HEADING` in `goods.py` needs updating to match. |
+| **`overview.php had no Used column`** | The game's Resources table no longer has the column every market reserve subtracts before deciding you have stock spare. The poll raises instead of assuming you spend nothing, which would alert on goods you are fully committed to. Nothing else about the poll changes — this only reaches you when a good is being watched in `market.goods`. | Look at `overview.php` in a browser. If the game has genuinely dropped or renamed that column, `USED_HEADING` in `goods.py` needs updating to match. To keep the monitor running meanwhile, comment out the watched goods with a leading `#`. |
+| **`resource '...' has an unreadable Used value`** | Same as the unreadable-quantity row below, for the `Used` column: the game printed something that is not a plain number, and it is refused rather than guessed at. | Look at that resource on `overview.php`. If the game has started formatting that column differently, `goods.py` needs updating. |
 | **`stock label '...' is missing from the run`** | A label under the `STOCK` header was renamed, deleted, or pasted twice, so the monitor cannot tell which row is which. Reordering them is fine; losing one is not. | Put `apple, oil, coffee, mpart, vpart, gems` back under the `STOCK` header — any order — then run `python .\stockpiles.py`. **Nothing on your nation tab was written, including the timestamp.** The Dashboard still updated. |
 | **`no column in row 1 ... is named`** | Your nation is not in the `Dashboard-Stockpile`'s header row. The dialog prints what row 1 actually holds. | Check `CLOP_NATION` in `.env` against the names in that list — it is case-, spacing- and punctuation-sensitive. If your column is genuinely missing from the shared sheet, ask whoever owns it to add one. **Nothing on that tab was written.** Your own nation tab still updated. |
 | **`W10 should be empty or hold a ... stamp`** | The timestamp cell holds something that is not a timestamp. It is the one cell found partly by convention, so it refuses to overwrite anything it does not recognise. | Look at that cell. If someone has started using it for something else, the block needs moving or `TIMESTAMP_COLUMN` in `stockpiles.py` needs changing. **Nothing on your nation tab was written.** |

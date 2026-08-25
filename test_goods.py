@@ -248,5 +248,50 @@ class TicksWorthTests(unittest.TestCase):
         self.assertEqual(stock.ticks("Apples"), 87)
 
 
+class UsedTests(unittest.TestCase):
+    """The Used column: what one tick of the nation's own consumption takes off the stock."""
+
+    def test_used_reads_the_column(self):
+        self.assertEqual(Stockpiles.from_overview(RESOURCES_HTML).used("Apples"), 14)
+
+    def test_a_good_that_consumes_nothing_reads_zero(self):
+        self.assertEqual(Stockpiles.from_overview(RESOURCES_HTML).used("Gems"), 0)
+
+    def test_absent_good_reads_zero(self):
+        # Holding none of something means nothing is being spent on it either.
+        self.assertEqual(Stockpiles.from_overview(RESOURCES_HTML).used("Toys"), 0)
+
+    def test_column_found_by_heading_not_by_position(self):
+        # Same guarantee as Ticks-Worth: swap Used to the front and the data with it.
+        html = (RESOURCES_HTML
+                .replace("<td>Qty</td><td>Generated</td><td>Used</td><td>Loss</td><td>Net</td>"
+                         "<td>Ticks-Worth</td>",
+                         "<td>Used</td><td>Generated</td><td>Qty</td><td>Loss</td><td>Net</td>"
+                         "<td>Ticks-Worth</td>"))
+        # Used is now first, so it reads what Qty used to hold.
+        self.assertEqual(Stockpiles.from_overview(html).used("Apples"), 1226)
+
+    def test_no_used_column_means_unknown_not_zero(self):
+        # Same rule as Ticks-Worth: "we could not read it" must not become "you spend none",
+        # which would hand every mode a spare it has not actually got.
+        html = RESOURCES_HTML.replace("<td>Used</td>", "")
+        stock = Stockpiles.from_overview(html)
+        self.assertIsNone(stock.used_amounts)
+        self.assertEqual(stock["Apples"], 1226)      # quantities still read fine
+        with self.assertRaises(StockpileError):
+            stock.used("Apples")
+
+    def test_unreadable_used_value_raises(self):
+        html = RESOURCES_HTML.replace('<span class="text-danger">14</span>', "<span>lots</span>")
+        with self.assertRaises(StockpileError) as caught:
+            Stockpiles.from_overview(html)
+        self.assertIn("Used", str(caught.exception))
+
+    def test_used_amounts_is_a_copy(self):
+        stock = Stockpiles.from_overview(RESOURCES_HTML)
+        stock.used_amounts["Apples"] = 0
+        self.assertEqual(stock.used("Apples"), 14)
+
+
 if __name__ == "__main__":
     unittest.main()

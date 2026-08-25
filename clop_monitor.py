@@ -1790,6 +1790,13 @@ def market_order_alerts(
     whoever they are". The two relation checks are independent, so a buyer who is both a
     friend and an ally satisfies either one on its own. A matching buyer must then also pass
     the reserve check: name overrides never invent stock that is not available to contribute.
+
+    Every reserve mode stands on the same floor -- ``Qty - Used``, the stock left after one tick
+    of the nation's own consumption, which has to be on hand whatever the mode says. The mode
+    then measures *that* pool rather than the raw quantity. ``ticks`` is the exception that is
+    not one: ``overview.php`` already divides ``Qty - Used`` by the net rate, so the number it
+    prints is spare-based and is compared as it stands; the floor only has to catch its ``N/A``,
+    which the page prints for any non-negative net without regard to how much is spare.
     """
     if (
         stockpiles is not None
@@ -1811,13 +1818,16 @@ def market_order_alerts(
             f"Cannot decide whether to alert on {order.good}: no stockpile snapshot was read"
         )
 
-    quantity = stockpiles.get(order.good)
-    if quantity <= 0:
+    try:
+        spare = stockpiles.get(order.good) - stockpiles.used(order.good)
+    except StockpileError as error:
+        raise MonitorError(str(error)) from error
+    if spare <= 0:
         return False
     if good.reserve == "none":
         return True
     if good.reserve == "qty":
-        return quantity - good.reserve_amount > 0
+        return spare - good.reserve_amount > 0
     if good.reserve != "ticks":
         raise MonitorError(
             f"Market good {good.name!r} has invalid reserve mode {good.reserve!r}"
@@ -1829,8 +1839,8 @@ def market_order_alerts(
         raise MonitorError(str(error)) from error
     if isinstance(ticks, int):
         return ticks > good.reserve_amount
-    # N/A means non-negative net production, so the stock does not run out. NONE means
-    # less than one tick remains. The positive-quantity guard above still applies to both.
+    # N/A means non-negative net production, so the stock does not run out. NONE means less
+    # than one tick remains -- Qty below Used, which the spare floor above has already refused.
     return ticks == "N/A"
 
 

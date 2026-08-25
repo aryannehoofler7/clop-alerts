@@ -90,6 +90,11 @@ BY_TICK_LABEL: Dict[str, Good] = {good.tick_label: good for good in GOODS if goo
 #: The Resources panel's header cell naming its rightmost column.
 TICKS_HEADING = "Ticks-Worth"
 
+#: The header cell naming the column that holds one tick of the nation's own consumption. It is
+#: what ``overview.php`` subtracts from Qty before working out a Ticks-Worth, and what a market
+#: reserve subtracts before deciding there is any stock spare to sell.
+USED_HEADING = "Used"
+
 #: The header row's own name cell. It arrives through the parser like any other row, which is what
 #: lets the Ticks-Worth column be found by heading rather than counted to.
 RESOURCE_HEADING = "Resource"
@@ -110,26 +115,32 @@ class StockpileError(RuntimeError):
     """
 
 
-def _parse_resources_panel(html: str) -> "Tuple[Dict[str, int], Optional[Dict[str, TickCount]]]":
-    """Return ``({game_name: qty}, {game_name: ticks} or None)`` in one pass over the panel.
+def _parse_resources_panel(
+    html: str,
+) -> "Tuple[Dict[str, int], Optional[Dict[str, TickCount]], Optional[Dict[str, int]]]":
+    """Return ``({game_name: qty}, {game_name: ticks} or None, {game_name: used} or None)``.
 
-    One pass, because the quantity and the ticks-worth are two columns of the same row and the
-    caller has already paid for the page once.
+    One pass, because the quantity, the ticks-worth and the used amount are three columns of the
+    same row and the caller has already paid for the page once.
 
-    The ticks map is ``None`` -- not empty -- when the panel has no ``Ticks-Worth`` column at all.
+    The ticks and used maps are ``None`` -- not empty -- when the panel has no such column at all.
     That is a different thing from a nation with no rows, and the caller reports it as a problem
     rather than writing zeros over a column it could not read.
     """
     amounts: Dict[str, int] = {}
     ticks: Dict[str, TickCount] = {}
+    used: Dict[str, int] = {}
     ticks_at: Optional[int] = None
+    used_at: Optional[int] = None
 
     for name, cells in parse_panel_cells(html, "Resources"):
         if name == RESOURCE_HEADING:
-            # The <thead> row. Find the column by its heading; never count to a fixed position.
+            # The <thead> row. Find the columns by their headings; never count to a fixed position.
             for index, heading in enumerate(cells):
                 if heading.strip() == TICKS_HEADING:
                     ticks_at = index
+                elif heading.strip() == USED_HEADING:
+                    used_at = index
             continue
 
         if not cells:
@@ -143,8 +154,24 @@ def _parse_resources_panel(html: str) -> "Tuple[Dict[str, int], Optional[Dict[st
 
         if ticks_at is not None and ticks_at < len(cells):
             ticks[name] = _tick_count(name, cells[ticks_at])
+        if used_at is not None and used_at < len(cells):
+            used[name] = _used_amount(name, cells[used_at])
 
-    return amounts, (ticks if ticks_at is not None else None)
+    return (
+        amounts,
+        (ticks if ticks_at is not None else None),
+        (used if used_at is not None else None),
+    )
+
+
+def _used_amount(name: str, text: str) -> int:
+    """Read one Used cell. Always a whole number -- the game formats it with ``commas()``."""
+    cleaned = text.replace(",", "").strip()
+    if not re.fullmatch(r"-?\d+", cleaned):
+        raise StockpileError(
+            f"resource {name!r} has an unreadable {USED_HEADING} value {text!r} on overview.php"
+        )
+    return int(cleaned)
 
 
 def _tick_count(name: str, text: str) -> "TickCount":
@@ -187,11 +214,16 @@ class Stockpiles:
 
         stock.ticks("Apples")   # 13, or "NONE", or "N/A"
 
+    ...and the **Used** column -- what one tick of the nation's own consumption takes off that
+    stock, which is the floor every market reserve sits on::
+
+        stock.used("Apples")    # 14
+
     It also retains the active nation name printed on that overview. Market alerts use the cached
     name to discard the nation's own buy orders without another page request.
 
-    ``ticks_worth`` is ``None`` when the panel had no such column, which the caller must treat as
-    "could not read it" rather than as zeros.
+    ``ticks_worth`` and ``used_amounts`` are ``None`` when the panel had no such column, which the
+    caller must treat as "could not read it" rather than as zeros.
     """
 
     def __init__(
@@ -199,16 +231,18 @@ class Stockpiles:
         amounts: Dict[str, int],
         ticks: "Optional[Dict[str, TickCount]]" = None,
         nation_name: "Optional[str]" = None,
+        used: "Optional[Dict[str, int]]" = None,
     ) -> None:
         self._amounts = dict(amounts)
         self._ticks = None if ticks is None else dict(ticks)
         self._nation_name = nation_name
+        self._used = None if used is None else dict(used)
 
     @classmethod
     def from_overview(cls, html: str) -> "Stockpiles":
         """Parse the Resources panel. Raises ``StockpileError`` on an unreadable value."""
-        amounts, ticks = _parse_resources_panel(html)
-        return cls(amounts, ticks, parse_overview_nation_name(html))
+        amounts, ticks, used = _parse_resources_panel(html)
+        return cls(amounts, ticks, parse_overview_nation_name(html), used)
 
     def get(self, game_name: str, default: int = 0) -> int:
         return self._amounts.get(game_name, default)
@@ -219,9 +253,29 @@ class Stockpiles:
         return None if self._ticks is None else dict(self._ticks)
 
     @property
+    def used_amounts(self) -> "Optional[Dict[str, int]]":
+        """``{game_name: used}``, or ``None`` if the page had no Used column."""
+        return None if self._used is None else dict(self._used)
+
+    @property
     def nation_name(self) -> "Optional[str]":
         """The active nation named by the overview page that supplied this snapshot."""
         return self._nation_name
+
+    def used(self, game_name: str) -> int:
+        """One tick of the nation's own consumption of ``game_name``.
+
+        A good absent from the page reads as ``0``: the nation holds none of it, so nothing is
+        being spent on it either. A page with no Used column at all raises instead, because
+        "we could not read it" would otherwise become "you spend none" and hand every reserve a
+        spare the nation has not actually got.
+        """
+        if self._used is None:
+            raise StockpileError(
+                f"overview.php had no {USED_HEADING} column, so the amount of {game_name!r} "
+                "spent each tick is unknown"
+            )
+        return self._used.get(game_name, 0)
 
     def ticks(self, game_name: str) -> "TickCount":
         """How many ticks of ``game_name`` the nation has left, as the game reports it.
