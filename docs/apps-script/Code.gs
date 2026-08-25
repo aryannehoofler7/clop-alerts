@@ -13,10 +13,22 @@
  *
  *   request   {action: "read",  tab: "LePone(Z)", range: "R11"}
  *             {action: "write", tab: "LePone(Z)", range: "R11", values: [[42]]}
+ *             {action: "batch", ops: [ {...}, {...} ]}   -- several of the above, one round trip
  *
  *   success   {ok: true,  values: [[...], ...]}          -- always 2-D, even for one cell
+ *   batch     {ok: true,  results: [ {ok, values|error}, ... ]}   -- one entry per op, in order
  *   failure   {ok: false, error: "..."}                  -- definitive; the client will not retry
  *   transient {ok: false, error: "...", retry: true}     -- the client will retry this one
+ *
+ * `batch` exists for reliability, not speed. Every request to this endpoint is an independent
+ * chance to hit Google's expiring-result-link fault (see doGet below), so a sync built from eleven
+ * separate requests had eleven chances to fail; as two, it has two. At a 95% per-call success rate
+ * that is the difference between a sync completing 57% of the time and 90% of the time.
+ *
+ * Ops run in order and are NOT atomic: op 3 failing leaves ops 1 and 2 applied, exactly as three
+ * separate requests would have. Order matters to callers -- the stockpile snapshot writes its
+ * timestamp last precisely so a failure can never leave the sheet claiming freshness it does not
+ * have -- so this must keep running them in the order given.
  *
  * Everything answers HTTP 200. Apps Script cannot set arbitrary status codes reliably, so the
  * client decides success from the `ok` flag, never from the status.
@@ -60,30 +72,57 @@ function doPost(e) {
     }
 
     var request = JSON.parse(e.postData.contents);
-    var sheet = SpreadsheetApp.getActive().getSheetByName(request.tab);
-    if (!sheet) {
-      // Load-bearing wording -- see the header comment.
-      return json({ok: false, error: 'no such tab: ' + request.tab});
-    }
 
-    var range = sheet.getRange(request.range);
-
-    if (request.action === 'read') {
-      return json({ok: true, values: range.getValues()});
-    }
-
-    if (request.action === 'write') {
-      // setValues insists the block match the range exactly; a mismatch throws and is reported
-      // below rather than half-applied.
-      range.setValues(request.values);
-      // Without the flush, a read immediately following a write can race the pending commit.
+    if (request.action === 'batch') {
+      if (!request.ops || !request.ops.length) {
+        return json({ok: false, error: 'batch needs a non-empty ops list'});
+      }
+      var results = [];
+      for (var i = 0; i < request.ops.length; i++) {
+        results.push(runOne(request.ops[i]));
+      }
+      // One flush for the whole batch rather than one per write: the pending commits only have to
+      // land before this response is built.
       SpreadsheetApp.flush();
-      return json({ok: true, values: range.getValues()});
+      return json({ok: true, results: results});
     }
 
-    return json({ok: false, error: 'unknown action: ' + request.action});
+    var single = runOne(request);
+    SpreadsheetApp.flush();
+    if (single.ok) {
+      return json({ok: true, values: single.values});
+    }
+    return json(single);
   } catch (err) {
     return json({ok: false, error: String((err && err.message) ? err.message : err)});
+  }
+}
+
+/** One read or write. Returns {ok:true, values} or {ok:false, error} -- never throws. */
+function runOne(op) {
+  try {
+    var sheet = SpreadsheetApp.getActive().getSheetByName(op.tab);
+    if (!sheet) {
+      // Load-bearing wording -- see the header comment.
+      return {ok: false, error: 'no such tab: ' + op.tab};
+    }
+
+    var range = sheet.getRange(op.range);
+
+    if (op.action === 'read') {
+      return {ok: true, values: range.getValues()};
+    }
+
+    if (op.action === 'write') {
+      // setValues insists the block match the range exactly; a mismatch throws and is reported
+      // rather than half-applied.
+      range.setValues(op.values);
+      return {ok: true, values: op.values};
+    }
+
+    return {ok: false, error: 'unknown action: ' + op.action};
+  } catch (err) {
+    return {ok: false, error: String((err && err.message) ? err.message : err)};
   }
 }
 

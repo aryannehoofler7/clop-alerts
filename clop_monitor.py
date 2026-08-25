@@ -2227,14 +2227,18 @@ def sync_sheet_step(
     # Imported here, not at module scope: sheets.py imports load_env_file from this module, so a
     # top-level import would be a cycle. Do not "tidy" these up to the top of the file.
     from buildings import (
+        COLUMN_SCAN_RANGE,
         BuildingError,
         parse_overview_buildings,
         read_columns,
         reconcile,
         sanity_check,
     )
-    from sheets import SheetError, SheetTabMissing
+    from sheets import BatchedSheet, SheetError, SheetTabMissing
     from stockpiles import (
+        DASHBOARD_SCAN_RANGE,
+        DASHBOARD_TAB,
+        NATION_SCAN_RANGE,
         NationStatus,
         NationStatusError,
         snapshot,
@@ -2255,11 +2259,24 @@ def sync_sheet_step(
         if fingerprint is not None and fingerprint == last_synced:
             return last_synced
 
-        # One read feeding both: the check and the write then judge the same snapshot, and the
-        # phase costs one Apps Script execution rather than two. Fewer round trips also means
-        # fewer chances to draw one of Google's expiring result links (see sheets.EXPIRING_LINK).
-        columns = read_columns(sheet, nation)
-        problems = sanity_check(sheet, nation, overview, columns)
+        # Every request to the endpoint is an independent chance to draw one of Google's expiring
+        # result links (see sheets.EXPIRING_LINK), so the whole sync goes through a wrapper that
+        # reads its three ranges together up front and queues its writes to go out together at the
+        # end. Eleven chances to fail become two.
+        phase = "reading the sheet"
+        batched = BatchedSheet(
+            sheet,
+            prefetch=(
+                (nation, COLUMN_SCAN_RANGE),
+                (nation, NATION_SCAN_RANGE),
+                (DASHBOARD_TAB, DASHBOARD_SCAN_RANGE),
+            ),
+        )
+
+        phase = "the building reconcile"
+        # One read feeding both: the check and the write then judge the same snapshot.
+        columns = read_columns(batched, nation)
+        problems = sanity_check(batched, nation, overview, columns)
         if problems:
             notifier.notify_failure(
                 "Building sync skipped - the sheet layout or building mapping looks wrong, so no "
@@ -2268,7 +2285,7 @@ def sync_sheet_step(
                 + "\n".join(f"- {problem}" for problem in problems)
             )
         else:
-            corrections = reconcile(sheet, nation, overview, columns)
+            corrections = reconcile(batched, nation, overview, columns)
             if corrections:
                 notifier.notify(
                     "Building counts corrected on the sheet:\n\n"
@@ -2278,7 +2295,14 @@ def sync_sheet_step(
         # A successful snapshot is deliberately silent: it is a refresh, not an event, and the
         # player already knows they traded.
         phase = "the stockpile snapshot"
-        _report, stock_problems = snapshot(sheet, nation, stock, status)
+        _report, stock_problems = snapshot(batched, nation, stock, status)
+
+        # Everything queued above goes out as a single request. Deliberately after both steps and
+        # before either popup: if it fails, nothing was written, and the caching below will not
+        # record this run as done.
+        phase = "writing to the sheet"
+        batched.flush()
+
         if stock_problems:
             notifier.notify_failure(
                 "Stockpile snapshot: some cells were not written, for the reasons below. Anything "

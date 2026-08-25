@@ -870,6 +870,26 @@ much as a second — it only delays the pause that follows. It also means the sh
 long as it genuinely needs to, which is what makes it reliable. It used to run first, and that is
 the entire reason its retries were once capped too tightly to succeed.
 
+**A whole sync is two requests, not eleven.** Every request to Google is an independent chance to
+hit the expiring-result-link fault, so eleven of them gave a sync eleven chances to fail — and
+during a bad patch it always found one. All three reads now travel together in one request, and
+every write in another:
+
+| Per-request success | Sync completes — 11 requests | — 2 requests |
+|---|---|---|
+| 95% | 57% | **90%** |
+| 90% | 31% | **81%** |
+
+This needs the `batch` action in the Apps Script, so it only takes effect once the endpoint is
+redeployed — see `docs/apps-script/README.md`. **Nothing breaks until then:** the client probes
+once per run, falls back to the old one-request-per-range path if the deployment does not
+understand `batch`, and starts using it by itself the moment the new script goes live. Retries,
+timeouts and the caching above are unaffected either way.
+
+Holding the writes back to the end has a second benefit: a failure part-way through leaves the
+sheet **untouched** rather than half-updated, and the stockpile timestamp is still queued after its
+values, so the sheet can never claim a freshness it does not have.
+
 The three are independent. If one is skipped because that part of the sheet has been rearranged, the
 other two still run, and the dialog says which.
 

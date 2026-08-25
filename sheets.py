@@ -194,6 +194,54 @@ def column_letter(index: int) -> str:
     return letters
 
 
+def column_index(letters: str) -> int:
+    """Inverse of :func:`column_letter`: ``"A" -> 0``, ``"AA" -> 26``."""
+    value = 0
+    for character in letters.upper():
+        if not "A" <= character <= "Z":
+            raise ValueError(f"not a column reference: {letters!r}")
+        value = value * 26 + (ord(character) - ord("A") + 1)
+    if not value:
+        raise ValueError(f"not a column reference: {letters!r}")
+    return value - 1
+
+
+_A1_CELL = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def a1_bounds(a1: str) -> "Optional[tuple[int, int, int, int]]":
+    """``(first_col, last_col, first_row, last_row)`` for a simple A1 range, else ``None``.
+
+    ``None`` means "could not work it out", and every caller must treat that as "assume the worst"
+    rather than "no overlap" -- guessing wrong in that direction would serve stale cells.
+    """
+    parts = a1.split(":")
+    if len(parts) not in (1, 2):
+        return None
+    corners = []
+    for part in parts:
+        match = _A1_CELL.match(part.strip())
+        if not match:
+            return None
+        try:
+            corners.append((column_index(match.group(1)), int(match.group(2))))
+        except ValueError:
+            return None
+    (col_a, row_a), (col_b, row_b) = corners[0], corners[-1]
+    return min(col_a, col_b), max(col_a, col_b), min(row_a, row_b), max(row_a, row_b)
+
+
+def ranges_overlap(first: str, second: str) -> bool:
+    """Whether two A1 ranges share any cell. Unparseable ranges are treated as overlapping."""
+    left, right = a1_bounds(first), a1_bounds(second)
+    if left is None or right is None:
+        return True
+    return (
+        left[0] <= right[1] and right[0] <= left[1]      # columns intersect
+        and left[2] <= right[3] and right[2] <= left[3]  # rows intersect
+    )
+
+
 def find_in_row(row: Sequence[Any], text: str) -> Optional[int]:
     """Return the 0-based index of the cell in ``row`` equal to ``text``, or ``None``.
 
@@ -226,7 +274,17 @@ class SheetError(RuntimeError):
     """Any failure reading or writing the sheet: transport, bad response, or a server-side error."""
 
 
-class SheetTabMissing(SheetError):
+class SheetProtocolError(SheetError):
+    """The endpoint answered properly and reported a failure.
+
+    The distinction from a plain ``SheetError`` is *did Google answer at all*. A protocol error
+    means the script ran and gave a verdict; everything else means the request never got a real
+    reply. Feature detection depends on the difference: a rejected request tells you something
+    about the deployment, whereas a timeout tells you only about the weather.
+    """
+
+
+class SheetTabMissing(SheetProtocolError):
     """A named tab is genuinely absent from the sheet.
 
     Kept apart from every other ``SheetError`` because the difference decides whether a caller
@@ -365,6 +423,9 @@ class GoogleSheet:
         self.content_timeout = content_timeout
         self.deadline = deadline
         self.retry_delays = tuple(retry_delays)
+        #: ``None`` until proven either way, then ``True``/``False`` for the life of this object,
+        #: so an older deployment costs exactly one wasted request rather than one per call.
+        self._batch_supported: Optional[bool] = None
 
     def read(self, tab: str, a1: str) -> Grid:
         """Return the values in ``tab!a1`` as a 2-D list of rows (as the sheet stores them)."""
@@ -385,6 +446,70 @@ class GoogleSheet:
     def write_cell(self, tab: str, a1: str, value: Any) -> Any:
         """Write one value to a single cell and return the stored result."""
         return self._first(self.write(tab, a1, value))
+
+    def batch(self, ops: Sequence[Dict[str, Any]]) -> List[Grid]:
+        """Run several reads/writes in **one** round trip; return one grid per op, in order.
+
+        ``ops`` are ``{"action": "read"|"write", "tab": ..., "range": ..., "values": ...}``.
+
+        This exists for reliability, not speed. Every request is an independent chance to hit
+        Google's expiring-result-link fault, so a sync of eleven separate requests had eleven
+        chances to fail; as two, it has two. At a 95% per-call success rate that is a sync
+        completing 57% of the time versus 90%.
+
+        Ops run in order and are **not** atomic -- op 3 failing leaves ops 1 and 2 applied, exactly
+        as three separate requests would have. The first failed op raises, which matches what
+        sequential calls did.
+
+        A deployment too old to know ``batch`` is detected once, and the ops are then replayed one
+        at a time for the life of this object -- so the client works against either deployment and
+        improves by itself the moment the new script goes live.
+
+        **Detection deliberately ignores the error text.** The obvious rule, "fall back when it
+        says ``unknown action``", is wrong: the old script reads ``request.tab`` before it looks at
+        ``request.action``, so a batch payload makes it answer ``no such tab: undefined`` -- which
+        this client classifies as ``SheetTabMissing``, the one error it treats as definitive.
+        Keying off wording would therefore have switched sheet sync off permanently against the
+        very deployment the fallback exists for. What is used instead is *when* the failure
+        happened: an outer rejection means the deployment did not understand the request, while a
+        failure among ``results`` means it understood perfectly and one op was bad.
+        """
+        ops = [dict(op) for op in ops]
+        if not ops:
+            return []
+        if self._batch_supported is not False:
+            try:
+                return self._batch_once(ops)
+            except SheetProtocolError:
+                if self._batch_supported:
+                    raise          # it understands batch, so this is a real per-op failure
+                self._batch_supported = False
+            # A transport failure says nothing about support, so it propagates untouched.
+        return [self._call(op["action"], op["tab"], op["range"], op.get("values")) for op in ops]
+
+    def _batch_once(self, ops: List[Dict[str, Any]]) -> List[Grid]:
+        body = self._call_raw({"action": "batch", "ops": ops})
+        # A well-formed outer reply is the proof of support, and it must be recorded before the
+        # per-op results are examined -- a bad op below must not be mistaken for a bad deployment.
+        self._batch_supported = True
+        results = body.get("results")
+        if not isinstance(results, list) or len(results) != len(ops):
+            raise SheetError(
+                f"sheet endpoint returned {len(results) if isinstance(results, list) else 'no'} "
+                f"batch results for {len(ops)} operations"
+            )
+        grids: List[Grid] = []
+        for op, result in zip(ops, results):
+            if not isinstance(result, dict) or not result.get("ok"):
+                message = ""
+                if isinstance(result, dict):
+                    message = str(result.get("error", ""))
+                where = f" ({op.get('action')} {op.get('tab')}!{op.get('range')})"
+                if TAB_MISSING in message.lower():
+                    raise SheetTabMissing(message + where)
+                raise SheetError((message or "sheet endpoint reported failure") + where)
+            grids.append(result.get("values", []))
+        return grids
 
     def tab_exists(self, tab: str) -> bool:
         """Return whether ``tab`` is a tab in the sheet.
@@ -518,9 +643,17 @@ class GoogleSheet:
             raise
 
     def _call(self, action: str, tab: str, a1: str, values: Any = None) -> Grid:
-        payload = {"action": action, "tab": tab, "range": a1}
+        payload: Dict[str, Any] = {"action": action, "tab": tab, "range": a1}
         if values is not None:
             payload["values"] = values
+        return self._call_raw(payload).get("values", [])
+
+    def _call_raw(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST one payload with the full retry machinery; return the parsed reply.
+
+        Everything above this -- single reads, single writes, batches -- shares this one transport,
+        so they all get the same retries, deadline, hop timing and error wording.
+        """
         encoded = json.dumps(payload).encode("utf-8")
         started = time.monotonic()
         for attempt in range(len(self.retry_delays) + 1):
@@ -640,10 +773,92 @@ class GoogleSheet:
                     continue
                 if TAB_MISSING in message.lower():
                     raise SheetTabMissing(message)
-                raise SheetError(message or "sheet endpoint reported failure")
-            return body.get("values", [])
+                raise SheetProtocolError(message or "sheet endpoint reported failure")
+            return body
 
         raise AssertionError("unreachable: the loop either returns or raises")  # pragma: no cover
+
+
+class BatchedSheet:
+    """A ``GoogleSheet`` that spends two round trips where the plain one spends eleven.
+
+    Same interface, so the modules that use it need no changes:
+
+    - the ranges named in ``prefetch`` are read **together, once**, up front;
+    - writes are queued rather than sent, and go out **together** on :meth:`flush`.
+
+    Reliability is the whole point. Each request to the endpoint is an independent chance to hit
+    Google's expiring-result-link fault, so eleven requests give a sync eleven chances to fail. At
+    a 95% per-call success rate that is a sync completing 57% of the time; as two requests, 90%.
+
+    Anything not prefetched falls through to a live single call, so a caller reading an unexpected
+    range still gets the right answer -- just without the saving.
+
+    Two hazards, both handled rather than merely documented:
+
+    - A prefetched read is a **snapshot**, so reading a range after writing it would hand back the
+      old values. Any read of a tab with writes still queued flushes them first and then reads
+      live.
+    - Because writes are held back, a failure before ``flush`` means **none** of them were applied,
+      where sequential calls would have left the earlier ones in place. That is the safer of the
+      two, and it preserves the invariant the stockpile snapshot depends on: its timestamp is
+      queued after its values, so the sheet can never end up claiming a freshness it does not have.
+    """
+
+    def __init__(self, inner: GoogleSheet, prefetch: Sequence["tuple[str, str]"] = ()) -> None:
+        self._inner = inner
+        self._cache: Dict["tuple[str, str]", Grid] = {}
+        self._pending: List[Dict[str, Any]] = []
+        wanted = list(prefetch)
+        if wanted:
+            grids = inner.batch(
+                [{"action": "read", "tab": tab, "range": a1} for tab, a1 in wanted]
+            )
+            self._cache = dict(zip(wanted, grids))
+
+    def read(self, tab: str, a1: str) -> Grid:
+        # Overlap, not merely the same tab: the buildings step queues writes to column B and the
+        # stockpile step then reads Q:W, which shares no cell with them. Flushing on tab alone
+        # spent two extra round trips per sync for nothing.
+        if any(
+            op["tab"] == tab and ranges_overlap(op["range"], a1) for op in self._pending
+        ):
+            self.flush()
+            return self._inner.read(tab, a1)
+        cached = self._cache.get((tab, a1))
+        return cached if cached is not None else self._inner.read(tab, a1)
+
+    def read_cell(self, tab: str, a1: str) -> Any:
+        return GoogleSheet._first(self.read(tab, a1))
+
+    def write(self, tab: str, a1: str, values: Any) -> Grid:
+        grid = _as_grid(values)
+        self._pending.append(
+            {"action": "write", "tab": tab, "range": a1, "values": grid}
+        )
+        return grid
+
+    def write_cell(self, tab: str, a1: str, value: Any) -> Any:
+        self.write(tab, a1, value)
+        return value
+
+    def flush(self) -> None:
+        """Send every queued write as one request. Does nothing when nothing is queued."""
+        if not self._pending:
+            return
+        pending, self._pending = self._pending, []
+        self._inner.batch(pending)
+
+    @property
+    def pending_writes(self) -> int:
+        """How many writes are queued but not yet sent -- for tests and diagnostics."""
+        return len(self._pending)
+
+    def tab_exists(self, tab: str) -> bool:
+        return self._inner.tab_exists(tab)
+
+    def require_tab(self, tab: str) -> None:
+        self._inner.require_tab(tab)
 
 
 def startup_check(

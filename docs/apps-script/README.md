@@ -17,10 +17,40 @@ else needs a Google account at all — that is the entire point of the design.
 
 | Situation | Redeploy? |
 |---|---|
-| You want the `doGet` fix live (see below) | Yes — this is the current pending change |
+| **You want `batch` live (see below)** | **Yes — this is the one that actually improves reliability** |
+| You want the `doGet` fix live | It rides along in the same redeploy |
 | The monitor says `'Anyone' access` repeatedly | Yes — the deployment has lost public access |
 | The endpoint 404s permanently | Yes — the deployment is gone; you will also need to update `EXEC_URL` |
 | A one-off garbled reply that clears itself | **No.** That is Google being slow. See below. |
+
+## The `batch` change, and why it matters
+
+This is the one worth redeploying for.
+
+Every request to this endpoint is an independent chance to hit the expiring-result-link fault
+described below. A sheet sync used to be **eleven separate requests** — three reads and eight
+writes — so it had eleven chances to fail, and during a bad patch it reliably found one:
+
+| Per-request success | Sync completes — 11 requests | — 2 requests |
+|---|---|---|
+| 95% | 57% | 90% |
+| 90% | 31% | 81% |
+
+The `batch` action takes a whole sync to **two** requests: one carrying all three reads, one
+carrying every write. Ops run in order and are not atomic — op 3 failing leaves ops 1 and 2
+applied, exactly as three separate requests would have.
+
+**Nothing breaks if you never redeploy.** The client probes for `batch` once, and if the
+deployment does not understand it, falls back to the current one-request-per-range path for the
+rest of that run. It costs one wasted request per monitor start and improves by itself the moment
+the new script goes live.
+
+> Worth knowing if you ever touch this: the old script reads `request.tab` *before* it looks at
+> `request.action`, so a `batch` payload makes it answer `no such tab: undefined`. The client
+> classifies "no such tab" as a definitive configuration error, so a fallback that keyed off the
+> error *wording* would have switched sheet sync off permanently against exactly the deployment it
+> exists to support. Detection uses *where* the failure happened instead — an outer rejection means
+> "did not understand", a failure inside `results` means "understood fine, one op was bad".
 
 ## The `doGet` change, and why it matters
 

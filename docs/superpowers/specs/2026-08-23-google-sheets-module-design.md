@@ -335,6 +335,60 @@ The cost is a real one and is documented in the README: `W10` changes meaning fr
 now normal. Stamping `W10` alone every poll would restore the switch for 1 round trip instead of 11
 if that trade is ever wanted.
 
+#### Batching: the fix that changes the odds instead of the margins
+
+Retry tuning reached its limit. A sustained patch — ten attempts spread over 154 seconds, all
+failing — beats any client-side schedule, because the problem is not *how* each request is retried
+but *how many independent requests a sync needs*. It needed eleven:
+
+```
+read  <nation> A1:B130          write_cell B11, B15, B64, B28
+read  <nation> Q1:W60           write R11:R16 ; write_cell W10
+read  Dashboard A1:Z80          write C2:C5, C7:C12, C14:C15, C17:C27, C29:C34, C36:C49
+```
+
+Each is an independent chance to draw the expiring-link fault, so a sync completed with
+*p*<sup>11</sup>. At *p* = 0.95 that is 57%.
+
+`GoogleSheet.batch(ops)` sends many ops in one request; `BatchedSheet` wraps a sheet so callers
+need no changes — it reads its prefetch ranges together up front and queues writes to go out
+together on `flush()`. Measured on the offline fake, a full sync with building corrections
+outstanding: **2 round trips, down from 15**, with the same three reads and every write still
+performed.
+
+Two design points that are not obvious:
+
+- **Overlap, not tab, decides whether a queued write forces a flush.** A prefetched grid is a
+  pre-write snapshot, so reading a range with writes still queued would serve stale cells. Checking
+  merely "same tab" is too coarse and cost two extra round trips per sync: the buildings step
+  queues writes to column B, and the stockpile step then reads Q:W, which shares no cell with them.
+  `ranges_overlap` compares A1 rectangles, and treats anything it cannot parse as overlapping —
+  guessing that way costs a round trip, guessing the other way serves stale data.
+- **Writes are held to the end**, so a failure part-way leaves the sheet untouched rather than
+  half-updated, and the snapshot's timestamp stays queued after its values.
+
+##### Feature detection must ignore the error text
+
+The obvious rule — fall back when the endpoint says `unknown action: batch` — is wrong, and testing
+against the live deployment before shipping is what caught it. The old script reads `request.tab`
+*before* it looks at `request.action`, so a batch payload makes it answer:
+
+```
+no such tab: undefined
+```
+
+This client classifies `no such tab` as `SheetTabMissing`, its one *definitive* error, which the
+monitor responds to by switching sheet sync off for the session. A wording-based fallback would
+therefore have permanently disabled sheet sync against exactly the deployment the fallback exists
+to support — a far worse regression than the fault being fixed.
+
+Detection uses **when** the failure happened instead, which needed one new distinction:
+`SheetProtocolError` (the endpoint answered and reported a failure) versus a plain `SheetError` (no
+real answer at all). An *outer* protocol error means the deployment did not understand the request
+→ fall back and remember. A failure among `results` means it understood perfectly and one op was
+bad → raise it. A transport failure is weather and says nothing either way → propagate, and try
+batch again next time.
+
 #### The other face of the same fault
 
 An expired link does not always reach `doGet`. Caught a beat earlier, Google's Drive front-end

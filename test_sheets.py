@@ -18,6 +18,7 @@ from sheets import (
     GoogleSheet,
     SheetError,
     _as_grid,
+    column_index,
     column_letter,
     find_in_row,
     index_column,
@@ -718,6 +719,266 @@ class NationFromEnvTests(unittest.TestCase):
                 with self.assertRaises(SheetError) as ctx:
                     nation_from_env(path)
         self.assertIn(NATION_ENV, str(ctx.exception))
+
+
+class A1GeometryTests(unittest.TestCase):
+    def test_column_index_round_trips(self):
+        for i in (0, 1, 25, 26, 27, 51, 52, 701):
+            self.assertEqual(column_index(column_letter(i)), i)
+
+    def test_bounds_of_a_single_cell(self):
+        self.assertEqual(sheets.a1_bounds("W10"), (22, 22, 10, 10))
+
+    def test_bounds_of_a_range(self):
+        self.assertEqual(sheets.a1_bounds("Q1:W60"), (16, 22, 1, 60))
+
+    def test_reversed_corners_are_normalised(self):
+        self.assertEqual(sheets.a1_bounds("W60:Q1"), (16, 22, 1, 60))
+
+    def test_unparseable_is_none(self):
+        for bad in ("", "A", "1", "A1:B2:C3", "$A$1", "Sheet!A1"):
+            self.assertIsNone(sheets.a1_bounds(bad), bad)
+
+    def test_overlap(self):
+        self.assertTrue(sheets.ranges_overlap("A1:B130", "B11"))
+        self.assertTrue(sheets.ranges_overlap("Q1:W60", "R11:R16"))
+        self.assertTrue(sheets.ranges_overlap("Q1:W60", "W10"))
+
+    def test_no_overlap(self):
+        # The one that matters: buildings write column B, stockpiles read Q:W.
+        self.assertFalse(sheets.ranges_overlap("B11", "Q1:W60"))
+        self.assertFalse(sheets.ranges_overlap("A1:B130", "Q1:W60"))
+        self.assertFalse(sheets.ranges_overlap("R11:R16", "A1:B130"))
+
+    def test_rows_matter_as_well_as_columns(self):
+        self.assertFalse(sheets.ranges_overlap("B1:B10", "B11:B20"))
+        self.assertTrue(sheets.ranges_overlap("B1:B10", "B10:B20"))
+
+    def test_an_unparseable_range_is_assumed_to_overlap(self):
+        # Guessing "no overlap" here would serve stale cells; guessing "overlap" only costs a
+        # round trip.
+        self.assertTrue(sheets.ranges_overlap("nonsense", "A1"))
+
+
+class BatchTests(unittest.TestCase):
+    def test_one_request_carries_every_op(self):
+        reply = FakeResponse(json.dumps({
+            "ok": True,
+            "results": [{"ok": True, "values": [[1]]}, {"ok": True, "values": [[2]]}],
+        }).encode())
+        ops = [
+            {"action": "read", "tab": "T", "range": "A1"},
+            {"action": "write", "tab": "T", "range": "B1", "values": [[2]]},
+        ]
+        with stub_urlopen(lambda req: reply) as calls:
+            self.assertEqual(GoogleSheet().batch(ops), [[[1]], [[2]]])
+        self.assertEqual(len(calls), 1)
+        sent = json.loads(calls[0][0].data.decode())
+        self.assertEqual(sent["action"], "batch")
+        self.assertEqual(sent["ops"], ops)
+
+    def test_a_failed_op_raises_naming_the_range(self):
+        reply = FakeResponse(json.dumps({
+            "ok": True,
+            "results": [{"ok": True, "values": []}, {"ok": False, "error": "bad range"}],
+        }).encode())
+        with stub_urlopen(lambda req: reply):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet().batch([
+                    {"action": "read", "tab": "T", "range": "A1"},
+                    {"action": "read", "tab": "T", "range": "ZZ"},
+                ])
+        self.assertIn("bad range", str(ctx.exception))
+        self.assertIn("ZZ", str(ctx.exception))
+
+    def test_a_missing_tab_inside_a_batch_keeps_its_type(self):
+        reply = FakeResponse(json.dumps({
+            "ok": True, "results": [{"ok": False, "error": "no such tab: Ghost"}],
+        }).encode())
+        with stub_urlopen(lambda req: reply):
+            with self.assertRaises(sheets.SheetTabMissing):
+                GoogleSheet().batch([{"action": "read", "tab": "Ghost", "range": "A1"}])
+
+    def test_a_short_results_list_is_refused(self):
+        reply = FakeResponse(json.dumps({"ok": True, "results": [{"ok": True, "values": []}]}).encode())
+        with stub_urlopen(lambda req: reply):
+            with self.assertRaises(SheetError) as ctx:
+                GoogleSheet().batch([
+                    {"action": "read", "tab": "T", "range": "A1"},
+                    {"action": "read", "tab": "T", "range": "A2"},
+                ])
+        self.assertIn("for 2 operations", str(ctx.exception))
+
+    def test_an_old_deployment_falls_back_to_one_call_per_op(self):
+        # The client must work against a deployment that has never heard of batch, and improve by
+        # itself the moment the new script goes live -- no setting to remember to flip.
+        replies = [
+            FakeResponse(json.dumps({"ok": False, "error": "unknown action: batch"}).encode()),
+            ok([[1]]),
+            ok([[2]]),
+        ]
+        with stub_urlopen(replies_from(replies)) as calls:
+            sheet = GoogleSheet()
+            result = sheet.batch([
+                {"action": "read", "tab": "T", "range": "A1"},
+                {"action": "read", "tab": "T", "range": "A2"},
+            ])
+        self.assertEqual(result, [[[1]], [[2]]])
+        self.assertEqual(len(calls), 3)   # the rejected batch, then one call per op
+        self.assertFalse(sheet._batch_supported)
+
+    def test_the_real_old_deployment_reply_triggers_the_fallback(self):
+        # The reply the LIVE un-redeployed script actually gives a batch payload. It reads
+        # request.tab before request.action, so tab is undefined and it answers "no such tab:
+        # undefined" -- which this client classifies as SheetTabMissing, its one *definitive*
+        # error. Keying the fallback off the wording "unknown action" would have let that
+        # propagate and switched sheet sync off permanently against exactly the deployment the
+        # fallback exists for.
+        replies = [
+            FakeResponse(json.dumps({"ok": False, "error": "no such tab: undefined"}).encode()),
+            ok([[296]]),
+        ]
+        with stub_urlopen(replies_from(replies)) as calls:
+            sheet = GoogleSheet()
+            result = sheet.batch([{"action": "read", "tab": "LePone(Z)", "range": "R11"}])
+        self.assertEqual(result, [[[296]]])
+        self.assertFalse(sheet._batch_supported)
+        self.assertEqual(len(calls), 2)
+
+    def test_a_per_op_failure_is_not_mistaken_for_an_old_deployment(self):
+        # Once the outer reply proves batch is understood, a bad op must surface as itself rather
+        # than triggering a pointless replay of every op one at a time.
+        reply = FakeResponse(json.dumps({
+            "ok": True, "results": [{"ok": False, "error": "no such tab: Ghost"}],
+        }).encode())
+        with stub_urlopen(lambda req: reply) as calls:
+            sheet = GoogleSheet()
+            with self.assertRaises(sheets.SheetTabMissing):
+                sheet.batch([{"action": "read", "tab": "Ghost", "range": "A1"}])
+        self.assertTrue(sheet._batch_supported)
+        self.assertEqual(len(calls), 1)   # no fallback replay
+
+    def test_a_transport_failure_says_nothing_about_batch_support(self):
+        # A timeout is weather. Marking the deployment as batch-less over one would give up the
+        # reliability win permanently over a passing outage.
+        def boom(_req):
+            return FailingReadResponse(TimeoutError("The read operation timed out"))
+
+        with stub_urlopen(boom):
+            sheet = GoogleSheet(retry_delays=())
+            with self.assertRaises(SheetError):
+                sheet.batch([{"action": "read", "tab": "T", "range": "A1"}])
+        self.assertIsNone(sheet._batch_supported)
+
+    def test_the_fallback_is_remembered_so_it_costs_one_wasted_request_only(self):
+        replies = [
+            FakeResponse(json.dumps({"ok": False, "error": "unknown action: batch"}).encode()),
+            ok([[1]]), ok([[9]]),
+        ]
+        with stub_urlopen(replies_from(replies)) as calls:
+            sheet = GoogleSheet()
+            sheet.batch([{"action": "read", "tab": "T", "range": "A1"}])
+            self.assertEqual(len(calls), 2)
+            sheet.batch([{"action": "read", "tab": "T", "range": "A2"}])
+        self.assertEqual(len(calls), 3)   # no second rejected batch
+
+    def test_an_empty_batch_costs_nothing(self):
+        with stub_urlopen(lambda req: ok([[1]])) as calls:
+            self.assertEqual(GoogleSheet().batch([]), [])
+        self.assertEqual(calls, [])
+
+
+class BatchedSheetTests(unittest.TestCase):
+    """The wrapper that turns a sync's eleven round trips into two."""
+
+    class Recorder:
+        def __init__(self, grids=None):
+            self.requests = []
+            self._grids = grids or {}
+
+        def batch(self, ops):
+            self.requests.append(("batch", [(o["action"], o["tab"], o["range"]) for o in ops]))
+            return [self._grids.get((o["tab"], o["range"]), [[o["action"]]]) for o in ops]
+
+        def read(self, tab, a1):
+            self.requests.append(("read", tab, a1))
+            return self._grids.get((tab, a1), [["live"]])
+
+    def test_prefetched_reads_cost_one_request_and_are_served_from_it(self):
+        inner = self.Recorder({("T", "A1:B130"): [["a"]], ("T", "Q1:W60"): [["q"]]})
+        sheet = sheets.BatchedSheet(inner, prefetch=[("T", "A1:B130"), ("T", "Q1:W60")])
+        self.assertEqual(len(inner.requests), 1)
+        self.assertEqual(sheet.read("T", "A1:B130"), [["a"]])
+        self.assertEqual(sheet.read("T", "Q1:W60"), [["q"]])
+        self.assertEqual(len(inner.requests), 1)   # no further traffic
+
+    def test_an_unprefetched_read_falls_through_live(self):
+        inner = self.Recorder()
+        sheet = sheets.BatchedSheet(inner, prefetch=[("T", "A1")])
+        sheet.read("T", "ZZ1")
+        self.assertEqual(inner.requests[-1], ("read", "T", "ZZ1"))
+
+    def test_writes_are_queued_and_sent_as_one_request(self):
+        inner = self.Recorder()
+        sheet = sheets.BatchedSheet(inner)
+        sheet.write("T", "R11:R16", [[1], [2]])
+        sheet.write_cell("T", "W10", "stamp")
+        sheet.write_cell("T", "B9", 10)
+        self.assertEqual(inner.requests, [])       # nothing sent yet
+        self.assertEqual(sheet.pending_writes, 3)
+        sheet.flush()
+        self.assertEqual(len(inner.requests), 1)
+        self.assertEqual(
+            inner.requests[0][1],
+            [("write", "T", "R11:R16"), ("write", "T", "W10"), ("write", "T", "B9")],
+        )
+
+    def test_flush_preserves_order_so_the_timestamp_stays_last(self):
+        # The stockpile snapshot queues its values then its timestamp precisely so the sheet can
+        # never claim a freshness it does not have. Reordering would break that silently.
+        inner = self.Recorder()
+        sheet = sheets.BatchedSheet(inner)
+        sheet.write("T", "R11:R16", [[1]])
+        sheet.write_cell("T", "W10", "stamp")
+        sheet.flush()
+        ranges = [r for _a, _t, r in inner.requests[0][1]]
+        self.assertEqual(ranges, ["R11:R16", "W10"])
+
+    def test_flushing_nothing_makes_no_request(self):
+        inner = self.Recorder()
+        sheets.BatchedSheet(inner).flush()
+        self.assertEqual(inner.requests, [])
+
+    def test_reading_a_range_with_a_queued_write_flushes_first(self):
+        inner = self.Recorder({("T", "B1:B5"): [["fresh"]]})
+        sheet = sheets.BatchedSheet(inner, prefetch=[("T", "B1:B5")])
+        sheet.write_cell("T", "B3", 7)
+        got = sheet.read("T", "B1:B5")
+        self.assertEqual(inner.requests[1][0], "batch")     # the flush
+        self.assertEqual(inner.requests[2], ("read", "T", "B1:B5"))
+        self.assertEqual(got, [["fresh"]])
+
+    def test_a_non_overlapping_queued_write_does_not_force_a_flush(self):
+        # Buildings write column B; the stockpile step then reads Q:W. No shared cell, so the
+        # prefetched grid is still correct and no round trip is owed.
+        inner = self.Recorder({("T", "Q1:W60"): [["q"]]})
+        sheet = sheets.BatchedSheet(inner, prefetch=[("T", "Q1:W60")])
+        sheet.write_cell("T", "B9", 10)
+        self.assertEqual(sheet.read("T", "Q1:W60"), [["q"]])
+        self.assertEqual(len(inner.requests), 1)
+        self.assertEqual(sheet.pending_writes, 1)   # still queued, not flushed
+
+
+def replies_from(items):
+    queue = list(items)
+
+    def respond(_request):
+        outcome = queue.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return respond
 
 
 class TabMissingClassificationTests(unittest.TestCase):

@@ -120,10 +120,28 @@ class FakeSheet:
         self._dashboard = dashboard if dashboard is not None else dashboard_grid()
         self.writes = []   # (a1, value) from write_cell
         self.blocks = []   # (a1, values) from write
-        self.reads = []    # (tab, a1) -- one entry per round trip to the endpoint
+        self.reads = []    # (tab, a1) -- one entry per logical read
+        self.requests = []  # one entry per ROUND TRIP to the endpoint; a batch counts once
+
+    def batch(self, ops):
+        """Run several ops in one request, as the real endpoint's `batch` action does."""
+        self.requests.append(("batch", len(ops)))
+        results = []
+        for op in ops:
+            if op["action"] == "read":
+                self.reads.append((op["tab"], op["range"]))
+                results.append(self._read(op["tab"], op["range"]))
+            else:
+                self._write(op["tab"], op["range"], op["values"])
+                results.append(op["values"])
+        return results
 
     def read(self, tab, a1):
+        self.requests.append(("read", tab, a1))
         self.reads.append((tab, a1))
+        return self._read(tab, a1)
+
+    def _read(self, tab, a1):
         if tab == DASHBOARD_TAB:
             return self._dashboard
         if a1.startswith("Q"):
@@ -139,17 +157,27 @@ class FakeSheet:
                  self._b[i] if i < len(self._b) else ""] for i in range(n)]
 
     def write(self, tab, a1, values):
-        self.blocks.append((a1, values))
+        self.requests.append(("write", tab, a1))
+        self._write(tab, a1, values)
         return values
 
     def write_cell(self, tab, a1, value):
-        self.writes.append((a1, value))
-        if a1.startswith("B"):
-            row = int(a1[1:]) - 1
-            while row >= len(self._b):
-                self._b.append("")
-            self._b[row] = value
+        self.requests.append(("write", tab, a1))
+        self._write(tab, a1, [[value]])
         return value
+
+    def _write(self, tab, a1, values):
+        """Apply a write without counting a round trip -- shared by write, write_cell and batch."""
+        flat = [row[0] for row in values] if values and isinstance(values[0], list) else values
+        if len(flat) == 1 and ":" not in a1:
+            self.writes.append((a1, flat[0]))
+            if a1.startswith("B"):
+                row = int(a1[1:]) - 1
+                while row >= len(self._b):
+                    self._b.append("")
+                self._b[row] = flat[0]
+        else:
+            self.blocks.append((a1, values))
 
 
 def building_writes(sheet):
@@ -416,6 +444,43 @@ class SharedColumnReadTests(unittest.TestCase):
         sanity_check(sheet, "T", {})
         self.assertEqual(len(sheet.reads), 1)
 
+    def test_a_whole_sync_costs_two_round_trips(self):
+        # The number that matters for reliability: every request is an independent chance to hit
+        # Google's expiring-result-link fault, and this sync used to make fifteen of them.
+        from clop_monitor import sync_sheet_step
+
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Basic Mine")] = 8      # force building corrections too
+        sheet = FakeSheet(col_a, col_b)
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", FakeNotifier())
+
+        self.assertEqual(len(sheet.requests), 2, sheet.requests)
+        self.assertEqual([kind for kind, _ in sheet.requests], ["batch", "batch"])
+        # ...and the work itself is unchanged: still three reads and every write.
+        self.assertEqual(len(sheet.reads), 3)
+        self.assertTrue(sheet.writes)
+        self.assertTrue(sheet.blocks)
+
+    def test_nothing_is_written_before_both_steps_have_run(self):
+        # Writes are held until the end, so a failure part-way leaves the sheet untouched rather
+        # than half-updated.
+        from clop_monitor import sync_sheet_step
+
+        col_a, names = full_column_a()
+        sheet = FakeSheet(col_a, [""] * 130)
+        seen = []
+        real = sheet.batch
+
+        def watched(ops):
+            seen.append([op["action"] for op in ops])
+            return real(ops)
+
+        sheet.batch = watched
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", FakeNotifier())
+        self.assertEqual(seen[0], ["read", "read", "read"])
+        self.assertTrue(all(action == "write" for action in seen[1]))
+
     def test_sync_step_reads_the_buildings_range_once(self):
         # Two separate reads of the same range used to run back-to-back every poll. Beyond the
         # wasted execution, the check and the write judged different snapshots of the sheet.
@@ -504,6 +569,14 @@ class SyncCacheTests(unittest.TestCase):
     def test_a_failed_sync_is_not_cached(self):
         # Otherwise one bad poll would convince the monitor the sheet was fine indefinitely.
         class Broken(FakeSheet):
+            """Dead endpoint. Both entry points fail, because the sync uses batch now and a
+            double that only breaks read() would let a 'failed' sync quietly succeed."""
+
+            def batch(self, ops):
+                from sheets import SheetError
+
+                raise SheetError("could not reach sheet endpoint: boom")
+
             def read(self, tab, a1):
                 from sheets import SheetError
 
