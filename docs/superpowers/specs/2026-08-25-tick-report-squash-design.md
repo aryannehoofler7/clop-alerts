@@ -31,13 +31,10 @@ that to a tick where something went wrong.*
 Applied to a tick report only. Everything else keeps today's behaviour exactly.
 
 ```
-own      = surviving_report_lines(message, patterns)                  # the user's own config
-if own is empty                            ->  no alert               (unchanged)
+warnings = surviving_report_lines(message, patterns + (Tick,))        # force the catalogue on
 
-squashed = surviving_report_lines(message, patterns + (Tick,))        # force the catalogue on
-if squashed == own                         ->  alert with own         (unchanged)
-
-otherwise                                  ->  marker + squashed
+if warnings is non-empty   ->  marker + warnings
+if warnings is empty       ->  marker            (or no alert, if Tick is in reports.ignore)
 ```
 
 with the marker being
@@ -52,36 +49,49 @@ including its sign; see [The satisfaction number](#the-satisfaction-number).
 
 ### One idea, stated once
 
-**The marker stands in for the lines the squash removed.** Everything below follows from that:
+**The collapse is unconditional, and the warnings are never part of what collapses.** A tick report
+always becomes the marker plus whatever the catalogue could not account for. There is no
+configuration and no edge case in which the forty-odd routine lines are printed instead — printing
+them is the problem this design exists to remove, and most of that text is irrelevant on every tick
+it appears.
 
-- It removed the whole tick and nothing survived → the marker is the entire alert.
-- It removed the routine lines and warnings survived → the marker heads them.
-- **It removed nothing** → there is nothing to stand in for, so no marker.
+So the alert always carries both halves:
 
-That last line is what makes the rule respect a player who has already configured tick silencing.
-If `Tick` is in `reports.ignore`, or the player's own hand-written patterns already cover the tick,
-forcing the catalogue on removes nothing further, `squashed == own`, and the alert is exactly what
-it is today — warnings alone, no marker, and total silence for a quiet tick.
+- **the collapsed tick**, as one marker line carrying the satisfaction change; and
+- **every warning inside that tick**, printed in full underneath — a building starved of its input,
+  a government out of gasoline, a force that starved and is gone.
 
-The first draft got this wrong in both directions. It claimed "the ignore entry wins over the
-squash" while specifying suppression only for the empty-survivors case, so a `Tick`-on player got
-`[TICK HAPPENED]` stapled to every combat alert — and combat is written by the same tick run at UTC
-hours 0 and 12, so it merges routinely rather than exotically. It also gave no thought to a player
-whose own patterns cover the tick, who would have started getting a new alert every two hours
-forever with no migration note. The `squashed == own` comparison fixes both with one line.
+The single escape hatch is `Tick` in `reports.ignore`, which suppresses the alert for a tick that
+had **no** warnings at all. A tick carrying a warning always alerts, marker included, whatever the
+configuration — because the marker is where the satisfaction figure lives, and a tick that went
+wrong is exactly when that number matters.
 
-### The `Tick` membership test must be case-insensitive
+An earlier draft of this document made the marker conditional on the squash having removed
+something, so that a player who had configured tick silencing got warnings with no marker and no
+satisfaction figure. That was wrong twice over: it withheld the number precisely when it was most
+needed, and in the configured case it fell back to printing whatever the player's own patterns had
+left, which can be the bloated report.
 
-`surviving_report_lines` compares the selector with `casefold()` (`clop_monitor.py:1073`). A literal
-`"Tick" in settings.report_ignore` is exact, and the divergence is real: measured, a player who
-wrote `"tick"` gets the routine lines collapsed by the selector *and* a marker every tick from the
-membership check — the worst of both. The rule above sidesteps it by comparing outputs rather than
-testing membership, which is the other reason it is written that way. `TICK_REPORT_SELECTOR`
+### The `Tick` check must be case-insensitive
+
+The escape hatch is the one place the code asks "is `Tick` in `reports.ignore`", and that test must
+`casefold()` both sides to match how `surviving_report_lines` reads the selector
+(`clop_monitor.py:1073`). A literal `"Tick" in settings.report_ignore` is exact, and the divergence
+was measured: a player who wrote `"tick"` gets the routine lines collapsed by the selector but
+misses the escape hatch, so a quiet tick still alerts. `TICK_REPORT_SELECTOR`
 (`clop_monitor.py:1001`) is the constant; the literal string must not be hardcoded a second time.
 
 The `#`-prefixed disable convention needs no special handling: `switchable_patterns`
 (`clop_monitor.py:212-226`) drops those entries and strips whitespace before the settings reach
 here.
+
+### One accepted behaviour change
+
+A player whose own hand-written per-line patterns happened to cover the whole tick used to get
+silence, and will now get a marker every two hours. That is the correct outcome of making the
+collapse unconditional, it is one alert rather than forty lines, and the remedy is a single `Tick`
+entry in `reports.ignore`. It is called out in the README changes below so it does not arrive
+unexplained.
 
 ### Envelope and truncation
 
@@ -137,12 +147,12 @@ tick that quietly sheds several hundred satisfaction would show the marker and n
 every cause silenced and the total silenced too.
 
 So the marker carries it, always, in the game's own wording and sign. There is no threshold to tune
-and no case where it is omitted: a flat tick reads `(Satisfaction 0)`, which is itself worth
-seeing, because a stalled economy looks exactly like a healthy one otherwise.
+and no case where it is omitted from an alert that fires: a flat tick reads `(Satisfaction 0)`,
+which is itself worth seeing, because a stalled economy looks exactly like a healthy one otherwise.
 
-The line is read before the catalogue removes it. When the squash removes nothing the marker does
-not appear at all, so neither does the number — that player asked for silence and gets today's
-behaviour.
+The line is read before the catalogue removes it. The only tick that carries no figure is the one
+that raises no alert at all — a warning-free tick for a player who set the `Tick` escape hatch. Any
+tick that alerts, for any reason and under any configuration, shows the number.
 
 ## Why the collapse is safe
 
@@ -305,12 +315,13 @@ to add a line cannot reintroduce this.
 
 - The exact marker string, asserted as a literal including brackets and the satisfaction figure.
 - A fully routine tick with no tick configuration alerts with the marker and the link, no heading.
-- A fully routine tick with `Tick` configured raises no alert.
-- **A tick with warnings and `Tick` configured shows the warnings with no marker** — the
-  `squashed == own` case, the defect the first draft shipped.
-- **A tick fully covered by the player's own per-line patterns stays silent** — the other half of
-  the same defect.
-- `"tick"` in lower case behaves identically to `"Tick"`.
+- A fully routine tick with `Tick` configured raises no alert — the escape hatch.
+- **A tick with warnings and `Tick` configured still shows the marker and the satisfaction figure
+  above those warnings.** The escape hatch covers warning-free ticks only.
+- **A tick fully covered by the player's own per-line patterns still shows the marker**, and the
+  routine lines their patterns matched are not printed — the accepted behaviour change.
+- No configuration anywhere produces an alert containing the routine tick lines.
+- `"tick"` in lower case reaches the escape hatch identically to `"Tick"`.
 - The satisfaction figure is reproduced with its sign, including `0` and a positive value.
 - A cell merging a tick with the combat row alerts with the marker and the combat lines.
 - A tick carrying more warning lines than the cap still shows the marker, the link and the
@@ -342,7 +353,7 @@ exact opposite of the new behaviour and would actively mislead the successor.
 | `settings.json`, `settings.example.json` | `_omissions_help` | "Three families" → two; the empire-penalty rationale ("a standing penalty worth watching, not bookkeeping") is **reversed** |
 | `settings.json`, `settings.example.json` | `_tick_help` | says a tick that caused environmental damage still alerts — **now false**; "with only those warning lines" gains a marker |
 | `settings.json`, `settings.example.json` | `_ignore_help` | `Tick`'s job changes from "collapse the routine bookkeeping" to "suppress the marker as well" |
-| `README.md` | `:236-250`, "Ignoring routine reports" | describes `Tick` as what collapses routine lines; that is now unconditional |
+| `README.md` | `:236-250`, "Ignoring routine reports" | describes `Tick` as what collapses routine lines; the collapse is now unconditional and `Tick` only suppresses a warning-free tick. Must also carry the accepted behaviour change: hand-written patterns that used to silence a tick now leave a marker, and a `Tick` entry is the remedy |
 | `README.md` | `:255-268` | the example JSON and its narrative need the new default |
 | `README.md` | `:296-310`, "Silencing the two-hourly tick" | lists environmental damage as still alerting, and claims "with that line, and with only that line" |
 | `docs/2026-08-23-clop-report-formats.md` | `:143` | the "happening *to* the player" heading and rationale need the five-line exception |
@@ -360,9 +371,12 @@ Also to correct while there: the fabricated `Your Democracy lacks…` corpus ent
 Recorded so the next reader can see which parts of this document are load-bearing and which were
 wrong once.
 
-- **The suppression rule was rebuilt** around `squashed == own`. The draft's stated rationale
-  ("the ignore entry wins over the squash") did not match its own rule table, and silently
-  regressed players with hand-written tick patterns.
+- **The collapse became unconditional.** The first draft suppressed it whenever `Tick` was already
+  configured; a second draft generalised that to "the marker stands in for the lines the squash
+  removed". Both were wrong the same way — in the configured case they fell back to printing
+  whatever the player's own patterns had left, which is the bloated report this design exists to
+  remove, and they withheld the satisfaction figure from exactly the ticks that had gone wrong.
+  There is now one escape hatch, `Tick` in `reports.ignore`, and it covers warning-free ticks only.
 - **The satisfaction figure was added to the marker.** The draft did not notice that its own
   reclassification silenced every cause *and* the total.
 - **"The warning can never be cut" was removed** and the cap raised to 1,500 with the marker outside
@@ -391,4 +405,5 @@ wrong once.
 - **A separate `reports.collapse_tick` setting.** The player asked for the squash to be the default
   behaviour; a third knob is not needed to deliver that.
 - **Deleting the `Tick` ignore entry** now that squashing is the default. It still does something the
-  squash does not — total silence — and removing it would be a regression for anyone using it.
+  squash does not — silence on a warning-free tick — and removing it would leave no way to stop the
+  two-hourly marker.
