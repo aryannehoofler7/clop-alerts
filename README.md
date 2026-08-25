@@ -966,6 +966,36 @@ It logs in, verifies the mapping against your sheet read-only, and reports pass/
 code. If it ever flags a building it can't place, update `building_map.py` (or the sheet) so the
 names line up again.
 
+#### Why the corrections can arrive over several polls
+
+Each run is a **full sweep**. `reconcile` walks all 36 sheet rows in both the have region and the
+`DISABLED:` region, and queues a write for *every* cell that disagrees with the game; they all go out
+in the same request. It never fixes one building and leaves the rest for the next poll.
+
+What it cannot do is see a change you have not made yet. The monitor polls every 60 seconds and
+reports what `overview.php` was showing at that instant, so disabling four kinds of building over a
+couple of minutes gives you a correction dialog *per poll* rather than one dialog with the lot in it.
+That is the poll interval, not a partial write.
+
+A worked example, from `LePone(Z)` on 2026-08-25. The 14:00:02 UTC tick report says *"You lose 2
+satisfaction for having 2 disabled buildings"* — and the tick counts that by summing the `disabled`
+column over every building the nation owns (`cron/frequent.php`), so at 14:00 the whole nation had
+exactly **two** buildings disabled. The dialog at 14:01:28 UTC read `Basic Mine disabled 0 -> 31`,
+and that was the complete truth 86 seconds later: the 31 mines had just been switched off, and the
+Gem Mine, Tungsten Mine and Mall figures that showed up on later polls had not been switched off yet.
+
+Two things stretch that window further, and both are worth knowing:
+
+- **A dialog freezes the monitor.** Desktop alerts are modal — nothing is polled while one is on
+  screen. Anything you disable while reading an alert waits for the poll *after* you dismiss it.
+- **A cell that is wrong on its own stays wrong.** See [It only writes when something has actually
+  changed](#it-only-writes-when-something-has-actually-changed): while the game's numbers have not
+  moved the sheet is not even read, so a hand-edit — or a stale value left over from an earlier
+  state — is not reasserted until the game next moves, or until you restart the monitor.
+
+If you want the answer right now rather than at the next poll, `python .\buildings.py` reads both
+sides and reports, without writing anything.
+
 ### Stockpile snapshot
 
 In the same step, the monitor records how much of six goods you are holding. It writes **`R11:R16`**
