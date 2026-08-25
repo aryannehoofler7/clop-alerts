@@ -308,7 +308,6 @@ that off:
 
 ```
 [TICK HAPPENED - check details in game] (Satisfaction -412)
-https://4clop.org/reports.php
 ```
 
 **The satisfaction figure is always on the marker.** It is the game's own
@@ -337,7 +336,6 @@ alerts like this:
 ```
 [TICK HAPPENED - check details in game] (Satisfaction -31)
 You don't have enough Oil to run your 3 Basic Factory!
-https://4clop.org/reports.php
 ```
 
 The `Tick` entry in `reports.ignore` is the one escape hatch, and it only reaches a tick that
@@ -414,9 +412,10 @@ timestamp used only as a fallback when the remembered report has scrolled off th
 on each one that has a line left after the [ignore patterns](#ignoring-routine-reports) have taken
 theirs, showing those lines. There is no cap: coming back to forty reports produces forty entries in
 one dialog. The marker always advances to the newest report on the page whether or not anything was
-alerted, so a silenced report is examined once and never again. Report notifications include a
-link to `reports.php`. Delete the `.state` folder to
-establish fresh news and report baselines.
+alerted, so a silenced report is examined once and never again. **No alert carries a page link.**
+A bare `reports.php` or `buyermarketplace.php` URL under every entry was noise in a dialog that
+often carries several of them, and the alert text already names the page it is about. Delete the
+`.state` folder to establish fresh news and report baselines.
 
 The hosted game keeps the alliance "last checked" timestamp inside each login session. When the
 monitor sees a nonzero alliance badge, it validates it with a fresh login before alerting. This
@@ -467,7 +466,6 @@ and every poll that finds matching orders produces one block of text per good, a
 Buy orders for Machinery Parts:
   Green Mountain Republic (alliance) wants 5 at 1,000 bits each
   Fish Bucket (alliance) wants 35 at 1,000 bits each
-https://4clop.org/buyermarketplace.php
 ```
 
 Each buyer is labelled with every relation that is true of them, so a buyer who is both reads

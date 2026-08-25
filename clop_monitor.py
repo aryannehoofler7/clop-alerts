@@ -1181,11 +1181,9 @@ def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
 TICK_COLLAPSED_MARKER = "[TICK HAPPENED - check details in game]"
 
 #: How much of a report body an alert shows. The Windows dialog takes 2,000 characters
-#: (``_desktop_notification``), so this leaves room for a tick marker and the trailing link
-#: while still bounding a report that arrives with a very long list of warnings.
+#: (``_desktop_notification``), so this leaves room for a tick marker while still bounding
+#: a report that arrives with a very long list of warnings.
 REPORT_BODY_LIMIT = 1500
-
-REPORTS_URL = "https://4clop.org/reports.php"
 
 _SATISFACTION_PREFIX = "change in satisfaction:"
 
@@ -1224,9 +1222,12 @@ def report_alert_text(
     exists to remove. The one escape hatch is a ``Tick`` entry in ``reports.ignore``, which
     suppresses a tick that carried no warnings at all.
 
-    The marker and the link sit outside the length cap. Folding them into the capped body would
-    spend the marker's characters out of the budget meant for warnings and make truncation more
-    likely, which is backwards: the marker is the one line guaranteed to be worth keeping.
+    The marker sits outside the length cap. Folding it into the capped body would spend the
+    marker's characters out of the budget meant for warnings and make truncation more likely,
+    which is backwards: the marker is the one line guaranteed to be worth keeping.
+
+    No page link is appended. The alert already names the event, and a bare ``reports.php`` URL
+    under every one of them was noise the reader learned to skip past.
     """
     lines = message.split("\n")
     if not _is_tick_report(lines):
@@ -1234,7 +1235,7 @@ def report_alert_text(
         if not surviving:
             return None
         preview = _capped("\n".join(surviving))
-        return f"New CLOP report ({posted}): {preview}\n{REPORTS_URL}"
+        return f"New CLOP report ({posted}): {preview}"
 
     warnings = surviving_report_lines(
         message, tuple(patterns) + (TICK_REPORT_SELECTOR,)
@@ -1254,7 +1255,6 @@ def report_alert_text(
     parts = [marker]
     if warnings:
         parts.append(_capped("\n".join(warnings)))
-    parts.append(REPORTS_URL)
     return "\n".join(parts)
 
 
@@ -1879,11 +1879,9 @@ def build_alerts(
             and market_order_alerts(order, good, current.stockpiles)
         ]
         if lines:
-            alerts.append(
-                f"Buy orders for {good.name}:\n"
-                + "\n".join(lines)
-                + "\nhttps://4clop.org/buyermarketplace.php"
-            )
+            # No marketplace link: the heading already says where to go, and the URL was one
+            # more line of noise in a dialog that may be carrying several of these blocks.
+            alerts.append(f"Buy orders for {good.name}:\n" + "\n".join(lines))
     if (
         current.fourchan_post is not None
         and previous is not None

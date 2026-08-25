@@ -340,10 +340,15 @@ Buy orders for Machinery Parts:
   Ally Nation (alliance) wants 3 at 4,800 bits each
   Both Nation (friend, alliance) wants 40 at 4,500 bits each
   Named Nation (no relation) wants 5 at 6,000 bits each
-https://4clop.org/buyermarketplace.php
 ```
 
 `(no relation)` appears only for a buyer matched by an `always` pattern.
+
+**Superseded 2026-08-25: the trailing `https://4clop.org/buyermarketplace.php` line is gone.**
+It shipped with the block above. In use it read as noise: the heading already says these are buy
+orders, one dialog can carry a block per watched good, and the URL repeated under each of them
+told the reader nothing they did not have. The same removal was made to the report alerts — see
+[the tick-squash design](superpowers/specs/2026-08-25-tick-report-squash-design.md#envelope-and-truncation).
 
 **Good names are matched case-insensitively when orders are paired back to their settings.**
 Two spellings of one good name are in play: the preflight resolves what the settings file says

@@ -97,21 +97,28 @@ unexplained.
 
 ### Envelope and truncation
 
-For a squashed tick the alert is the marker, then the surviving warning lines, then the game link:
+For a squashed tick the alert is the marker, then the surviving warning lines:
 
 ```
 [TICK HAPPENED - check details in game] (Satisfaction -412)
 You don't have enough Oil to run your 3 Basic Factory!
 You couldn't pay the upkeep for your First Cavalry and it's gone!
-https://4clop.org/reports.php
 ```
 
 The `New CLOP report (<posted>):` heading that wraps every other report alert
-(`clop_monitor.py:1716-1719`) is **dropped** for a squashed tick — the marker is the heading. The
-`reports.php` link is **kept**, because "check details in game" is only actionable with it. Reports
+(`clop_monitor.py:1716-1719`) is **dropped** for a squashed tick — the marker is the heading. Reports
 that are not ticks keep the heading exactly as today.
 
-**The marker and the link sit outside the length cap.** `build_alerts` currently truncates the
+**Superseded 2026-08-25 (later the same day): the trailing `https://4clop.org/reports.php` line is
+gone.** As first shipped, this section kept the link on the grounds that "check details in game" is
+only actionable with it. That was wrong in use. The reader of these alerts is a player who is
+already logged in and knows where the reports page is, so the URL was never the actionable part —
+and it was printed under *every* report alert, tick or not, in a dialog that routinely carries
+several of them. The alert text names the event; the link was one line of noise per entry. The same
+removal was made to the market alerts. No alert now carries a page link (the 4chan alert keeps its
+post URL, which is a genuine deep link to something the reader cannot otherwise find).
+
+**The marker sits outside the length cap.** `build_alerts` currently truncates the
 joined body at 800 characters (`clop_monitor.py:1715`). Prepending the marker into that body would
 spend 38 of the 800 on the marker and make truncation strictly more likely than it is today, which
 is the opposite of the intent. So the cap applies to the warning lines only.
@@ -124,7 +131,7 @@ squash](#what-still-breaks-the-squash) produced an 869-character alert with two 
 including the forbidden-research line. Survivors are unbounded — a merged cell can carry four
 combat lines, two force losses, a revolt and two airstrikes. 800 was the monitor's own constant,
 not a platform limit; the Windows dialog takes 2,000 (`clop_monitor.py:1861`), so 1,500 for the
-body plus the marker and link fits with room to spare and puts the realistic worst case inside the
+body plus the marker fits with room to spare and puts the realistic worst case inside the
 cap. It does not make truncation impossible, and this document no longer claims it does.
 
 ### Multiple ticks in one batch
@@ -329,7 +336,8 @@ to add a line cannot reintroduce this.
 ### New tests
 
 - The exact marker string, asserted as a literal including brackets and the satisfaction figure.
-- A fully routine tick with no tick configuration alerts with the marker and the link, no heading.
+- A fully routine tick with no tick configuration alerts with the marker alone, no heading.
+- No alert of any kind carries a page link — tick, tick-with-warnings, or plain report.
 - A fully routine tick with `Tick` configured raises no alert — the escape hatch.
 - **A tick with warnings and `Tick` configured still shows the marker and the satisfaction figure
   above those warnings.** The escape hatch covers warning-free ticks only.
@@ -339,7 +347,7 @@ to add a line cannot reintroduce this.
 - `"tick"` in lower case reaches the escape hatch identically to `"Tick"`.
 - The satisfaction figure is reproduced with its sign, including `0` and a positive value.
 - A cell merging a tick with the combat row alerts with the marker and the combat lines.
-- A tick carrying more warning lines than the cap still shows the marker, the link and the
+- A tick carrying more warning lines than the cap still shows the marker and the
   satisfaction figure — i.e. the cap reaches the warning body only.
 - A non-tick report is unchanged: heading present, marker absent.
 - Each of the four new patterns silences the line it is for and none matches a Notable line.

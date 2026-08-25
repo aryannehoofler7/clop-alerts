@@ -351,9 +351,9 @@ class StateTests(unittest.TestCase):
             reports_checked=True,
         )
         alerts = build_alerts(previous, current)
-        self.assertEqual(len(alerts), 1)
-        self.assertIn("New CLOP report (2026-08-17 08:02:33): New report", alerts[0])
-        self.assertIn("https://4clop.org/reports.php", alerts[0])
+        self.assertEqual(
+            alerts, ["New CLOP report (2026-08-17 08:02:33): New report"]
+        )
 
     def test_first_report_after_known_empty_feed_alerts(self):
         previous = Snapshot(0, 0, None, latest_report=None, reports_checked=True)
@@ -1365,7 +1365,7 @@ class PerLineReportJudgingTests(unittest.TestCase):
     def test_the_length_cap_applies_to_the_survivors(self):
         message = "\n".join(["Routine."] * 200 + ["Warning!"])
         alerts = self.alerts(message, ["Routine."])
-        self.assertIn(": Warning!\n", alerts[0])
+        self.assertTrue(alerts[0].endswith(": Warning!"))
         self.assertNotIn("...", alerts[0])
 
 
@@ -1428,7 +1428,8 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
         lost = "You couldn't pay the upkeep for your First Cavalry and it's gone!"
         alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [lost])])
         self.assertEqual(len(alerts), 1)
-        self.assertIn(f"\n{lost}\n", alerts[0])
+        # A whole line of its own, so neither truncation nor a glued-on neighbour passes.
+        self.assertIn(lost, alerts[0].split("\n"))
         for routine in ROUTINE_TICK_DETAILS:
             self.assertNotIn(routine, alerts[0])
 
@@ -1442,7 +1443,7 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
             with self.subTest(message=notable[:50]):
                 alerts = self.alerts_for([tick_report(ROUTINE_TICK_DETAILS + [notable])])
                 self.assertEqual(len(alerts), 1)
-                self.assertIn(f"\n{notable}\n", alerts[0])
+                self.assertIn(notable, alerts[0].split("\n"))
                 self.assertTrue(alerts[0].startswith(TICK_COLLAPSED_MARKER))
 
     def test_a_finished_action_is_completely_silent(self):
@@ -1470,7 +1471,8 @@ class ShippedPatternsOnRealReportsTests(unittest.TestCase):
         alerts = self.alerts_for([merged])
         self.assertEqual(len(alerts), 1)
         self.assertIn(
-            "\nYou couldn't pay the upkeep for your First Cavalry and it's gone!\n", alerts[0]
+            "You couldn't pay the upkeep for your First Cavalry and it's gone!",
+            alerts[0].split("\n"),
         )
 
     def test_switched_off_as_shipped_the_tick_still_collapses(self):
@@ -1628,12 +1630,22 @@ class TickSquashTests(unittest.TestCase):
             patterns,
         )
 
-    def test_a_quiet_tick_collapses_to_the_marker_and_the_link(self):
+    def test_a_quiet_tick_collapses_to_the_marker_alone(self):
         alert = self.alert(tick_report(ROUTINE_TICK_DETAILS, satisfaction="-412"))
-        self.assertEqual(
-            alert,
-            f"{TICK_COLLAPSED_MARKER} (Satisfaction -412)\nhttps://4clop.org/reports.php",
-        )
+        self.assertEqual(alert, f"{TICK_COLLAPSED_MARKER} (Satisfaction -412)")
+
+    def test_no_alert_carries_a_page_link(self):
+        # The URL under every alert was noise; the text already names the event.
+        for cell in (
+            tick_report(ROUTINE_TICK_DETAILS, satisfaction="-412"),
+            tick_report(
+                ROUTINE_TICK_DETAILS
+                + ["You don't have enough Oil to run your 3 Basic Factory!"]
+            ),
+            action_report("Government changed to Democracy."),
+        ):
+            with self.subTest(cell=cell):
+                self.assertNotIn("4clop.org", self.alert(cell))
 
     def test_the_marker_is_the_heading_so_no_report_heading_is_added(self):
         self.assertNotIn("New CLOP report", self.alert(tick_report(ROUTINE_TICK_DETAILS)))
@@ -1652,9 +1664,7 @@ class TickSquashTests(unittest.TestCase):
             tick_report(ROUTINE_TICK_DETAILS + [starved], satisfaction="-31"), ("Tick",)
         )
         self.assertEqual(
-            alert,
-            f"{TICK_COLLAPSED_MARKER} (Satisfaction -31)\n{starved}"
-            "\nhttps://4clop.org/reports.php",
+            alert, f"{TICK_COLLAPSED_MARKER} (Satisfaction -31)\n{starved}"
         )
 
     def test_the_players_own_patterns_cannot_switch_the_collapse_off(self):
@@ -1687,13 +1697,12 @@ class TickSquashTests(unittest.TestCase):
         self.assertEqual(tick_satisfaction_change(lines), "-412")
         self.assertEqual(surviving_report_lines("\n".join(lines), ("Tick",)), [])
 
-    def test_the_marker_and_link_survive_a_body_over_the_cap(self):
+    def test_the_marker_survives_a_body_over_the_cap(self):
         warning = "You don't have enough Oil to run your 3 Basic Factory!"
         many = [f"{warning} ({index})" for index in range(200)]
         alert = self.alert(tick_report(ROUTINE_TICK_DETAILS + many, satisfaction="-99"))
         self.assertTrue(alert.startswith(f"{TICK_COLLAPSED_MARKER} (Satisfaction -99)"))
-        self.assertTrue(alert.endswith("https://4clop.org/reports.php"))
-        body = alert.split("\n")[1:-1]
+        body = alert.split("\n")[1:]
         self.assertLessEqual(len("\n".join(body)), REPORT_BODY_LIMIT)
 
     def test_a_report_that_is_not_a_tick_keeps_its_heading_and_gains_no_marker(self):
@@ -2990,10 +2999,16 @@ class MarketAlertTests(unittest.TestCase):
             [
                 "Buy orders for Machinery Parts:\n"
                 "  Luna Sueno (friend) wants 12 at 5,000 bits each\n"
-                "  Ally Nation (alliance) wants 3 at 4,800 bits each\n"
-                "https://4clop.org/buyermarketplace.php"
+                "  Ally Nation (alliance) wants 3 at 4,800 bits each"
             ],
         )
+
+    def test_a_market_block_carries_no_page_link(self):
+        current = self.snapshot(
+            clop_monitor.MarketOrder("Oil", 42, "Ally Nation", 3, 4800, is_ally=True),
+        )
+        alerts = build_alerts(None, current, self.settings(clop_monitor.WatchedGood("Oil")))
+        self.assertNotIn("4clop.org", alerts[0])
 
     def test_a_buyer_who_is_both_is_labelled_as_both(self):
         current = self.snapshot(
