@@ -210,32 +210,32 @@ hop 2 fails    -> 10.2, 10.3, 14.3 s, then a dead-link 404
 
 There is no such thing as a slow success. That single fact sets the budgets:
 
-**The same is true of hop 1**, which took two goes to accept. Timed apart, the two hops move
-together and the populations never overlap:
+**Hop 1 does not behave the same way**, and two earlier revisions of this document got that wrong.
+A 20-sample run with generous timeouts:
 
 ```
-hop 1  2.3 - 3.2s  ->  hop 2 answers in 0.5s with JSON   -- every time
-hop 1  over 6s     ->  hop 2 fails                       -- every time
-                       (6.2, 7.1, 11.0, 12.5, 21.8, 32.6 observed)
+successes (20/20)   hop 1  2.41 - 7.51s   hop 2  0.48 - 0.60s
+failures seen       hop 1  6.2, 7.1, 11.0, 12.5, 21.8, 32.6s
 ```
 
-Whatever congestion stretches the script run also kills the result link it hands back. So a slow
-hop 1 is not a slow success either: it is an early announcement that the attempt has already
-failed, and every second spent after that is waste.
+Hop 2 separates cleanly — it is 0.5 s when it wins and 10 s+ when it loses, with nothing between.
+**Hop 1 does not.** 7.51 s returned good JSON while 7.1 s failed; the populations overlap around
+6–8 seconds and no threshold keeps every success while dropping every failure.
 
-> An earlier revision of this document claimed "21.8 s measured on a call that still succeeded".
-> That was wrong — checking the log, that call returned the `doGet` error page. No slow hop 1 has
-> ever been observed to succeed, and the mistaken figure was the reason `DEFAULT_TIMEOUT` was left
-> far too generous.
+> Two corrections, both mine, recorded because each one caused a production failure:
+>
+> 1. This document claimed "21.8 s measured on a call that still succeeded". Checking the log, that
+>    call returned the `doGet` error page — it failed. The bad figure kept `DEFAULT_TIMEOUT` at 20,
+>    where a doomed attempt cost the full 20 s and nine of them burned **158 seconds discovering
+>    nothing** (`after 9 attempts in 158s`).
+> 2. Correcting that, I then claimed the hop-1 populations "never overlap" and cut the cap to 8 —
+>    on a sample where every success happened to be under 3.2 s. The larger sample above shows
+>    successes to 7.51 s, leaving almost no margin.
 
 | Hop | Budget | Why |
 |---|---|---|
-| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` **8 s** | Slowest success ever measured is 3.2 s; the fastest failure is 6.2 s. 8 admits every success with room and abandons the doomed early |
-| 2 — GET the result link | `CONTENT_TIMEOUT` **3 s** | Success is 0.5 s. Anything still running at 3 has already failed and is taking its time to say so |
-
-At 20 s and 12 s a doomed attempt cost the better part of half a minute, so nine of them spent
-**158 seconds discovering nothing** — the `after 9 attempts in 158s` dialog. At 8 and 3 the same
-nine attempts take about a minute and each is a real chance rather than a wait.
+| 1 — POST `/exec`, runs the script | `DEFAULT_TIMEOUT` **12 s** | Overlapping populations, so err generous: 60% headroom over the slowest known success (7.51 s). Discarding a success costs a whole extra round trip; tolerating a doomed attempt costs a few seconds, and attempts are plentiful |
+| 2 — GET the result link | `CONTENT_TIMEOUT` **3 s** | Clean separation, so cut tight: 5× headroom over the slowest known success (0.60 s), and far below the 10–14 s a failure takes to admit itself |
 
 #### Naming the hop
 
@@ -251,11 +251,20 @@ an entire budget — which is exactly what the production message `after 2 attem
 
 #### Retry shape
 
-`DEFAULT_RETRY_DELAYS` is `(0, 0.25, 0.5, 0.5, 1, 1, 2, 2)` — nine attempts, almost no sleeping.
-Failures are **independent, not sustained**: timed back to back, successes and failures interleave
-(ok, ok, fail, ok, fail, fail) rather than arriving in blocks, so a fresh POST is a genuinely fresh
-roll of the dice. Backing off politely just spends the budget on sleeping; the previous `(1, 3, 8)`
-burnt 12 of 45 seconds doing nothing.
+`DEFAULT_RETRY_DELAYS` is `(0, 0.25, 0.5, 1, 2, 4, 8, 15, 30)` — ten attempts, fast at first and
+then spreading out. The shape exists because the endpoint fails in **two different ways**, and an
+earlier version designed for only one of them:
+
+- **Independent failures** interleave with successes second by second (ok, ok, fail, ok, fail,
+  fail). Retrying immediately is exactly right for these — a fresh POST is a fresh roll, and
+  sleeping only spends the budget doing nothing. That is what the near-zero head of the schedule is
+  for, and why the original `(1, 3, 8)` was wrong: it burnt 12 of 45 seconds idle.
+- **Sustained patches** also happen, and an all-fast schedule cannot outlast one. Nine attempts
+  packed into 70 seconds all failed together (`after 9 attempts in 70s`) because every one of them
+  landed inside the same bad minute. The 15 s and 30 s tail puts the last attempts well outside it.
+
+Claiming failures were "independent, not sustained" was itself a mistake — that came from a single
+sample, and both modes occur. The schedule now covers both rather than betting on one.
 
 #### The deadline, and the constraint that was invented
 

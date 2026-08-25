@@ -52,21 +52,18 @@ SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 #: Budget for the first hop -- POSTing to /exec, which runs the script.
 #:
-#: Also set from measurement, and for the same reason as CONTENT_TIMEOUT: a slow hop 1 is not a slow
-#: success, it is an announcement that the attempt has already failed. Timing the hops apart shows
-#: the two populations never overlap:
+#: Unlike hop 2, hop 1's timings do NOT separate cleanly, and assuming they did was a mistake.
+#: A first small sample showed every success under 3.2s and every failure over 6, which looked like
+#: two clean populations and got this cut to 8. A larger sample says otherwise:
 #:
-#:     hop 1 in 2.3 - 3.2s -> hop 2 answers in 0.5s with JSON, every time
-#:     hop 1 over 6s       -> hop 2 fails, every time (6.2, 7.1, 11.0, 12.5, 21.8, 32.6 observed)
+#:     successes  2.41 - 7.51s   (20 of 20; 5.10, 4.86, 5.64, 7.51 all returned good JSON)
+#:     failures   6.2, 7.1, 11.0, 12.5, 21.8, 32.6s
 #:
-#: Whatever congestion stretches the script run also kills the result link it hands back, so once
-#: hop 1 is past a few seconds the remaining work is guaranteed waste. Cutting at 8 admits every
-#: success ever measured (slowest 3.2s) with room to spare and abandons the doomed ones early.
-#:
-#: This was 30, then 20. At 20 a doomed attempt cost the full 20 seconds, so nine of them spent
-#: 158 seconds discovering nothing -- which is the "after 9 attempts in 158s" dialog. At 8 the same
-#: nine attempts take about a minute and each one is a real chance rather than a wait.
-DEFAULT_TIMEOUT = 8.0
+#: They overlap around 6-8 seconds. There is no threshold that keeps every success and drops every
+#: failure, so this is set generously enough not to throw good calls away -- 12 leaves 60% headroom
+#: over the slowest success ever seen. Discarding a success costs a whole extra round trip;
+#: tolerating a doomed attempt costs a few seconds, and there are plenty of attempts.
+DEFAULT_TIMEOUT = 12.0
 
 #: Which of the two hops a failure happened on. Attached to the exception in _fetch and read back
 #: in _call, purely so the message can say which -- "timed out reading the sheet endpoint's reply"
@@ -116,17 +113,21 @@ MIN_TIMEOUT = 1.0
 #: body is not JSON. Only the endpoint's own protocol replies (``{ok: false}``, e.g. ``no such
 #: tab``) are definitive and fail on the first attempt.
 #:
-#: Many cheap attempts, barely any sleeping.
+#: Fast at first, then spreading out -- because this endpoint fails in two different ways and only
+#: one of them was designed for at first.
 #:
-#: Failures here are independent, not sustained: timed back to back, successes and failures
-#: interleave (ok, ok, fail, ok, fail, fail) rather than arriving in blocks. So a fresh POST really
-#: is a fresh roll of the dice, and the way to make a call reliable is to roll more often -- not to
-#: wait politely between rolls, which only spends the budget on sleeping. The old (1, 3, 8) burnt
-#: 12 of 45 seconds doing nothing at all.
+#: *Independent* failures interleave with successes second by second (ok, ok, fail, ok, fail, fail).
+#: Against those, retrying immediately is exactly right: a fresh POST is a fresh roll of the dice,
+#: and sleeping only spends the budget doing nothing. The first few delays are therefore ~0.
 #:
-#: Nine attempts at a measured ~50% per-attempt success during a bad patch puts a single call's
-#: failure odds near 0.2%; the deadline stops it early when attempts are running slow.
-DEFAULT_RETRY_DELAYS = (0.0, 0.25, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0)
+#: *Sustained* patches also happen, and an all-fast schedule cannot outlast one. Nine attempts
+#: packed into 70 seconds all failed together -- the "after 9 attempts in 70s" dialog -- because
+#: they were still inside the same bad minute. The tail therefore stretches to 15 and 30 seconds,
+#: so the last attempts land well outside it.
+#:
+#: Ten attempts spanning about a minute of sleeping. The deadline stops it earlier when the
+#: attempts themselves are running slow.
+DEFAULT_RETRY_DELAYS = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 RETRYABLE_HTTP_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
 #: How Google Apps Script answers a POST, and the failure mode that falls out of it.

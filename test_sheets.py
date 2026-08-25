@@ -283,24 +283,54 @@ class WhichHopFailedTests(unittest.TestCase):
         self.assertNotEqual(sheets.HOP_SCRIPT, sheets.HOP_RESULT)
 
 
-class DoomedAttemptCostTests(unittest.TestCase):
-    """A slow hop is a failed attempt, not a slow one, so both caps are set to abandon early."""
+class TimeoutsAgainstMeasuredRangesTests(unittest.TestCase):
+    """Both caps are pinned against what has actually been observed on the live endpoint.
 
-    def test_hop_1_is_capped_well_below_any_observed_failure(self):
-        # Measured: every success had hop 1 under 3.2s; every hop 1 over 6s went on to fail.
-        self.assertLessEqual(sheets.DEFAULT_TIMEOUT, 10.0)
-        self.assertGreaterEqual(sheets.DEFAULT_TIMEOUT, 5.0)
+    The numbers below are measurements, not guesses, and they are the reason the two hops are
+    treated so differently. If someone re-measures and finds different ranges, change these
+    constants and these numbers together.
+    """
 
-    def test_hop_2_is_capped_well_below_any_observed_failure(self):
-        # Measured: success is 0.5s; failure takes 10s or more before admitting it.
-        self.assertLessEqual(sheets.CONTENT_TIMEOUT, 5.0)
+    #: Slowest hop 1 observed on a call that returned good JSON (20-sample run).
+    SLOWEST_GOOD_HOP1 = 7.51
+    #: Slowest hop 2 observed on a call that returned good JSON. Hop 2 never runs long and wins.
+    SLOWEST_GOOD_HOP2 = 0.60
 
-    def test_a_full_run_of_doomed_attempts_fits_the_deadline(self):
-        # The point of both caps: nine attempts must be nine real chances, not two waits.
-        attempts = len(sheets.DEFAULT_RETRY_DELAYS) + 1
-        worst = attempts * (sheets.DEFAULT_TIMEOUT + sheets.CONTENT_TIMEOUT)
-        worst += sum(sheets.DEFAULT_RETRY_DELAYS)
-        self.assertLessEqual(worst, sheets.DEFAULT_DEADLINE)
+    def test_hop_1_leaves_headroom_over_the_slowest_known_success(self):
+        # Hop 1's timings overlap between success and failure -- 7.51s succeeded while 7.1s
+        # failed -- so there is no clean cut. Erring tight throws away good calls, and a
+        # discarded success costs a whole extra round trip.
+        self.assertGreater(sheets.DEFAULT_TIMEOUT, self.SLOWEST_GOOD_HOP1)
+
+    def test_hop_2_leaves_headroom_over_the_slowest_known_success(self):
+        # Hop 2 does separate cleanly: 0.48-0.60s when it wins, 10s+ when it loses.
+        self.assertGreater(sheets.CONTENT_TIMEOUT, self.SLOWEST_GOOD_HOP2 * 3)
+
+    def test_hop_2_still_abandons_long_before_a_failure_admits_itself(self):
+        # A losing hop 2 takes 10-14s to return its dead-link 404. Waiting that out is what ate
+        # whole retry budgets, so the cap must sit far below it.
+        self.assertLess(sheets.CONTENT_TIMEOUT, 10.0)
+
+    def test_the_retry_schedule_starts_fast_and_ends_slow(self):
+        # Two failure modes, two halves of the schedule: immediate retries beat independent
+        # blips, a stretched tail outlasts a sustained bad patch. Nine attempts packed into 70
+        # seconds all failed together, which is what the tail exists to prevent.
+        delays = sheets.DEFAULT_RETRY_DELAYS
+        self.assertLessEqual(delays[0], 0.5)
+        self.assertGreaterEqual(delays[-1], 20.0)
+        self.assertEqual(list(delays), sorted(delays), "delays must not decrease")
+
+    def test_enough_attempts_fit_the_deadline_even_when_all_are_doomed(self):
+        # Not all of them -- the tail is deliberately longer than the deadline allows, and the
+        # deadline clamps it. But a useful number must fit before that happens.
+        doomed = sheets.DEFAULT_TIMEOUT + sheets.CONTENT_TIMEOUT
+        spent = fitted = 0
+        for delay in (0.0,) + tuple(sheets.DEFAULT_RETRY_DELAYS):
+            spent += delay + doomed
+            if spent > sheets.DEFAULT_DEADLINE:
+                break
+            fitted += 1
+        self.assertGreaterEqual(fitted, 5)
 
 
 class DeadlineTests(unittest.TestCase):

@@ -723,24 +723,29 @@ was still in flight*. The client now names it exactly:
 Each retry is a fresh POST and therefore a fresh link, which is precisely the remedy — the retry
 window widened from 4 seconds to 12 after a live failure used up all three of the old attempts.
 
-**The two hops are timed separately**, because measurement says they behave completely differently —
-and, crucially, that **there is no such thing as a slow success on either one**. Timed apart over
-many calls, the two populations never overlap:
+**The two hops are timed separately**, because measured against the live endpoint they behave quite
+differently. From a 20-sample run:
 
-| hop 1 (runs the script) | hop 2 (fetches the result) | Outcome |
-|---|---|---|
-| 2.3 – 3.2 s | 0.5 s | **JSON, every time** |
-| over 6 s | fails after 10 – 14 s | **dead link, every time** |
+| | on success | on failure | Cap |
+|---|---|---|---|
+| **hop 1** — runs the script | 2.41 – 7.51 s | 6.2 – 32.6 s | **12 s** |
+| **hop 2** — fetches the result | 0.48 – 0.60 s | 10 – 14 s, then a dead-link 404 | **3 s** |
 
-Whatever congestion stretches the script run also kills the result link it hands back. So a hop
-running long is not slow, it is *already failed and taking its time to say so* — and the fix is to
-abandon it and re-POST, which gets a fresh link. Hence the caps: **8 seconds for hop 1** (slowest
-success ever seen: 3.2 s) and **3 seconds for hop 2** (success: 0.5 s).
+Hop 2 **separates cleanly**: half a second when it wins, ten-plus when it loses, nothing in between.
+So it is cut tight — anything still running at 3 seconds has already failed and is just taking its
+time to say so, and abandoning it for a fresh POST (which gets a fresh link) is the only real fix.
+Waiting that out at the old 12-second cap is what ate whole retry budgets.
 
-Those two numbers are what make the retries work. At the old 20 s and 12 s, a doomed attempt cost
-most of half a minute, so nine of them spent **158 seconds discovering nothing** — which is exactly
-what `after 9 attempts in 158s` meant. At 8 and 3 the same nine attempts take about a minute and
-each one is a real chance rather than a wait.
+Hop 1 **does not separate** — 7.51 s returned good data while 7.1 s failed. There is no threshold
+that keeps every success and drops every failure, so it errs generous. Throwing away a success
+costs a whole extra round trip; tolerating a doomed attempt costs a few seconds, and there are
+plenty of attempts.
+
+The retry schedule is `0, ¼, ½, 1, 2, 4, 8, 15, 30` seconds — ten attempts, **fast at first and then
+spreading out**, because the endpoint fails in two different ways. Brief independent failures
+interleave with successes second by second, and immediate retries beat those. But sustained bad
+patches happen too, and an all-fast schedule cannot outlast one: nine attempts packed into 70
+seconds all failed together. The stretched tail puts the last attempts well outside that window.
 
 A failure also **names which hop** it happened on. Both used to report the identical
 `timed out reading the sheet endpoint's reply`, which made a dialog impossible to diagnose without
