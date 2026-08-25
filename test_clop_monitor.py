@@ -1531,6 +1531,93 @@ class TickRoutineCatalogueTests(unittest.TestCase):
                 )
 
 
+#: Legal nation and force names chosen to spoof the routine catalogues. Names are restricted to
+#: [0-9a-zA-Z_ ] (backend_majoractions.php:47, backend_newuser.php:147,
+#: backend_createforces.php:61), so none of these needs a character the game would reject --
+#: every one of them is a name a hostile player could actually register.
+HOSTILE_NAMES = [
+    "Used Ponies",
+    "Used Up Ponies",
+    "Population",
+    "Population Guard",
+    "Hard To Keep Legion",
+    "Drank Deep",
+    "Siphoned Off",
+    "Show Details",
+    "Hide Details",
+    "Gained Ground",
+    "Limits To Hate",
+    "Forgets Eventually",
+    "Good Relations",
+    "Ascending",
+    "Change In Satisfaction",
+    "Relationship With The",
+]
+
+#: The name-shaped tokens in NOTABLE_REPORTS: whatever the game interpolates from player input.
+NAME_SLOTS = [
+    "First Cavalry",
+    "Second Cavalry",
+    "Shadow Guard",
+    "Barracks",
+    "Sombra",
+    "Luna Sueno",
+    "Buenos Mares",
+    "Basic Oil Wells",
+    "Basic Factory",
+    "quaity kirenese merch and ice",
+]
+
+
+class HostileNameTests(unittest.TestCase):
+    """A player-chosen name must not be able to silence a warning.
+
+    Every catalogue pattern is a substring rule and every name is free text, so a nation called
+    "Show Details" or a force called "Population Guard" used to make routine patterns match the
+    line reporting an attack, a dead force, or a rejected deal. Measured before TICK_NEVER_ROUTINE
+    existed: 37 distinct collisions across this corpus. Anchoring cannot fix it -- any pattern is
+    spoofable by a name containing its words -- so the guards are what hold this property.
+    """
+
+    def alert_for(self, line):
+        cell = tick_report(ROUTINE_TICK_DETAILS + [line])
+        message = parse_report_rows(reports_page([cell]))[0][0]
+        return report_alert_text(message, "2026-08-25 14:00:00", ()) or ""
+
+    def test_no_hostile_name_can_silence_a_notable_line_inside_a_tick(self):
+        checked = 0
+        for notable in NOTABLE_REPORTS:
+            for slot in NAME_SLOTS:
+                if slot not in notable:
+                    continue
+                for name in HOSTILE_NAMES:
+                    line = notable.replace(slot, name)
+                    checked += 1
+                    with self.subTest(name=name, line=line[:60]):
+                        self.assertIn(line, self.alert_for(line))
+        # Guards against the corpus drifting so that nothing is actually substituted. 256
+        # combinations at the time of writing; the floor only has to catch the case where a
+        # renamed slot silently stops matching and the test passes by doing nothing.
+        self.assertGreater(checked, 200)
+
+    def test_a_guard_never_protects_a_routine_tick_line(self):
+        """Otherwise a guard would quietly stop the collapse it is meant to make safe."""
+        for line in ROUTINE_TICK_REPORTS:
+            with self.subTest(line=line[:60]):
+                self.assertFalse(
+                    clop_monitor.matches_any_pattern(
+                        line, clop_monitor.TICK_NEVER_ROUTINE
+                    ),
+                    f"{line!r} is routine but a guard claims it",
+                )
+
+    def test_a_guard_does_not_override_a_pattern_the_user_wrote(self):
+        # The user's own reports.ignore entries are their explicit choice; only the monitor's
+        # internal catalogues are guarded.
+        lost = "You couldn't pay the upkeep for your First Cavalry and it's gone!"
+        self.assertEqual(surviving_report_lines(lost, ["couldn't pay the upkeep"]), [])
+
+
 class TickSquashTests(unittest.TestCase):
     """The collapse is unconditional; only a warning-free tick can be silenced."""
 

@@ -303,11 +303,30 @@ actually established here.
   certainty of never hiding the other — the same choice made for `You sold …`.
 - **The eighteen Major Action lines are uncovered by choice**, so 18 of the 38 insert sites have no
   pattern at all. That is a decision about what is worth seeing, not coverage.
-- **Nation names are player-supplied free text**, and every pattern is a substring rule. A nation
-  named after a pattern — say one calling itself `A satisfied population is hard to keep` — would
-  make `This nation received 20 Apples from …` match and be silenced. This is inherent to substring
-  matching rather than new here, it is not defended against, and short patterns carry more of the
-  risk than long ones. It is the one argument for a longer pattern than the shortest that works.
+- **Nation names are player-supplied free text**, and every pattern is a substring rule.
+
+  **Defended against since 2026-08-25**, and the scale of it is worth recording: this was written
+  as a theoretical caveat, and when finally measured it was **37 distinct collisions** across the
+  Notable corpus. Names are restricted to `[0-9a-zA-Z_ ]` (`backend_majoractions.php:47`,
+  `backend_newuser.php:147`, `backend_createforces.php:61`) — no `.` or `:`, but any word — so all
+  of these are names a hostile player could really register:
+
+  | Name | Silenced |
+  |---|---|
+  | `Show Details` / `Hide Details` | almost every line naming that nation or force |
+  | `Population Guard` (a force) | the line reporting that force's own death |
+  | `Used Ponies` (a nation) | `Your deal with … was rejected.` |
+  | `Siphoned Off` (a nation) | `This nation received 20 Apples from …` |
+
+  Anchoring the patterns cannot fix this, because **any** pattern is spoofable by a name
+  containing its words. `TICK_NEVER_ROUTINE` can, because it fails in the opposite direction: a
+  warning that happens to look like a guard still alerts, whereas a pattern spoofed by a name goes
+  silent. The guards are anchored on wording the *game* controls, around the name rather than
+  inside it, and they override the monitor's own catalogues only — a pattern the user wrote in
+  `reports.ignore` is their explicit choice and is left alone.
+
+  `test_no_hostile_name_can_silence_a_notable_line_inside_a_tick` holds it: 256 hostile-name
+  substitutions across the Notable corpus, all of which must reach the alert.
 - **Verification is unit tests over fixtures.** The monitor has not been run against the live game
   with this list, so the fixtures being faithful to the pages the game actually renders rests on the
   same hand-reading as the corpus.

@@ -1034,6 +1034,57 @@ TICK_ROUTINE_PATTERNS: Tuple[str, ...] = (
     "cause environmental damage!",
 )
 
+#: Lines the monitor's own catalogues may never silence, whatever pattern matches them.
+#:
+#: Every pattern is a substring rule, and nation, force and building names are player-supplied
+#: free text. ``backend_majoractions.php:47``, ``backend_newuser.php:147`` and
+#: ``backend_createforces.php:61`` restrict a name to ``[0-9a-zA-Z_ ]`` -- no ``.`` or ``:``, but
+#: any word at all. So a nation called ``Show Details`` silences nearly every line that names it,
+#: a force called ``Population Guard`` silences the line reporting its own death, and one called
+#: ``Used Ponies`` silences the report that your deal was rejected. Measured: 37 such collisions
+#: across the Notable corpus before this list existed.
+#:
+#: Anchoring the patterns cannot fix it, because any pattern can be spoofed by a name containing
+#: its words. This list can, because it fails in the opposite direction: a warning spoofing a
+#: guard still alerts, while a pattern spoofed by a name goes silent. Guards are anchored on
+#: wording the *game* controls, around the name rather than inside it.
+#:
+#: It governs the monitor's own catalogues only. A pattern the user wrote in ``reports.ignore``
+#: is their explicit choice and is left alone.
+#:
+#: Unlike ``TICK_ROUTINE_PATTERNS``, this list is deliberately **not** held to a no-redundancy
+#: rule, because the costs are asymmetric: a guard that catches nothing costs nothing, while a
+#: guard that is missing loses a warning silently. Measured by dropping each in turn, nine are
+#: load-bearing today -- ``damage (% hits)`` alone protects 18 spoofed lines and ``Your deal
+#: with`` 15 -- and five catch nothing yet: ``your ponies are revolting!``, ``hates you enough
+#: to send an airstrike``, ``for daring to ascend!``, ``to function properly!`` and ``forbidden
+#: research``. Those five sentences interpolate no player-supplied text at all (their only
+#: variables are government and empire names, both fixed sets), so nothing can currently spoof a
+#: pattern into matching them. They are kept as cover for a routine pattern being widened later.
+
+TICK_NEVER_ROUTINE: Tuple[str, ...] = (
+    # Losing a force: to unpaid upkeep, or to combat (frequent.php:391-466, :1331, :1337)
+    "couldn't pay the upkeep",
+    "scattered to the four winds!",
+    "lost % size!",
+    # Being in a fight at all -- both halves of every exchange (frequent.php:1296-1319)
+    "damage (% hits)",
+    # The nation coming apart (frequent.php:952, :985, :988, :1014, :1017)
+    "your ponies are revolting!",
+    "hates you enough to send an airstrike",
+    "for daring to ascend!",
+    # Running out of a good, so something stops working (frequent.php:290, :295, :499-:631)
+    "don't have enough",
+    "to function properly!",
+    # The forbidden research dismantling itself (frequent.php:484)
+    "forbidden research",
+    # Somebody else acting on you: deals and trades you did not initiate
+    "Your deal with",
+    "as part of your deal.",
+    "This nation received",
+    "and made % bits.",
+)
+
 #: Companion lines written before ``<recipe name> completed successfully.`` by
 #: backend_actions.php, backend_favoriteactions.php and backend_makeequipment.php. Once an
 #: ``Action:`` selector chooses that recipe, these are part of the same logical report.
@@ -1094,10 +1145,15 @@ def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
 
     ignored = [matches_any_pattern(line, ordinary_patterns) for line in lines]
 
+    # Applies to the monitor's own catalogues below, never to ordinary_patterns above: a
+    # pattern the user wrote is their explicit choice, but a warning must not be lost to a
+    # catalogue they never saw. See TICK_NEVER_ROUTINE.
+    guarded = [matches_any_pattern(line, TICK_NEVER_ROUTINE) for line in lines]
+
     if ignore_tick and _is_tick_report(lines):
         for index, line in enumerate(lines):
-            ignored[index] = ignored[index] or matches_any_pattern(
-                line, TICK_ROUTINE_PATTERNS
+            ignored[index] = ignored[index] or (
+                not guarded[index] and matches_any_pattern(line, TICK_ROUTINE_PATTERNS)
             )
 
     selected_completion_indexes = []
@@ -1112,8 +1168,8 @@ def surviving_report_lines(message: str, patterns: Sequence[str]) -> List[str]:
         # narrowly defined action bookkeeping keeps an unselected action's completion or any
         # warning visible even in that merged shape.
         for index, line in enumerate(lines):
-            ignored[index] = ignored[index] or matches_any_pattern(
-                line, ACTION_ROUTINE_PATTERNS
+            ignored[index] = ignored[index] or (
+                not guarded[index] and matches_any_pattern(line, ACTION_ROUTINE_PATTERNS)
             )
 
     return [line for index, line in enumerate(lines) if not ignored[index]]

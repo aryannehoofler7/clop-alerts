@@ -184,9 +184,22 @@ the real matcher:
   routinely carries a decimal point to end the pattern.
 - `Your population` reaches the same line for a force named `Population Guard`.
 
-Both are pre-existing, neither is introduced here, and the two lines that matter most —
-`Your % scattered to the four winds!` (`:1337`) and `Your % lost % size!` (`:1331`) — contain no
-period and survive both patterns. Recorded because the safety argument must not overstate itself.
+Both are pre-existing and neither is introduced here.
+
+**Closed, 2026-08-25.** Hunting the rest of them mechanically rather than by hand turned two known
+examples into **37 distinct collisions**, including the trivial one nobody had spotted: a nation
+simply named `Show Details` silences almost every line that names it, and a force named
+`Population Guard` silences the line reporting its own death. `TICK_NEVER_ROUTINE` in
+`clop_monitor.py` now guards fourteen warning families and wins over both internal catalogues; the
+count is zero, held by `test_no_hostile_name_can_silence_a_notable_line_inside_a_tick` over 256
+substitutions.
+
+The guards work where anchoring could not, because the failure directions differ: any pattern is
+spoofable by a name containing its words, but a warning that happens to look like a guard merely
+alerts. They govern the monitor's own catalogues only — a pattern the user wrote in
+`reports.ignore` is their explicit choice. That asymmetry is also why this list is deliberately not
+held to the no-redundancy rule that governs `TICK_ROUTINE_PATTERNS`: a guard catching nothing costs
+nothing, a guard missing loses a warning in silence.
 
 ## Five lines move from Notable to Routine
 
