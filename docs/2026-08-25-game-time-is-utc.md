@@ -39,12 +39,26 @@ it, where it is visible.
 Sheets has no built-in "UTC now". `NOW()` returns the current time **in the spreadsheet's
 timezone** (File → Settings → Time zone). Two ways to bridge that:
 
-### Option A (recommended) — set the spreadsheet's timezone to UTC
+### Option A (recommended, and **already true of the shared planning sheet**) — spreadsheet timezone = UTC
 
 File → Settings → Time zone → `(GMT+00:00) UTC`. Then `NOW()` *is* game time and every formula
-below is plain arithmetic with nothing to keep in sync. The cost is that any date the sheet
-formats for a human displays in UTC, which for a sheet whose whole subject is game state is
-arguably the right answer anyway.
+below is plain arithmetic with nothing to keep in sync. Checked on the shared sheet on 2026-08-25:
+`NOW()` already tracks the game's `Server time:`, so this option needs no change — Option B below
+is kept only for anyone working in a copy that is on local time.
+
+**`NOW()` still *looks* different, and that is formatting, not timezone.** The sheet renders a
+datetime in its locale format (`8/25/2026 10:09:00`) while the game prints
+`2026-08-25 10:05:28`. Same instant, same clock. To make it read like the game:
+
+- **Format the cell** — Format → Number → Custom date and time → `yyyy-mm-dd hh:mm:ss`. The cell
+  stays a real datetime, so it can still be subtracted from a parsed stamp. Prefer this.
+- **Or format in the formula** — `=TEXT(NOW(),"yyyy-mm-dd hh:mm:ss")`. This produces *text*
+  matching the game byte for byte, which is right for a display cell and wrong for arithmetic.
+
+Don't read a mismatch in the **seconds** as drift: `NOW()` only moves when the sheet recalculates,
+so its seconds are frozen at the last recalc (`:00` on the minute, if recalc is set to every
+minute). Expect up to a minute of skew against the game's clock no matter what, and compare in
+whole ticks rather than seconds when it has to be exact.
 
 ### Option B — leave the sheet on local time and subtract the offset
 
