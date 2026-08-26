@@ -292,25 +292,27 @@ class TimeoutsAgainstMeasuredRangesTests(unittest.TestCase):
     constants and these numbers together.
     """
 
-    #: Slowest hop 1 observed on a call that returned good JSON (20-sample run).
-    SLOWEST_GOOD_HOP1 = 7.51
-    #: Slowest hop 2 observed on a call that returned good JSON. Hop 2 never runs long and wins.
-    SLOWEST_GOOD_HOP2 = 0.60
+    #: Slowest hop 1 seen on a call that returned good JSON, across ~40 samples on three days.
+    #: Successive samples kept raising this (3.2 -> 7.51 -> 9.56), which is why the caps are set as
+    #: generous bounds rather than snugly around whatever the latest run happened to show.
+    SLOWEST_GOOD_HOP1 = 9.56
+    #: Same for hop 2. An early two-sample read said this was always ~0.5s; it is not.
+    SLOWEST_GOOD_HOP2 = 2.81
 
-    def test_hop_1_leaves_headroom_over_the_slowest_known_success(self):
-        # Hop 1's timings overlap between success and failure -- 7.51s succeeded while 7.1s
-        # failed -- so there is no clean cut. Erring tight throws away good calls, and a
-        # discarded success costs a whole extra round trip.
-        self.assertGreater(sheets.DEFAULT_TIMEOUT, self.SLOWEST_GOOD_HOP1)
+    #: How much room a cap must leave above the slowest known success. Cutting early throws away a
+    #: call that would have worked and costs a full extra round trip; cutting late wastes a few
+    #: seconds of a 180-second budget. The asymmetry is the whole argument for erring generous.
+    MARGIN = 2.0
 
-    def test_hop_2_leaves_headroom_over_the_slowest_known_success(self):
-        # Hop 2 does separate cleanly: 0.48-0.60s when it wins, 10s+ when it loses.
-        self.assertGreater(sheets.CONTENT_TIMEOUT, self.SLOWEST_GOOD_HOP2 * 3)
+    def test_hop_1_leaves_real_headroom_over_the_slowest_known_success(self):
+        self.assertGreaterEqual(
+            sheets.DEFAULT_TIMEOUT, self.SLOWEST_GOOD_HOP1 * self.MARGIN
+        )
 
-    def test_hop_2_still_abandons_long_before_a_failure_admits_itself(self):
-        # A losing hop 2 takes 10-14s to return its dead-link 404. Waiting that out is what ate
-        # whole retry budgets, so the cap must sit far below it.
-        self.assertLess(sheets.CONTENT_TIMEOUT, 10.0)
+    def test_hop_2_leaves_real_headroom_over_the_slowest_known_success(self):
+        self.assertGreaterEqual(
+            sheets.CONTENT_TIMEOUT, self.SLOWEST_GOOD_HOP2 * self.MARGIN
+        )
 
     def test_the_retry_schedule_starts_fast_and_ends_slow(self):
         # Two failure modes, two halves of the schedule: immediate retries beat independent

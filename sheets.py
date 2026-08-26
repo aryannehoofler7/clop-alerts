@@ -52,18 +52,20 @@ SHEET_ID = "13LWTcalSlpwVAXAnwYo_9hqju5IAosfme5guDToJ3ug"
 
 #: Budget for the first hop -- POSTing to /exec, which runs the script.
 #:
-#: Unlike hop 2, hop 1's timings do NOT separate cleanly, and assuming they did was a mistake.
-#: A first small sample showed every success under 3.2s and every failure over 6, which looked like
-#: two clean populations and got this cut to 8. A larger sample says otherwise:
+#: Hop 1's timings have never separated cleanly, and successive samples keep pushing the slowest
+#: *successful* one upward:
 #:
-#:     successes  2.41 - 7.51s   (20 of 20; 5.10, 4.86, 5.64, 7.51 all returned good JSON)
-#:     failures   6.2, 7.1, 11.0, 12.5, 21.8, 32.6s
+#:     sample 1   successes to 3.2s    -> cap cut to 8   (too tight)
+#:     sample 2   successes to 7.51s   -> cap raised to 12
+#:     sample 3   successes to 9.56s   -> this
+#:     failures seen at 6.2, 7.1, 11.0, 12.5, 21.8, 32.6s -- overlapping the successes throughout
 #:
-#: They overlap around 6-8 seconds. There is no threshold that keeps every success and drops every
-#: failure, so this is set generously enough not to throw good calls away -- 12 leaves 60% headroom
-#: over the slowest success ever seen. Discarding a success costs a whole extra round trip;
-#: tolerating a doomed attempt costs a few seconds, and there are plenty of attempts.
-DEFAULT_TIMEOUT = 12.0
+#: No threshold keeps every success and drops every failure, so like CONTENT_TIMEOUT this is a
+#: generous bound on a plausible success rather than a tuned optimum: about double the slowest one
+#: ever observed. A production failure read "timed out running the script after 10 attempts in
+#: 175s" -- ten attempts each cut at 12 seconds, some of which may well have been on their way to
+#: succeeding.
+DEFAULT_TIMEOUT = 20.0
 
 #: Which of the two hops a failure happened on. Attached to the exception in _fetch and read back
 #: in _call, purely so the message can say which -- "timed out reading the sheet endpoint's reply"
@@ -73,18 +75,21 @@ HOP_RESULT = "fetching the result link"
 
 #: Budget for the second hop -- fetching the one-shot result link.
 #:
-#: Set from measurement, and the single most important number here. Timed separately over many
-#: calls, hop 2 is bimodal with nothing in between:
+#: Two samples said hop 2 was bimodal -- 0.5s winning, 10s+ losing, nothing between -- so this was
+#: cut to 3. A third sample on a different day found successes at 1.03, 1.69, 2.68 and **2.81**
+#: seconds, which left that cap with 6% of margin and every chance of killing calls that were
+#: about to succeed.
 #:
-#:     succeeds -> 0.5, 0.6, 0.5, 0.6 seconds
-#:     fails    -> 10.2, 10.3, 14.3 seconds, then a dead-link 404
+#: The lesson, having now got it wrong twice in the same way: these timings have no clean
+#: threshold to find, and a cap picked snugly around one sample is a cap that manufactures
+#: failures on the next. Both caps are now set as generous *bounds on a plausible success* rather
+#: than tuned optima -- roughly 3x the slowest success observed across ~40 samples.
 #:
-#: There is no such thing as a slow success. A hop 2 still running at 3 seconds has already failed
-#: and is merely taking its time to say so, and every one of those seconds is stolen from the
-#: retries that would actually have fixed the call. At 12 seconds two doomed attempts ate a whole
-#: 45-second budget, which is exactly what "after 2 attempts in 45s" meant. At 3 seconds a doomed
-#: attempt costs hop 1 plus 3, so the same budget buys five or six rolls of the dice instead.
-CONTENT_TIMEOUT = 3.0
+#: The asymmetry justifies it. Cutting too early throws away a call that would have worked and
+#: costs a whole extra round trip; cutting too late wastes a few seconds of a 180-second budget.
+#: The deadline, not the cap, is what stops a slow patch running away: when attempts are quick
+#: there is room for many, and when they are slow there is room for fewer, which is correct.
+CONTENT_TIMEOUT = 8.0
 
 #: Backstop against a hung endpoint -- NOT a retry budget. It is set high enough that ordinary
 #: retrying never reaches it, and only a genuinely wedged call does.
