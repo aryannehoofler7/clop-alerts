@@ -1173,12 +1173,51 @@ A response cut off *mid-transfer* — as opposed to the game sending a short pag
 above catch — used to end the monitor with a Python traceback and no dialog at all. It now raises
 **`The response from ... broke off part-way`** through the normal dialog, and polling continues.
 
+## Empire relations: when do the airstrikes start?
+
+`relations.py` answers one question the game will not: **how many ticks until the Solar Empire or
+the New Lunar Republic bombs us?**
+
+```powershell
+python relations.py --se -120 --nlr 76 --government Democracy
+python relations.py --se -120 --nlr 76 --drift -6 3 --trace
+```
+
+```
+start   SE   -120   NLR     76   sum    -44
+drift   SE     -3   NLR     +2   per tick (2h)
+
+FIRST STRIKE  tick 4: Solar Empire sends 34 pegasi
+              in 8 hours of game time
+              it fights at the next war tick (00:00 or 12:00 UTC)
+then          t18 Sol 41, t32 Sol 49, t45 Sol 55, t59 Sol 62, t72 Sol 68
+total         51 strikes in 600 ticks
+```
+
+It is a tested port of the relation pipeline in `clop/cron/frequent.php`, in the tick's own order,
+including its one live bug. Three things it exists to stop you getting wrong:
+
+- **The trigger is the sum.** `se_relation + nlr_relation < -50` fires the strike; each superpower
+  joins in only if its own relation is under -25. `-900 / +900` is never touched.
+- **Do not extrapolate the `(per tick)` figure on `overview.php`.** That is a separate
+  re-implementation which over-predicts Solar Empire recovery below -700, ignores the airstrike
+  rebound, and is only valid for one tick — decay and jealousy are step functions of the current
+  values, so the rate moves as you do.
+- **Balanced drift survives; lopsided drift does not, however positive its total.** Jealousy takes
+  `floor(other/50)` off one relation without giving it to the other, so it drains the sum every
+  tick. `+1 SE / +2 NLR` gains three points a tick overall and is still bombed, at tick 182.
+
+The full mechanism — every formula, the SE forgiveness bug, the stasis trap, and a lookup table of
+first-strike ticks — is in `../docs/DEVELOPMENT.md`, "Empire relations: decay, jealousy, and exactly
+when the airstrikes start".
+
 ## Tests
 
 The parser tests use synthetic HTML and never contact the hosted game. The Sheets, overview, goods,
 nation, building and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_goods.py`,
 `test_nation.py`, `test_buildings.py`, `test_stockpiles.py`) stub the network, so they never contact
-Google or the game. All **478** of them run under one command:
+Google or the game. `test_relations.py` is pure arithmetic and pins each constant to a hand-read
+line of `frequent.php`. All **697** of them run under one command:
 
 ```powershell
 python -m unittest -v
