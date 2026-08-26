@@ -21,6 +21,7 @@ from relations import (
     forgiveness_nlr,
     forgiveness_se,
     friendship_decay,
+    plan_resupply,
     project,
 )
 
@@ -294,6 +295,56 @@ class ForecastTests(unittest.TestCase):
     def test_an_already_doomed_position_is_hit_on_the_next_tick(self):
         self.assertEqual(project(-300, 300, DEMOCRACY, ticks=600).ticks_until_strike, 7)
         self.assertEqual(project(-400, 400, DEMOCRACY, ticks=600).ticks_until_strike, 5)
+
+
+class DeadlineTests(unittest.TestCase):
+    """The operational question: how many ticks may we leave it alone?"""
+
+    def test_the_deadline_is_the_tick_before_the_strike(self):
+        forecast = project(0, 0, DEMOCRACY, ticks=600)
+        self.assertEqual(forecast.ticks_until_strike, 38)
+        self.assertEqual(forecast.safe_ticks, 37)
+
+    def test_the_early_ticks_are_just_the_drift(self):
+        """Below NLR 50 nothing else is running: no decay, no forgiveness, no jealousy."""
+        forecast = project(0, 0, DEMOCRACY, ticks=30)
+        for tick in (1, 2, 3, 10, 24):
+            state = forecast.history[tick - 1]
+            self.assertEqual((state.se, state.nlr), (-3 * tick, 2 * tick), tick)
+
+    def test_jealousy_starts_the_tick_the_nlr_reaches_50(self):
+        """floor(50/50) = 1, so the SE starts losing 4 a tick instead of 3 from tick 25 on."""
+        forecast = project(0, 0, DEMOCRACY, ticks=30)
+        self.assertEqual(forecast.history[23].nlr, 48)   # tick 24, still -3/tick
+        self.assertEqual(forecast.history[24].nlr, 50)   # tick 25, jealousy engages
+        self.assertEqual(forecast.history[24].se - forecast.history[23].se, -3)
+        self.assertEqual(forecast.history[25].se - forecast.history[24].se, -4)
+
+    def test_the_state_you_have_to_repair_at_the_deadline(self):
+        deadline = project(0, 0, DEMOCRACY, ticks=600).state_at_deadline
+        self.assertEqual((deadline.se, deadline.nlr), (-123, 74))
+        self.assertEqual(deadline.total, -49)  # one point clear of the strict -50 gate
+
+    def test_a_cycle_from_zero_costs_984_oil_and_74_drugs(self):
+        plan = plan_resupply(0, 0, DEMOCRACY)
+        self.assertEqual((plan.safe_ticks, plan.hours), (37, 74))
+        self.assertEqual(plan.oil, 123 * 8)
+        self.assertEqual(plan.drugs, 74)
+
+    def test_banking_the_se_high_buys_four_times_the_gap_at_the_same_price(self):
+        """Holding SE 350 / NLR 100 runs 149 ticks, and the NLR suppresses itself on the way.
+
+        High SE means floor(se/50) jealousy pushes the NLR *down* through zero, where it stops
+        provoking the SE at all -- so the cycle needs no Drugs, only Oil.
+        """
+        cheap = plan_resupply(0, 0, DEMOCRACY)
+        banked = plan_resupply(350, 100, DEMOCRACY)
+        self.assertEqual(banked.safe_ticks, 149)
+        self.assertEqual(banked.drugs, 0)
+        self.assertAlmostEqual(banked.oil_per_safe_tick, cheap.oil_per_safe_tick, delta=1)
+
+    def test_a_balanced_drift_needs_no_resupply_at_all(self):
+        self.assertIsNone(plan_resupply(0, 0, (0, 0)))
 
 
 if __name__ == "__main__":

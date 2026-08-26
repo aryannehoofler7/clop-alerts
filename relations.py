@@ -258,6 +258,22 @@ class Forecast:
         ticks = self.ticks_until_strike
         return ticks * HOURS_PER_TICK if ticks is not None else None
 
+    @property
+    def safe_ticks(self) -> Optional[int]:
+        """The last tick you are still clear on -- the deadline to be back and topping up.
+
+        One less than ``ticks_until_strike``: the strike tick is the tick the troops appear, so the
+        last tick you can act on and still have acted in time is the one before it.
+        """
+        ticks = self.ticks_until_strike
+        return ticks - 1 if ticks is not None else None
+
+    @property
+    def state_at_deadline(self) -> Optional[TickResult]:
+        """Where the two relations stand on the last safe tick -- what a top-up has to close."""
+        safe = self.safe_ticks
+        return self.history[safe - 1] if safe else None
+
 
 def project(
     se: int,
@@ -278,6 +294,61 @@ def project(
         forecast.history.append(result)
         forecast.strikes.extend(result.strikes)
     return forecast
+
+
+#: Units of Oil *or* Tungsten consumed per +1 relation (recipes 32/33/62/63 in ``recipeitems``).
+#: The action costs no bits and ``$times`` is unbounded (``backend_actions.php:7``), so one visit
+#: can move the relation as far as the stockpile allows -- but it is all-or-nothing: come up short
+#: and ``:202`` errors the whole action rather than shipping what you have.
+UNITS_PER_RELATION_POINT = 8
+
+#: Drugs consumed per -1 relation (recipes 37/38), each paying 20,000 bits (the recipe's negative
+#: ``cost``). Blocked outright once that relation is at or below -500 (``backend_actions.php:69``).
+DRUGS_PER_RELATION_POINT = 1
+BITS_PER_SMUGGLED_DRUG = 20000
+
+
+@dataclass(frozen=True)
+class ResupplyPlan:
+    """One maintenance cycle: hold at a reset point, come back before the deadline, top up."""
+
+    reset_se: int
+    reset_nlr: int
+    safe_ticks: int
+    deadline_se: int
+    deadline_nlr: int
+
+    @property
+    def hours(self) -> int:
+        return self.safe_ticks * HOURS_PER_TICK
+
+    @property
+    def oil(self) -> int:
+        """Oil (or Tungsten) to lift the SE relation back to the reset point."""
+        return max(0, self.reset_se - self.deadline_se) * UNITS_PER_RELATION_POINT
+
+    @property
+    def drugs(self) -> int:
+        """Drugs to push the NLR relation back down to the reset point."""
+        return max(0, self.deadline_nlr - self.reset_nlr) * DRUGS_PER_RELATION_POINT
+
+    @property
+    def oil_per_safe_tick(self) -> float:
+        """The efficiency number: a cheaper cycle that needs twice the visits is not cheaper."""
+        return self.oil / self.safe_ticks
+
+
+def plan_resupply(reset_se: int, reset_nlr: int, drift: Tuple[int, int]) -> Optional[ResupplyPlan]:
+    """Cost out holding a nation at ``(reset_se, reset_nlr)`` and topping it back up each cycle.
+
+    Returns ``None`` if that reset point never triggers a strike at all, which is the answer you
+    actually want -- it means the drift is balanced and no maintenance is needed.
+    """
+    forecast = project(reset_se, reset_nlr, drift, ticks=900)
+    if forecast.safe_ticks is None:
+        return None
+    deadline = forecast.state_at_deadline
+    return ResupplyPlan(reset_se, reset_nlr, forecast.safe_ticks, deadline.se, deadline.nlr)
 
 
 def drift_for(
@@ -333,7 +404,12 @@ def _main(argv: Optional[List[str]] = None) -> int:
         const=-10,
         help="users.empiremax -- pass bare to ascend now (-10, what the game sets)",
     )
-    parser.add_argument("--trace", action="store_true", help="print every tick")
+    parser.add_argument("--trace", action="store_true", help="print every tick to the deadline")
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="compare reset points by safe ticks and Oil per cycle",
+    )
     args = parser.parse_args(argv)
 
     drift = tuple(args.drift) if args.drift else drift_for(args.government, args.economy)
@@ -342,13 +418,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
     print(f"start   SE {args.se:>6}   NLR {args.nlr:>6}   sum {args.se + args.nlr:>6}")
     print(f"drift   SE {drift[0]:>+6}   NLR {drift[1]:>+6}   per tick ({HOURS_PER_TICK}h)")
     print()
-    if args.trace:
-        for result in forecast.history:
-            marks = "  ".join(s.describe() for s in result.strikes)
-            print(
-                f"  SE {result.se:>6}  NLR {result.nlr:>6}  sum {result.total:>6}"
-                f"{'   <-- ' + marks if marks else ''}"
-            )
+
     first = forecast.first_strike
     if first is None:
         days = args.ticks * HOURS_PER_TICK / 24
@@ -361,13 +431,47 @@ def _main(argv: Optional[List[str]] = None) -> int:
             else "That is only as far as --ticks looked; a lopsided drift can take 200 ticks to bite."
         )
         return 0
-    print(f"FIRST STRIKE  {first.describe()}")
-    print(f"              in {forecast.hours_until_strike} hours of game time")
-    print(f"              it fights at the next war tick (00:00 or 12:00 UTC)")
-    later = [s for s in forecast.strikes[1:6]]
-    if later:
-        print("then          " + ", ".join(f"t{s.tick} {s.empire[:3]} {s.size}" for s in later))
-    print(f"total         {len(forecast.strikes)} strikes in {args.ticks} ticks")
+
+    safe, deadline = forecast.safe_ticks, forecast.state_at_deadline
+    print(f"SAFE FOR      {safe} more ticks ({safe * HOURS_PER_TICK} hours)")
+    print(f"ACT BY        tick {safe}, with SE {deadline.se} and NLR {deadline.nlr}")
+    print(f"              -> {(0 - deadline.se) * UNITS_PER_RELATION_POINT} Oil or Tungsten "
+          f"to put SE back to 0, {max(0, deadline.nlr)} Drugs to put NLR back to 0")
+    print(f"OTHERWISE     {first.describe()}, fighting at the next 00:00 or 12:00 UTC")
+    print()
+
+    if args.trace:
+        print("  tick      SE     NLR     sum")
+        for result in forecast.history[: first.tick]:
+            tick = forecast.history.index(result) + 1
+            note = ""
+            if tick == safe:
+                note = "   <-- LAST SAFE TICK"
+            elif result.strikes:
+                note = "   <-- " + "  ".join(s.describe() for s in result.strikes)
+            print(
+                f"  {tick:>4}  {result.se:>6}  {result.nlr:>6}  {result.total:>6}{note}"
+            )
+        print()
+
+    if args.plan:
+        print("Reset points, compared. 'Oil/tick' is the one to minimise -- a cheap cycle that")
+        print("needs three times the visits is not a cheap cycle.")
+        print()
+        print("  reset to        safe ticks   hours    Oil/cycle   Drugs/cycle   Oil/tick")
+        candidates = [(0, 0), (0, 350), (100, 0), (100, 350), (200, 0), (300, 0), (400, 0)]
+        for reset_se, reset_nlr in candidates:
+            plan = plan_resupply(reset_se, reset_nlr, drift)
+            if plan is None:
+                print(f"  SE {reset_se:>4} NLR {reset_nlr:>4}      never needs topping up")
+                continue
+            print(
+                f"  SE {reset_se:>4} NLR {reset_nlr:>4}   {plan.safe_ticks:>10}   {plan.hours:>5}"
+                f"   {plan.oil:>10}   {plan.drugs:>11}   {plan.oil_per_safe_tick:>8.0f}"
+            )
+        print()
+
+    print(f"total         {len(forecast.strikes)} strikes in {args.ticks} ticks if left alone")
     return 0
 
 

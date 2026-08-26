@@ -1184,15 +1184,19 @@ python relations.py --se -120 --nlr 76 --drift -6 3 --trace
 ```
 
 ```
-start   SE   -120   NLR     76   sum    -44
+start   SE      0   NLR      0   sum      0
 drift   SE     -3   NLR     +2   per tick (2h)
 
-FIRST STRIKE  tick 4: Solar Empire sends 34 pegasi
-              in 8 hours of game time
-              it fights at the next war tick (00:00 or 12:00 UTC)
-then          t18 Sol 41, t32 Sol 49, t45 Sol 55, t59 Sol 62, t72 Sol 68
-total         51 strikes in 600 ticks
+SAFE FOR      37 more ticks (74 hours)
+ACT BY        tick 37, with SE -123 and NLR 74
+              -> 984 Oil or Tungsten to put SE back to 0, 74 Drugs to put NLR back to 0
+OTHERWISE     tick 38: Solar Empire sends 32 pegasi, fighting at the next 00:00 or 12:00 UTC
 ```
+
+`--trace` prints every tick up to the deadline; `--plan` compares reset points by how long they buy
+and what they cost. Resetting to 0 / 0 is not the best target — banking the Solar Empire relation
+high suppresses the NLR for free and buys **149 safe ticks (12.4 days)** instead of 37, at the same
+Oil per tick.
 
 It is a tested port of the relation pipeline in `clop/cron/frequent.php`, in the tick's own order,
 including its one live bug. Three things it exists to stop you getting wrong:
@@ -1217,7 +1221,7 @@ The parser tests use synthetic HTML and never contact the hosted game. The Sheet
 nation, building and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_goods.py`,
 `test_nation.py`, `test_buildings.py`, `test_stockpiles.py`) stub the network, so they never contact
 Google or the game. `test_relations.py` is pure arithmetic and pins each constant to a hand-read
-line of `frequent.php`. All **703** of them run under one command:
+line of `frequent.php`. All **710** of them run under one command:
 
 ```powershell
 python -m unittest -v
