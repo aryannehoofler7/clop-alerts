@@ -70,6 +70,15 @@ ECONOMY_DRIFT: Dict[str, Tuple[int, int]] = {
 
 #: Per-tick (se, nlr) *per building owned* (``resourcedefs``, applied at ``frequent.php:305-313``).
 #: The Forbidden Research Facility dwarfs every other term in the game.
+#:
+#: These only pay out on a tick the building can afford its upkeep. ``frequent.php:301`` gates the
+#: relation effect on ``$hasenough``, and the check at ``:288`` is ``stock < requirement * amount``
+#: -- **stack-wide and all-or-nothing**. Nine Coffee against five Sun Worship Centers needing ten
+#: means all five produce nothing, not four running and one idle. Worse, ``:338`` deducts each
+#: building's upkeep from the running total as it goes, in the undefined row order of the
+#: ``resources`` table, so an unrelated building processed earlier can starve your worship centers.
+#: Upkeep per tick, each: Sun Worship Center 2 Coffee + 6 Energy; Moon Worship Center 2 Cider +
+#: 6 Energy; Forbidden Research Facility 20 of each of the twelve regional DNAs.
 BUILDING_DRIFT: Dict[str, Tuple[int, int]] = {
     "Sun Worship Center": (1, 0),
     "Moon Worship Center": (0, 1),
@@ -143,6 +152,7 @@ class TickResult:
     se: int
     nlr: int
     strikes: Tuple[Strike, ...]
+    empiremax: Optional[int] = None
 
     @property
     def total(self) -> int:
@@ -155,14 +165,19 @@ def advance(
     nlr: int,
     drift: Tuple[int, int],
     tick: int = 1,
-    ascending: bool = False,
+    empiremax: Optional[int] = None,
 ) -> TickResult:
     """Run one cron pass over one nation, in ``frequent.php``'s order.
 
     ``drift`` is the (se, nlr) your buildings, government, economy and standing actions add each
-    tick -- see ``drift_for``. ``ascending`` is ``users.empiremax`` being set, which switches off
-    forgiveness, the -1000 floor and the airstrike rebound all at once.
+    tick -- see ``drift_for``.
+
+    ``empiremax`` is ``users.empiremax``, which is ``NULL`` for everyone who has not ascended and
+    ``-10`` the moment they do (``backend_majoractions.php:111``). Passing it switches off
+    forgiveness, the -1000 floor and the airstrike rebound all at once, and turns on the ratchet at
+    ``frequent.php:1025-1042`` that drags both relations down one point per tick forever.
     """
+    ascending = empiremax is not None
     drift_se, drift_nlr = drift
 
     # 1. Friendship decay (:166-201), from the start-of-tick values. Applies while ascending too.
@@ -208,7 +223,17 @@ def advance(
             if not ascending:
                 nlr += size
 
-    return TickResult(se, nlr, tuple(strikes))
+    # 7. The ascension ratchet (:1025-1042), *after* the airstrike pass. empiremax counts down one
+    #    per tick once negative and both relations are clamped to it, so the sum falls by 2 a tick
+    #    with nothing pushing back. This is the mechanic, not a side effect: ascending is meant to
+    #    end with both superpowers on your soil.
+    if ascending:
+        if empiremax < 0:
+            empiremax -= 1
+        se = min(se, empiremax)
+        nlr = min(nlr, empiremax)
+
+    return TickResult(se, nlr, tuple(strikes), empiremax)
 
 
 @dataclass
@@ -239,7 +264,7 @@ def project(
     nlr: int,
     drift: Tuple[int, int],
     ticks: int = 600,
-    ascending: bool = False,
+    empiremax: Optional[int] = None,
 ) -> Forecast:
     """Iterate the tick ``ticks`` times from the current relations and report what happens.
 
@@ -248,8 +273,8 @@ def project(
     """
     forecast = Forecast(ticks_simulated=ticks)
     for tick in range(1, ticks + 1):
-        result = advance(se, nlr, drift, tick=tick, ascending=ascending)
-        se, nlr = result.se, result.nlr
+        result = advance(se, nlr, drift, tick=tick, empiremax=empiremax)
+        se, nlr, empiremax = result.se, result.nlr, result.empiremax
         forecast.history.append(result)
         forecast.strikes.extend(result.strikes)
     return forecast
@@ -301,12 +326,18 @@ def _main(argv: Optional[List[str]] = None) -> int:
         help="override the per-tick drift outright, e.g. --drift -3 2",
     )
     parser.add_argument("--ticks", type=int, default=600, help="horizon (default 600 = 50 days)")
-    parser.add_argument("--ascending", action="store_true", help="users.empiremax is set")
+    parser.add_argument(
+        "--empiremax",
+        type=int,
+        nargs="?",
+        const=-10,
+        help="users.empiremax -- pass bare to ascend now (-10, what the game sets)",
+    )
     parser.add_argument("--trace", action="store_true", help="print every tick")
     args = parser.parse_args(argv)
 
     drift = tuple(args.drift) if args.drift else drift_for(args.government, args.economy)
-    forecast = project(args.se, args.nlr, drift, ticks=args.ticks, ascending=args.ascending)
+    forecast = project(args.se, args.nlr, drift, ticks=args.ticks, empiremax=args.empiremax)
 
     print(f"start   SE {args.se:>6}   NLR {args.nlr:>6}   sum {args.se + args.nlr:>6}")
     print(f"drift   SE {drift[0]:>+6}   NLR {drift[1]:>+6}   per tick ({HOURS_PER_TICK}h)")

@@ -137,7 +137,7 @@ class AirstrikeTriggerTests(unittest.TestCase):
 class AscendingTests(unittest.TestCase):
     def test_forgiveness_is_switched_off(self):
         """frequent.php:203 gates the whole block on !empiremax."""
-        self.assertEqual(advance(-800, 0, (0, 0), ascending=True).se, -800)
+        self.assertEqual(advance(-800, 0, (0, 0), empiremax=-10).se, -800)
         self.assertGreater(advance(-800, 0, (0, 0)).se, -800)
 
     def test_the_floor_is_switched_off(self):
@@ -148,17 +148,60 @@ class AscendingTests(unittest.TestCase):
         """
         forbidden = drift_for(buildings={"Forbidden Research Facility": 1})
         self.assertEqual(advance(-1000, 1000, forbidden).se, -1000)
-        self.assertEqual(advance(-1000, 1000, forbidden, ascending=True).se, -1034)
+        self.assertEqual(advance(-1000, 1000, forbidden, empiremax=-10).se, -1034)
 
     def test_the_airstrike_rebound_is_switched_off(self):
         """:982 -- they attack and the hate stays, so the next strike is bigger."""
-        result = advance(-400, 0, (0, 0), ascending=True)
+        result = advance(-400, 0, (0, 0), empiremax=-10)
         self.assertEqual(result.strikes[0].size, 100)
         self.assertEqual(result.se, -400)
 
     def test_jealousy_still_applies(self):
-        """:241-258 has no empiremax gate, unlike the three above."""
-        self.assertEqual(advance(0, 100, (0, 0), ascending=True).se, -2)
+        """:241-258 has no empiremax gate, unlike the three above.
+
+        The NLR is dragged from +100 to the ratchet's -11 in the same tick, but not before the
+        Solar Empire has docked you floor(100/50) = 2 for it.
+        """
+        result = advance(-100, 100, (0, 0), empiremax=-10)
+        self.assertEqual(result.se, -102)
+        self.assertEqual(result.nlr, -11)
+
+    def test_the_ratchet_drags_both_relations_down_one_per_tick(self):
+        """:1025-1042 -- empiremax counts down, and both relations are clamped to it."""
+        result = advance(500, 500, (0, 0), empiremax=-10)
+        self.assertEqual(result.empiremax, -11)
+        self.assertEqual((result.se, result.nlr), (-11, -11))
+
+    def test_ascending_is_attacked_by_both_sisters_on_tick_17(self):
+        """The game sets empiremax = -10 and both relations to -10 (backend_majoractions.php:111).
+
+        From there the sum is 2 x empiremax and falls 2 a tick, so it clears -50 on tick 17 -- 34
+        hours. Alicorn Elite has no government drift, so nothing else is moving.
+        """
+        forecast = project(-10, -10, (0, 0), ticks=40, empiremax=-10)
+        self.assertEqual(forecast.ticks_until_strike, 17)
+        self.assertEqual(forecast.hours_until_strike, 34)
+        first_tick = [s for s in forecast.strikes if s.tick == 17]
+        self.assertEqual([(s.empire, s.size) for s in first_tick],
+                         [(SOLAR_EMPIRE, 7), (NEW_LUNAR_REPUBLIC, 7)])
+
+    def test_the_gate_is_strictly_below_minus_50(self):
+        """A sum of exactly -50 is safe. The player guide's "-50 or below" is wrong by one tick.
+
+        The ascent passes through exactly -50 on tick 15 and is not touched; -52 on tick 16 is not
+        touched either, because the airstrike pass runs *before* the ratchet, on tick 15's numbers.
+        """
+        forecast = project(-10, -10, (0, 0), ticks=40, empiremax=-10)
+        self.assertEqual(forecast.history[14].total, -50)
+        self.assertEqual(forecast.history[14].strikes, ())
+        self.assertEqual(forecast.history[15].strikes, ())
+
+    def test_ascending_is_then_attacked_every_single_tick(self):
+        """No rebound and no floor, so it never stops and each strike is bigger than the last."""
+        forecast = project(-10, -10, (0, 0), ticks=60, empiremax=-10)
+        se_strikes = [s for s in forecast.strikes if s.empire == SOLAR_EMPIRE]
+        self.assertEqual([s.tick for s in se_strikes], list(range(17, 61)))
+        self.assertGreater(se_strikes[-1].size, se_strikes[0].size)
 
 
 class DriftTableTests(unittest.TestCase):
