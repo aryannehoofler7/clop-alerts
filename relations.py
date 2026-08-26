@@ -46,6 +46,16 @@ STRIKE_RELATION_THRESHOLD = -25
 RELATION_CAP = 1000
 RELATION_FLOOR = -1000
 
+#: Where each mechanic *actually starts costing you a point*, which is not where its ``if`` fires.
+#: Every tier is ``if (x > BOUND)`` guarding a ``floor((x - BOUND) / 50)``, so the tier switches on
+#: at the bound but returns 0 until you are a full 50 past it. Decay's first tier is guarded at 250
+#: and bites at 300; forgiveness is guarded at -450 and pays out at -500. Jealousy is the exception
+#: -- ``floor(x / 50)`` with no offset -- so it bites at exactly 50, the earliest of the lot and the
+#: only one most nations ever meet.
+DECAY_ONSETS = (300, 450, 850)          # guarded at 250 / 400 / 800 (frequent.php:166-189)
+FORGIVENESS_ONSETS = (-500, -750, -950)  # guarded at -450 / -700 / -900 (:204-227)
+JEALOUSY_ONSET = 50                      # floor(x/50) >= 1 (:241-246)
+
 SOLAR_EMPIRE = "Solar Empire"
 NEW_LUNAR_REPUBLIC = "New Lunar Republic"
 
@@ -148,11 +158,35 @@ class Strike:
 
 
 @dataclass(frozen=True)
+class Components:
+    """What each mechanic contributed to one relation on one tick, signed.
+
+    Exists so a projection can be audited rather than trusted: if the tick count is wrong, this
+    says which mechanic was mis-modelled. They apply in this order and sum to the tick's change.
+    """
+
+    decay: int = 0        # "a good friend is hard to keep", always <= 0
+    forgiveness: int = 0  # "a bad enemy forgets eventually", always >= 0
+    jealousy: int = 0     # the other superpower resenting your standing, always <= 0
+    drift: int = 0        # buildings + government + economy
+    clamp: int = 0        # the +/-1000 rails, and the empiremax ratchet while ascending
+    rebound: int = 0      # relation handed back by an airstrike, always >= 0
+
+    @property
+    def active(self) -> str:
+        """The mechanics that actually moved this relation, for a trace column."""
+        names = ("decay", "forgiveness", "jealousy", "drift", "clamp", "rebound")
+        return " ".join(f"{n}{getattr(self, n):+d}" for n in names if getattr(self, n))
+
+
+@dataclass(frozen=True)
 class TickResult:
     se: int
     nlr: int
     strikes: Tuple[Strike, ...]
     empiremax: Optional[int] = None
+    se_parts: Components = field(default_factory=Components)
+    nlr_parts: Components = field(default_factory=Components)
 
     @property
     def total(self) -> int:
@@ -179,33 +213,46 @@ def advance(
     """
     ascending = empiremax is not None
     drift_se, drift_nlr = drift
+    se_parts: Dict[str, int] = {}
+    nlr_parts: Dict[str, int] = {}
 
     # 1. Friendship decay (:166-201), from the start-of-tick values. Applies while ascending too.
-    se -= friendship_decay(se)
-    nlr -= friendship_decay(nlr)
+    se_parts["decay"] = -friendship_decay(se)
+    nlr_parts["decay"] = -friendship_decay(nlr)
+    se += se_parts["decay"]
+    nlr += nlr_parts["decay"]
 
     # 2. "Forgets eventually" (:203-240) -- the whole block is gated on not ascending.
-    if not ascending:
-        se += forgiveness_se(se)
-        nlr += forgiveness_nlr(nlr)
+    se_parts["forgiveness"] = forgiveness_se(se) if not ascending else 0
+    nlr_parts["forgiveness"] = forgiveness_nlr(nlr) if not ascending else 0
+    se += se_parts["forgiveness"]
+    nlr += nlr_parts["forgiveness"]
 
     # 3. Jealousy (:241-258). Both amounts are computed from the step-2 values *before* either is
     #    applied, so it is simultaneous. Not gated on empiremax. This is the drain on the sum.
     jealousy_of_se = floor(se / 50) if se > 0 else 0     # the NLR resents your SE standing
     jealousy_of_nlr = floor(nlr / 50) if nlr > 0 else 0  # and the SE resents your NLR standing
-    se -= jealousy_of_nlr
-    nlr -= jealousy_of_se
+    se_parts["jealousy"] = -jealousy_of_nlr
+    nlr_parts["jealousy"] = -jealousy_of_se
+    se += se_parts["jealousy"]
+    nlr += nlr_parts["jealousy"]
 
-    # 4. Buildings (:305-313), government (:497-611), economy (:625-644).
+    # 4. Buildings (:305-313), government (:497-611), economy (:625-644). Note the tick's own copy
+    #    of affectempirerelations (:36-48) does NOT clamp, unlike the one in allfunctions.php --
+    #    these land unbounded and are railed in step 5.
+    se_parts["drift"], nlr_parts["drift"] = drift_se, drift_nlr
     se += drift_se
     nlr += drift_nlr
 
     # 5. Caps (:728-757). The floor is skipped while ascending -- hate is unbounded on that path.
-    se = min(se, RELATION_CAP)
-    nlr = min(nlr, RELATION_CAP)
+    railed_se = min(se, RELATION_CAP)
+    railed_nlr = min(nlr, RELATION_CAP)
     if not ascending:
-        se = max(se, RELATION_FLOOR)
-        nlr = max(nlr, RELATION_FLOOR)
+        railed_se = max(railed_se, RELATION_FLOOR)
+        railed_nlr = max(railed_nlr, RELATION_FLOOR)
+    se_parts["clamp"] = railed_se - se
+    nlr_parts["clamp"] = railed_nlr - nlr
+    se, nlr = railed_se, railed_nlr
 
     # 6. The airstrike pass (:959-1024). One query over every nation, after they have all ticked.
     #    Both strengths read the same pre-rebound snapshot, so the SE rebound cannot soften the NLR
@@ -216,11 +263,13 @@ def advance(
             size = ceil(-se / 4)
             strikes.append(Strike(tick, SOLAR_EMPIRE, size))
             if not ascending:
+                se_parts["rebound"] = size
                 se += size
         if nlr < STRIKE_RELATION_THRESHOLD:
             size = ceil(-nlr / 4)
             strikes.append(Strike(tick, NEW_LUNAR_REPUBLIC, size))
             if not ascending:
+                nlr_parts["rebound"] = size
                 nlr += size
 
     # 7. The ascension ratchet (:1025-1042), *after* the airstrike pass. empiremax counts down one
@@ -230,10 +279,14 @@ def advance(
     if ascending:
         if empiremax < 0:
             empiremax -= 1
+        se_parts["clamp"] += min(se, empiremax) - se
+        nlr_parts["clamp"] += min(nlr, empiremax) - nlr
         se = min(se, empiremax)
         nlr = min(nlr, empiremax)
 
-    return TickResult(se, nlr, tuple(strikes), empiremax)
+    return TickResult(
+        se, nlr, tuple(strikes), empiremax, Components(**se_parts), Components(**nlr_parts)
+    )
 
 
 @dataclass
@@ -441,16 +494,21 @@ def _main(argv: Optional[List[str]] = None) -> int:
     print()
 
     if args.trace:
-        print("  tick      SE     NLR     sum")
-        for result in forecast.history[: first.tick]:
-            tick = forecast.history.index(result) + 1
+        print("  tick      SE     NLR     sum   what moved the SE / what moved the NLR")
+        previous = ""
+        for tick, result in enumerate(forecast.history[: first.tick], start=1):
             note = ""
             if tick == safe:
-                note = "   <-- LAST SAFE TICK"
+                note = "   <== LAST SAFE TICK"
             elif result.strikes:
-                note = "   <-- " + "  ".join(s.describe() for s in result.strikes)
+                note = "   <== " + "  ".join(s.describe() for s in result.strikes)
+            parts = f"{result.se_parts.active or '-'}  /  {result.nlr_parts.active or '-'}"
+            # Only reprint the breakdown when a mechanic switches on or off. A run of identical
+            # ticks is the normal case, and repeating it hides the two or three that matter.
+            shown = parts if parts != previous else ""
+            previous = parts
             print(
-                f"  {tick:>4}  {result.se:>6}  {result.nlr:>6}  {result.total:>6}{note}"
+                f"  {tick:>4}  {result.se:>6}  {result.nlr:>6}  {result.total:>6}   {shown}{note}"
             )
         print()
 

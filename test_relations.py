@@ -14,6 +14,9 @@ import unittest
 
 from relations import (
     BUILDING_DRIFT,
+    DECAY_ONSETS,
+    FORGIVENESS_ONSETS,
+    JEALOUSY_ONSET,
     NEW_LUNAR_REPUBLIC,
     SOLAR_EMPIRE,
     advance,
@@ -45,6 +48,38 @@ class FriendshipDecayTests(unittest.TestCase):
         """31/tick at 1000 -- the number the patron-state analysis in DEVELOPMENT.md turns on."""
         self.assertEqual(friendship_decay(1000), 15 + 12 + 4)
         self.assertEqual(friendship_decay(1000), 31)
+
+
+class OnsetTests(unittest.TestCase):
+    """Where each mechanic starts costing a point -- not where its ``if`` fires.
+
+    Every tier is ``if (x > BOUND)`` around a ``floor((x - BOUND) / 50)``, so it switches on at the
+    bound and returns zero for the next 49 points. Reading the guard as the onset puts the first
+    decay 50 points early and the first forgiveness 50 points late.
+    """
+
+    def test_decay_tiers_bite_50_past_their_guard(self):
+        self.assertEqual(friendship_decay(250), 0)
+        self.assertEqual(friendship_decay(299), 0)
+        self.assertEqual(friendship_decay(300), 1)
+        self.assertEqual(DECAY_ONSETS, (300, 450, 850))
+        for onset in DECAY_ONSETS:
+            self.assertGreater(friendship_decay(onset), friendship_decay(onset - 1), onset)
+
+    def test_forgiveness_tiers_pay_50_past_their_guard(self):
+        self.assertEqual(forgiveness_nlr(-451), 0)
+        self.assertEqual(forgiveness_nlr(-499), 0)
+        self.assertEqual(forgiveness_nlr(-500), 1)
+        self.assertEqual(FORGIVENESS_ONSETS, (-500, -750, -950))
+        for onset in FORGIVENESS_ONSETS:
+            self.assertGreater(forgiveness_nlr(onset), forgiveness_nlr(onset + 1), onset)
+
+    def test_jealousy_is_the_exception_and_bites_at_exactly_50(self):
+        """No offset in floor(x/50), so this is the first mechanic any nation meets."""
+        self.assertEqual(JEALOUSY_ONSET, 50)
+        self.assertEqual(advance(0, 49, (0, 0)).se, 0)
+        self.assertEqual(advance(0, 50, (0, 0)).se, -1)
+        self.assertEqual(advance(0, 100, (0, 0)).se, -2)
 
 
 class ForgivenessTests(unittest.TestCase):
@@ -312,12 +347,18 @@ class DeadlineTests(unittest.TestCase):
             state = forecast.history[tick - 1]
             self.assertEqual((state.se, state.nlr), (-3 * tick, 2 * tick), tick)
 
-    def test_jealousy_starts_the_tick_the_nlr_reaches_50(self):
-        """floor(50/50) = 1, so the SE starts losing 4 a tick instead of 3 from tick 25 on."""
+    def test_jealousy_is_charged_the_tick_after_the_nlr_reaches_50(self):
+        """The NLR reaches 50 on tick 25; the SE pays for it from tick 26.
+
+        Jealousy is read off the values standing at the start of the tick (frequent.php:244), so
+        the tick that *crosses* 50 is still charged nothing -- the bill starts one tick later.
+        Reading it as "tick 25" would put the deadline one tick early.
+        """
         forecast = project(0, 0, DEMOCRACY, ticks=30)
-        self.assertEqual(forecast.history[23].nlr, 48)   # tick 24, still -3/tick
-        self.assertEqual(forecast.history[24].nlr, 50)   # tick 25, jealousy engages
+        self.assertEqual(forecast.history[24].nlr, 50)                  # tick 25 reaches 50
+        self.assertEqual(forecast.history[24].se_parts.jealousy, 0)     # and is charged nothing
         self.assertEqual(forecast.history[24].se - forecast.history[23].se, -3)
+        self.assertEqual(forecast.history[25].se_parts.jealousy, -1)    # tick 26 pays
         self.assertEqual(forecast.history[25].se - forecast.history[24].se, -4)
 
     def test_the_state_you_have_to_repair_at_the_deadline(self):
