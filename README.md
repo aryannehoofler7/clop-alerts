@@ -1217,7 +1217,7 @@ The parser tests use synthetic HTML and never contact the hosted game. The Sheet
 nation, building and stockpile tests (`test_sheets.py`, `test_overview.py`, `test_goods.py`,
 `test_nation.py`, `test_buildings.py`, `test_stockpiles.py`) stub the network, so they never contact
 Google or the game. `test_relations.py` is pure arithmetic and pins each constant to a hand-read
-line of `frequent.php`. All **701** of them run under one command:
+line of `frequent.php`. All **703** of them run under one command:
 
 ```powershell
 python -m unittest -v

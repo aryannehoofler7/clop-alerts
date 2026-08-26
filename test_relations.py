@@ -230,6 +230,21 @@ class ForecastTests(unittest.TestCase):
         for drift in ((0, 0), (1, 1), (3, 3)):
             self.assertIsNone(project(0, 0, drift, ticks=1200).first_strike, drift)
 
+    def test_zero_drift_is_not_enough_if_the_levels_are_split(self):
+        """Jealousy is driven by the levels, not the drift, so a split pair drains with no push.
+
+        The usual advice -- "balance to a net change of 0 per tick" -- is necessary and not
+        sufficient. Both of these have a drift of 0/0 and a sum of 0, and both are bombed.
+        """
+        self.assertEqual(project(-100, 100, (0, 0), ticks=600).ticks_until_strike, 26)
+        self.assertEqual(project(-400, 400, (0, 0), ticks=600).ticks_until_strike, 6)
+
+    def test_a_balanced_nation_rests_at_49_not_at_the_cap(self):
+        """Decay stops below 250 and jealousy stops below 50, so 49/49 is the fixed point."""
+        settled = project(900, 900, (0, 0), ticks=600)
+        self.assertIsNone(settled.first_strike)
+        self.assertEqual((settled.history[-1].se, settled.history[-1].nlr), (49, 49))
+
     def test_a_net_positive_but_lopsided_drift_still_ends_in_strikes(self):
         """+1/+2 gains three points a tick overall and is still bombed -- imbalance is what kills."""
         forecast = project(0, 0, (1, 2), ticks=600)
