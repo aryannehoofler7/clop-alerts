@@ -110,6 +110,11 @@ class AlertCategorySettings:
     market_orders: bool = True
     #: Goods from market.goods that are switched on, in the order the file lists them.
     market_goods: Tuple[WatchedGood, ...] = ()
+    #: The one alert that ships OFF, hence the odd default among these. A building correction is
+    #: nearly always the player's own building work reaching the sheet a minute later, and every
+    #: alert here is a modal dialog that stops polling until it is dismissed. Off, the corrections
+    #: are printed instead -- see ``sync_sheet_step``.
+    building_corrections: bool = False
 
 
 @dataclass(frozen=True)
@@ -367,6 +372,9 @@ def load_settings(path: Path) -> MonitorSettings:
         news=boolean_setting(alerts_value, "alerts", "news", True),
         reports=boolean_setting(alerts_value, "alerts", "reports", True),
         market_orders=boolean_setting(alerts_value, "alerts", "market_orders", True),
+        building_corrections=boolean_setting(
+            alerts_value, "alerts", "building_corrections", False
+        ),
     )
 
     wav_path: Optional[Path] = None
@@ -2192,12 +2200,14 @@ def sync_sheet_step(
     overview_html: Optional[str] = None,
     stock: Optional[Stockpiles] = None,
     last_synced: Optional[str] = None,
+    *,
+    alerts: AlertCategorySettings = AlertCategorySettings(),
 ) -> Optional[str]:
     """Sync the nation's tab from overview.php, after the regular alerting.
 
     Three syncs off one page fetch, in this order:
 
-    1. **Buildings** -- reconcile the have/disabled counts and pop up any corrections made.
+    1. **Buildings** -- reconcile the have/disabled counts and report any corrections made.
     2. **Stockpiles** -- snapshot the nation tab's six goods and stamp its timestamp.
     3. **Dashboard** -- write the nation's own column on the alliance-wide tab: all 31 goods and
        the six status rows.
@@ -2295,10 +2305,23 @@ def sync_sheet_step(
         else:
             corrections = reconcile(batched, nation, overview, columns)
             if corrections:
-                notifier.notify(
-                    "Building counts corrected on the sheet:\n\n"
-                    + "\n".join(f"- {correction.describe()}" for correction in corrections)
-                )
+                # Printed rather than popped up unless asked for. A dialog here is modal, so it
+                # stops the monitor over what is nearly always the player's own building work
+                # reaching the sheet a poll later -- and dismissing it throws the fetched page
+                # away on top of that. The terminal line is not optional either: with the dialog
+                # off, the scrollback is the only remaining record that the sheet and the game
+                # ever disagreed. Only one channel is used, so opting in does not double it.
+                if alerts.building_corrections:
+                    notifier.notify(
+                        "Building counts corrected on the sheet:\n\n"
+                        + "\n".join(f"- {correction.describe()}" for correction in corrections)
+                    )
+                else:
+                    print(
+                        "Building counts corrected on the sheet: "
+                        + "; ".join(correction.describe() for correction in corrections),
+                        flush=True,
+                    )
 
         # A successful snapshot is deliberately silent: it is a refresh, not an event, and the
         # player already knows they traded.
@@ -2799,6 +2822,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             overview_html,
                             stockpiles,
                             sheet_synced,
+                            alerts=settings.alerts,
                         )
                     except SheetTabMissing as error:
                         notifier.notify_failure(

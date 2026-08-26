@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline unit tests for buildings.py and building_map.py -- no network."""
 
+import contextlib
+import io
 import unittest
 
 import buildings
@@ -601,6 +603,25 @@ class SyncCacheTests(unittest.TestCase):
 
 class SyncSheetStepTests(unittest.TestCase):
     def test_corrections_alert_and_write(self):
+        from clop_monitor import AlertCategorySettings, sync_sheet_step
+
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Basic Mine")] = 8   # overview says 10 (1 disabled)
+        sheet = FakeSheet(col_a, col_b)
+        notifier = FakeNotifier()
+        sync_sheet_step(
+            FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier,
+            alerts=AlertCategorySettings(building_corrections=True),
+        )
+        self.assertEqual(len(notifier.alerts), 1)
+        self.assertIn("Basic Mine have 8 -> 10", notifier.alerts[0])
+        self.assertEqual(notifier.failures, [])
+        self.assertTrue(building_writes(sheet))
+
+    def test_a_correction_is_written_and_printed_but_does_not_pop_up(self):
+        # The shipped default. A dialog is modal, so a correction the player caused a minute ago by
+        # building something would stop the monitor until it was dismissed.
         from clop_monitor import sync_sheet_step
 
         col_a, names = full_column_a()
@@ -608,11 +629,63 @@ class SyncSheetStepTests(unittest.TestCase):
         col_b[8 + names.index("Basic Mine")] = 8   # overview says 10 (1 disabled)
         sheet = FakeSheet(col_a, col_b)
         notifier = FakeNotifier()
-        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
-        self.assertEqual(len(notifier.alerts), 1)
-        self.assertIn("Basic Mine have 8 -> 10", notifier.alerts[0])
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(notifier.alerts, [])
         self.assertEqual(notifier.failures, [])
+        # The cells are still corrected -- only the reporting channel changed.
         self.assertTrue(building_writes(sheet))
+        # ...and the drift is still on the record, because the scrollback is now the only place
+        # it appears at all.
+        self.assertIn("Basic Mine have 8 -> 10", printed.getvalue())
+
+    def test_a_poll_that_corrects_nothing_prints_nothing(self):
+        from clop_monitor import sync_sheet_step
+
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Bakery")] = 2
+        col_b[8 + names.index("Basic Mine")] = 10
+        col_b[8 + names.index("Gem Mine")] = 1
+        col_b[57 + names.index("Basic Mine")] = 1
+        sheet = FakeSheet(col_a, col_b)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", FakeNotifier())
+        self.assertNotIn("corrected", printed.getvalue())
+
+    def test_switching_the_alert_on_pops_up_instead_of_printing(self):
+        # Both channels would double every correction in the scrollback of whoever opted in.
+        from clop_monitor import AlertCategorySettings, sync_sheet_step
+
+        col_a, names = full_column_a()
+        col_b = [""] * 130
+        col_b[8 + names.index("Basic Mine")] = 8
+        sheet = FakeSheet(col_a, col_b)
+        notifier = FakeNotifier()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sync_sheet_step(
+                FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier,
+                alerts=AlertCategorySettings(building_corrections=True),
+            )
+        self.assertIn("Basic Mine have 8 -> 10", notifier.alerts[0])
+        self.assertNotIn("Basic Mine have 8 -> 10", printed.getvalue())
+
+    def test_a_layout_problem_still_pops_up_with_corrections_silenced(self):
+        # Not a correction: it means cells were NOT written, so the sheet is knowingly left
+        # disagreeing with the game. That is the state worth interrupting for.
+        from clop_monitor import sync_sheet_step
+
+        col_a, _ = full_column_a()
+        col_a[7] = "not the Building header"      # row 8 was the header
+        sheet = FakeSheet(col_a, [""] * 130)
+        notifier = FakeNotifier()
+        sync_sheet_step(FakeClient(LOGGED_IN_OVERVIEW), sheet, "T", notifier)
+        self.assertEqual(len(notifier.failures), 1)
+        self.assertIn("Building sync skipped", notifier.failures[0])
+        self.assertEqual(building_writes(sheet), [])
 
     def test_stockpile_snapshot_is_stamped_but_never_popped_up(self):
         from clop_monitor import sync_sheet_step

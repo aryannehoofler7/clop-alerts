@@ -9,7 +9,9 @@
     "alliance_messages": true,
     "news": true,
     "reports": true,
-    "market_orders": true
+    "market_orders": true,
+    "building_corrections": false,
+    "_building_corrections_help": "The one alert that ships off. When your building counts drift from the game the monitor always corrects the sheet; this only decides how it tells you. Left false it prints one line to the terminal and keeps polling. Set true and it raises the usual blocking dialog instead, listing every have and disabled count it changed. Off is the default because a correction is nearly always your own building work reaching the sheet a poll later, and a dialog stops the monitor until you dismiss it. A sheet layout or mapping problem - where cells were NOT written - always pops up regardless of this setting."
   },
   "sound": {
     "wav_path": "sounds/twilight-clock-is-ticking.wav",

@@ -621,6 +621,7 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "news": True,
                             "reports": True,
                             "market_orders": True,
+                            "building_corrections": False,
                         },
                         "sound": {
                             "wav_path": None,
@@ -650,6 +651,7 @@ class SettingsDefaultsTests(unittest.TestCase):
                             "news": True,
                             "reports": True,
                             "market_orders": True,
+                            "building_corrections": False,
                         },
                         "sound": {
                             "wav_path": None,
@@ -714,6 +716,35 @@ class SettingsDefaultsTests(unittest.TestCase):
             settings = load_settings(path)
         self.assertEqual(settings.alerts.report_ignore, ())
         self.assertNotIn("reports.ignore", settings.defaults_used)
+
+    def test_building_corrections_default_to_no_popup(self):
+        # The one alert that ships off. A correction is nearly always the player's own building
+        # work catching up, and the dialog for it is modal.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text("{}", encoding="utf-8")
+            settings = load_settings(path)
+        self.assertFalse(settings.alerts.building_corrections)
+        self.assertIn("alerts.building_corrections", settings.defaults_used)
+
+    def test_building_corrections_can_be_switched_on(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps({"alerts": {"building_corrections": True}}), encoding="utf-8"
+            )
+            settings = load_settings(path)
+        self.assertTrue(settings.alerts.building_corrections)
+        self.assertNotIn("alerts.building_corrections", settings.defaults_used)
+
+    def test_building_corrections_must_be_true_or_false(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps({"alerts": {"building_corrections": "yes"}}), encoding="utf-8"
+            )
+            with self.assertRaises(MonitorError):
+                load_settings(path)
 
     def test_report_ignore_defaults_to_nothing_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3975,6 +4006,19 @@ class SettingsChangeCompletenessTests(unittest.TestCase):
             set(self.COMPARED) | set(self.NOT_COMPARED),
         )
 
+    def test_building_corrections_reloads_as_an_alerts_change(self):
+        # It rides on the plain alerts comparison rather than being held aside like
+        # report_ignore and market_goods, so editing it mid-run takes effect on the next poll.
+        self.assertEqual(
+            clop_monitor.settings_changes(
+                clop_monitor.MonitorSettings(),
+                clop_monitor.MonitorSettings(
+                    alerts=AlertCategorySettings(building_corrections=True)
+                ),
+            ),
+            ("alerts",),
+        )
+
     def test_every_compared_field_actually_registers_a_change(self):
         base = clop_monitor.MonitorSettings()
         for name, value in self.COMPARED.items():
@@ -5162,8 +5206,10 @@ class PageReconciledAgainstIsNewerThanTheDialogTests(SettingsReloadThroughMainTe
             fetched.append(page)
             return page, f"stock-{page}"
 
-        def fake_step(client, sheet, nation, notifier, overview_html=None, stock=None, last=None):
-            del sheet, nation, notifier, stock, last
+        def fake_step(
+            client, sheet, nation, notifier, overview_html=None, stock=None, last=None, **kwargs
+        ):
+            del sheet, nation, notifier, stock, last, kwargs
             # Mirrors the real step: no page handed in means it reads one for itself.
             if overview_html is None:
                 overview_html, _ = fake_read(client)

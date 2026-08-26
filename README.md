@@ -122,7 +122,9 @@ choose alert categories and sound behaviour:
     "alliance_messages": true,
     "news": true,
     "reports": true,
-    "market_orders": true
+    "market_orders": true,
+    "building_corrections": false,
+    "_building_corrections_help": "The one alert that ships off. When your building counts drift from the game the monitor always corrects the sheet; this only decides how it tells you. Left false it prints one line to the terminal and keeps polling. Set true and it raises the usual blocking dialog instead."
   },
   "sound": {
     "wav_path": "sounds/twilight-clock-is-ticking.wav",
@@ -227,11 +229,15 @@ in the file rather than deleting it; that is an ordinary edit and is applied lik
 `--base-url` and the rest — are process arguments rather than settings, and the credentials in `.env`
 are read once. Changing any of those means stopping the monitor with `Ctrl+C` and starting it again.
 
-All five alert categories default to enabled. A disabled category is still read and, when file
-persistence is enabled, included in the saved snapshot; it does not produce a terminal message,
-popup, sound, or webhook call. `market_orders` is the one exception: disabling it stops the market
-work rather than discarding its result, because that work costs a request per watched good on every
-poll.
+The five game-content alert categories default to enabled. A disabled category is still read and,
+when file persistence is enabled, included in the saved snapshot; it does not produce a terminal
+message, popup, sound, or webhook call. `market_orders` is the one exception: disabling it stops the
+market work rather than discarding its result, because that work costs a request per watched good on
+every poll.
+
+`building_corrections` is the sixth, and the only one that defaults to **off**. It is not a category
+of news from the game but a switch on how the sheet sync reports itself — see [Building
+counts](#building-counts).
 
 ### Ignoring routine reports
 
@@ -967,8 +973,26 @@ and holds nothing, so writing from one would wipe your tab and mark it freshly c
 
 The monitor reads your building counts from `overview.php` and corrects your nation tab to match. It
 updates only the cells that are wrong — the **have** count in column B and, in the `DISABLED:` region
-lower down, the **disabled** count — and then pops up a dialog listing the corrections it made (e.g.
-`Basic Mine have 8 -> 10`). Buildings you no longer own are set back to 0.
+lower down, the **disabled** count. Buildings you no longer own are set back to 0.
+
+**The correction is silent by default.** It prints one line to the terminal and the monitor carries
+straight on:
+
+```
+Building counts corrected on the sheet: Basic Mine have 8 -> 10; Basic Mine disabled 0 -> 1
+```
+
+It does not pop up, because a dialog here is modal — it would stop the monitor over what is nearly
+always your own building work reaching the sheet a poll later, and dismissing it costs an extra
+overview fetch on top (see [A dialog freezes the monitor](#why-the-corrections-can-arrive-over-several-polls)).
+If you would rather be interrupted, set `"building_corrections": true` under `alerts` and you get the
+old blocking dialog listing every count it changed instead of the terminal line. Either way the cells
+are corrected identically; only the reporting changes.
+
+A **layout or mapping problem** always pops up regardless of that setting, because it means the cells
+were *not* written — the sheet is knowingly left disagreeing with the game, which is the state worth
+interrupting for. See [Building corrections are silent by
+default](docs/2026-08-27-silent-building-corrections-design.md).
 
 The building names on `overview.php` differ from the sheet's column A (the game calls it
 `Basic Copper Mine`, the sheet says `Basic Mine`), and one sheet row can stand for several game
@@ -1055,8 +1079,8 @@ A few things worth knowing before you read those cells:
   instead of eleven — stamping `W10` every poll while still skipping the thirteen value writes. Say
   the word; it is a small change.
 - **A routine update is silent.** No dialog, no sound, nothing in the way. Only problems interrupt
-  you. (Building *corrections* still pop up, because those are the monitor disagreeing with the
-  sheet rather than simply refreshing it.)
+  you. (Building *corrections* are silent too by default — they print a terminal line rather than
+  popping up. See [Building counts](#building-counts).)
 - **A good you hold none of is written back as `0`**, not left alone. The game only lists goods you
   actually have, so an absent good means zero, and the sheet is made to say so.
 - **`NEED`, `BUY` and `TICKS` are never touched.** Those columns are yours — your formulas and your
